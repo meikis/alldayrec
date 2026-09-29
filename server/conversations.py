@@ -14,8 +14,10 @@ import json
 import time
 from pathlib import Path
 
-GAP_S, MIN_S, MAX_S, IDLE_S = 120, 10, 4 * 3600, 20 * 60
-IGNORE = {"远处", "far", "不确定", "未知", "unknown", "S?"}  # S?: too short for a voiceprint
+# GAP_S: gpt-6-luna judged 180 pauses from 112 days of history: 2-5 min apart 62 % were still the same
+# conversation, 5-10 min 45 %, 10-20 min 43 % (artifacts/record/history/gap_judge-*.jsonl)
+GAP_S, MIN_S, MAX_S, IDLE_S = 300, 10, 4 * 3600, 20 * 60
+IGNORE = {"远处", "far", "不确定", "未知", "unknown", "S?", "外放媒体"}  # S?: too short for a voiceprint; 外放媒体: old history labels
 P = dt.datetime.fromisoformat
 
 
@@ -87,8 +89,8 @@ if __name__ == "__main__":
     T = lambda m, s=0: (dt.datetime(2026, 9, 29, 10) + dt.timedelta(minutes=m, seconds=s)).isoformat()
     rows = [dict(start=T(0), end=T(0, 20), speaker="我"), dict(start=T(1), end=T(1, 20), speaker="S1"),
             dict(start=T(2, 30), end=T(2, 40), speaker="远处"),      # far-field inside: kept, does not extend
-            dict(start=T(5), end=T(5, 5), speaker="我"),             # 3 min 40 s after the last real sentence: new one
-            dict(start=T(5, 7), end=T(5, 9), speaker="我"),          # only 7 s of speech: dropped
+            dict(start=T(6, 30), end=T(6, 35), speaker="我"),          # 5 min 10 s after the last real sentence: new one
+            dict(start=T(6, 37), end=T(6, 39), speaker="我"),         # only 7 s of speech: dropped
             dict(start=T(20), end=T(20, 30), speaker="S2")]
     cs = split(rows)
     assert [len(c["sentences"]) for c in cs] == [3, 1], cs

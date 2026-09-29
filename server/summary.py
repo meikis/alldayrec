@@ -11,7 +11,7 @@ import urllib.request
 
 MIN_SPEECH_S = 60
 PROMPT_VERSION = 2  # 2: tags
-SYSTEM = """你在整理一段现场录音转写出来的对话。每行是「[时间] 说话人: 文本」。说话人标签来自声纹聚类：「我」是录音者本人，S1、S2… 是其他人，同一个人可能被拆成多个标签，S? 是太短没认出来的句子。转写有错别字和同音误识别，按意图理解。
+SYSTEM = """你在整理一段现场录音转写出来的对话。每行是「[时间] 说话人: 文本」。说话人标签来自声纹聚类：「我」是录音者本人，S1、S2… 是其他人，同一个人可能被拆成多个标签，S? 是太短没认出来的句子。转写有错别字和同音误识别，按意图理解。标「我(口述→某应用)」的行是我在对电脑语音输入（多数是给 AI 下指令），不是说给在场的人听的：写成我让 AI 做了什么，不要当成和别人的对话。
 只输出一个 JSON 对象：
 {"title": "不超过 20 字的标题",
  "summary": "3~6 句话的摘要，第一人称写「我」",
@@ -22,13 +22,17 @@ SYSTEM = """你在整理一段现场录音转写出来的对话。每行是「[�
 没有就给空数组，不编造原文里没有的内容。"""
 
 
+KIND_NOTE = {"口述": "\n这段几乎全是我对电脑的语音输入：summary 写成这段时间我在让 AI 做什么、推进到哪一步、卡在哪里；todos 只收我明确要自己做或要 AI 做的事。"}
+
+
 def transcript(rows: list[dict]) -> str:
-    return "\n".join(f'[{r["start"][11:19]}] {r.get("speaker") or "S?"}: {r["text"]}' for r in rows if r.get("text"))
+    who = lambda r: (r.get("speaker") or "S?") + (f'(口述→{r["dictation"]})' if r.get("dictation") else "")
+    return "\n".join(f'[{r["start"][11:19]}] {who(r)}: {r["text"]}' for r in rows if r.get("text"))
 
 
-def chat(text: str, known_tags: list[str]) -> tuple[dict, dict]:
+def chat(text: str, known_tags: list[str], kind: str = "对话") -> tuple[dict, dict]:
     """(parsed result, raw response); raises on HTTP errors and on a reply that is not JSON."""
-    system = SYSTEM + ("\n已有标签：" + "、".join(known_tags) if known_tags else "")
+    system = SYSTEM + KIND_NOTE.get(kind, "") + ("\n已有标签：" + "、".join(known_tags) if known_tags else "")
     req = {"model": os.environ["LLM_MODEL"], "response_format": {"type": "json_object"},
            "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}]}
     r = urllib.request.urlopen(urllib.request.Request(
@@ -55,7 +59,7 @@ def summarize(conv: dict, rows: list[dict], known_tags: list[str] = ()) -> dict:
     if conv.get("speech_s", 0) < MIN_SPEECH_S or not rows:
         first = next((r["text"] for r in rows if r.get("text")), "")
         return {**base, "status": "done", "model": None, "title": first[:20], "summary": "", "tags": [], "topics": [], "todos": [], "decisions": []}
-    res, raw = chat(transcript(rows), list(known_tags))
+    res, raw = chat(transcript(rows), list(known_tags), conv.get("kind", "对话"))
     res = anchor(res, rows)
     return {**base, "status": "done", "model": raw.get("model"), "usage": raw.get("usage"),
             **{k: res.get(k) or ("" if k in ("title", "summary") else []) for k in ("title", "summary", "tags", "topics", "todos", "decisions")}}

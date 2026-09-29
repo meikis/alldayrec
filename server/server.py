@@ -597,6 +597,9 @@ def tag_counts() -> dict[str, int]:
     return _tags["counts"]
 
 
+SUMMARY_WORKERS = int(os.environ.get("SUMMARY_WORKERS", "6"))  # the gateway answered 8 parallel calls without 429; 10 got 429s
+
+
 async def summary_worker():
     """Queued first: conversations closed while the service was down, summaries that never finished,
     and summaries from an older prompt (a new field such as tags reaches the old ones too)."""
@@ -606,6 +609,10 @@ async def summary_worker():
             queue_summary(c)
         elif s["status"] == "done" and s.get("prompt_version", 0) < summary.PROMPT_VERSION:
             queue_summary(c, keep=True)
+    await asyncio.gather(*(summarize_loop() for _ in range(SUMMARY_WORKERS)))
+
+
+async def summarize_loop():
     while True:
         c = await summary_q.get()
         for delay in (10, 60, 300, None):
@@ -1037,14 +1044,14 @@ async def days():
 
 
 @app.get("/api/search")
-async def search(q: str = "", tag: str = "", before: str = "", limit: int = 30):
+async def search(q: str = "", tag: str = "", kind: str = "", before: str = "", limit: int = 30):
     """Closed conversations newest first, filtered by a tag and by words in the title, summary, tags or
     todos (and in the transcript when the summary does not match); `before` is the start of the last one
     already shown."""
     out, cache = [], {}
     for c in all_conversations():
         s = c["summary"] or {}
-        if before and c["start"] >= before or tag and tag not in (s.get("tags") or []):
+        if before and c["start"] >= before or tag and tag not in (s.get("tags") or []) or kind and c.get("kind", "对话") != kind:
             continue
         if q:
             meta = json.dumps([s.get(k) for k in ("title", "summary", "tags", "todos", "decisions")], ensure_ascii=False)

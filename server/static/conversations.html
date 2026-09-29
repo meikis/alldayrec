@@ -35,6 +35,10 @@
   .tag.on { background: var(--accent); border-color: var(--accent); color: #fff; }
   .card .tag { cursor: inherit; margin-right: 4px; padding: 0 8px; }
   .card .tagline { margin-top: 6px; }
+  .kinds { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-top: 8px; }
+  .kinds button { border: 0; border-radius: 0; padding: 3px 14px; color: #4a4f63; }
+  .kinds button.on { background: var(--accent); color: #fff; }
+  .dict { font-size: 11px; color: #9a6b1f; border: 1px solid #ecd9b0; border-radius: 4px; padding: 0 4px; margin-right: 6px; white-space: nowrap; }
   #empty { color: var(--muted); text-align: center; padding: 60px 0; }
   h2 { font-size: 20px; margin: 16px 0 4px; }
   h3 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 22px 0 6px; }
@@ -72,7 +76,7 @@ const convId = location.pathname.startsWith("/c/") ? decodeURIComponent(location
 
 // ---- list: newest first, 30 at a time as the end scrolls into view; search words and one tag filter it
 const params = new URLSearchParams(location.search);
-let q = params.get("q") || "", tag = params.get("tag") || "", before = "", lastDay = "", loading = false, done = false, results;
+let q = params.get("q") || "", tag = params.get("tag") || "", kind = params.get("kind") ?? "对话", before = "", lastDay = "", loading = false, done = false, results;
 const more = el("button", null, "更早"); more.id = "more"; more.onclick = () => page();
 new IntersectionObserver(es => es[0].isIntersecting && page()).observe(more);
 
@@ -80,8 +84,13 @@ async function list() {
   main.textContent = "";
   const find = el("div", "find"), input = el("input"); input.type = "search"; input.placeholder = "搜索标题、摘要、待办、原文"; input.value = q;
   let timer; input.oninput = () => { clearTimeout(timer); timer = setTimeout(() => { q = input.value.trim(); restart(); }, 300); };
-  const chips = el("div", "tags");
-  find.append(input, chips); results = el("div");
+  const chips = el("div", "tags"), kinds = el("div", "kinds");
+  for (const [k, label] of [["对话", "对话"], ["口述", "口述"], ["", "全部"]]) {  // 口述: mostly me dictating to a computer
+    const b = el("button", k === kind ? "on" : "", label);
+    b.onclick = () => { kind = k; kinds.querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); restart(); };
+    kinds.append(b);
+  }
+  find.append(input, kinds, chips); results = el("div");
   main.append(find, results, more);
   const counts = await (await fetch("/api/tags")).json();
   for (const [t, n] of Object.entries(counts).slice(0, 40)) {
@@ -92,9 +101,10 @@ async function list() {
   await restart();
 }
 async function restart() {
-  history.replaceState(null, "", "/conversations" + (q || tag ? "?" + new URLSearchParams({ ...(q && { q }), ...(tag && { tag }) }) : ""));
+  const ps = new URLSearchParams({ ...(q && { q }), ...(tag && { tag }), ...(kind !== "对话" && { kind }) });
+  history.replaceState(null, "", "/conversations" + (ps.size ? "?" + ps : ""));
   results.textContent = ""; before = ""; lastDay = ""; done = false;
-  if (!q && !tag) {  // the open conversation is not in the index yet
+  if (!q && !tag && kind === "对话") {  // the open conversation is not in the index yet
     const st = await (await fetch("/api/status")).json();
     if (st.conversation) results.append(card({ ...st.conversation, state: "open" }));
   }
@@ -103,10 +113,10 @@ async function restart() {
 async function page() {
   if (loading || done) return;
   loading = true; more.textContent = "加载中…";
-  const want = { q, tag, before };
-  const cs = await (await fetch("/api/search?" + new URLSearchParams({ q, tag, before, limit: 30 }))).json();
+  const want = { q, tag, kind, before };
+  const cs = await (await fetch("/api/search?" + new URLSearchParams({ q, tag, kind, before, limit: 30 }))).json();
   loading = false;
-  if (want.q !== q || want.tag !== tag || want.before !== before) return;  // a newer search started meanwhile
+  if (want.q !== q || want.tag !== tag || want.kind !== kind || want.before !== before) return;  // a newer search started meanwhile
   for (const c of cs) {
     const d = c.start.slice(0, 10);
     if (d !== lastDay) { results.append(el("div", "day", d)); lastDay = d; }
@@ -126,7 +136,7 @@ function card(c) {
   const a = el("a", "card"); a.href = "/c/" + c.id;
   const s = c.summary || {};
   const todos = (s.todos || []).length;
-  a.append(el("div", "meta", `${hhmm(c.start)}–${hhmm(c.end)} · ${mins(c)} 分钟 · ${(c.participants || []).join("、") || "—"}${todos ? ` · ${todos} 条待办` : ""}`));
+  a.append(el("div", "meta", `${c.kind === "口述" ? "口述 · " : ""}${hhmm(c.start)}–${hhmm(c.end)} · ${mins(c)} 分钟 · ${(c.participants || []).join("、") || "—"}${todos ? ` · ${todos} 条待办` : ""}`));
   a.append(el("div", "title" + (s.status === "failed" ? " bad" : s.status === "done" ? "" : " muted"),
     s.status === "done" ? (s.title || "（无标题）") : s.status === "failed" ? "摘要生成失败" : "摘要生成中…"));
   if (s.summary) a.append(el("div", "gist", s.summary));
@@ -194,7 +204,10 @@ function line(s) {
   const row = el("div", "row"); row.dataset.start = s.start;
   const t = el("div", "t"), btn = el("button", "play", "▶"); btn.onclick = () => play(btn, s); t.append(btn, hhmmss(s.start));
   const who = s.speaker || "—";
-  row.append(t, el("div", "spk" + (who === "我" ? " me" : who !== "S?" && who !== "—" ? " other" : ""), who), el("div", "text", s.text || "（空）"));
+  const text = el("div", "text");
+  if (s.dictation) text.append(el("span", "dict", "口述→" + s.dictation));
+  text.append(s.text || "（空）");
+  row.append(t, el("div", "spk" + (who === "我" ? " me" : who !== "S?" && who !== "—" ? " other" : ""), who), text);
   return row;
 }
 let current = null;
