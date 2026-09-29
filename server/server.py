@@ -471,7 +471,7 @@ class LocalDiarizer:
 
 app = FastAPI()
 clients: set[WebSocket] = set()
-state = {"follower": None, "asr_ms": None, "errors": 0, "no_speech": 0, "commit": "", "refine": None, "device": None,
+state = {"follower": None, "chunks": None, "audio_q": None, "asr_ms": None, "errors": 0, "no_speech": 0, "commit": "", "refine": None, "device": None,
          "conversation": None, "last_speech": None}
 
 
@@ -663,10 +663,14 @@ async def pipeline(directory: Path, from_start: bool, key: str):
         stalled = (None, time.monotonic())  # (audio_end, when it was first seen there)
         while True:
             await asyncio.sleep(REFINE_EVERY_S)
-            try:
-                state["device"] = current_device(follower.dir)
-            except Exception:
-                pass
+            c = state["chunks"]
+            if c and time.time() - c["at"] < SESSION_STALE_S:
+                state["device"] = c["device"]
+            else:
+                try:
+                    state["device"] = current_device(follower.dir)
+                except Exception:
+                    pass
             while await refine_pass():  # timer-driven: silence also advances, so conversations close on time
                 pass
             end = follower.audio_end
@@ -679,7 +683,16 @@ async def pipeline(directory: Path, from_start: bool, key: str):
 
     asyncio.create_task(transcribe_worker())
     asyncio.create_task(refine_loop())
-    async for t, x in follower.chunks():
+    audio_q: asyncio.Queue = asyncio.Queue()
+    state["audio_q"] = audio_q
+
+    async def follow():
+        async for t, x in follower.chunks():
+            await audio_q.put((t, x))
+
+    asyncio.create_task(follow())
+    while True:
+        t, x = await audio_q.get()  # from the followed file, or /api/chunks
         for u in seg.push(t, x):
             state["last_speech"] = u[1]  # the refiner skips diarizing stretches with no VAD speech
             if FIRST_LAYER:
@@ -732,15 +745,42 @@ async def record_page():
     return FileResponse(HERE / "static/record.html")
 
 
+def busy(device: str):
+    """One stream at a time: a second device would silently take the pipeline over."""
+    cur = newest(state["dir"])
+    if cur and cur.suffix == ".webm" and time.time() - cur.stat().st_mtime < SESSION_STALE_S:
+        who = json.loads(cur.with_suffix(".json").read_text())["device"]
+        if who != device:
+            raise HTTPException(409, f"{who} 正在录音，服务端同一时刻只收一路")
+    c = state["chunks"]
+    if c and time.time() - c["at"] < SESSION_STALE_S and c["device"] != device:
+        raise HTTPException(409, f"{c['device']} 正在录音，服务端同一时刻只收一路")
+
+
+@app.post("/api/chunks")
+async def chunk(request: Request, device: str, start: int):
+    """One self-contained audio file (the app's 20 s Opus pieces), `start` its device time in unix ms;
+    it goes straight into the pipeline, anchored at that time, so gaps between pieces do not drift."""
+    busy(device)
+    body = await request.body()
+    pcm = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "s16le", "-ac", "1",
+                                                   "-ar", str(SR), "pipe:1"], input=body, capture_output=True)
+    if pcm.returncode or len(pcm.stdout) < 2 * SR // 10:
+        raise HTTPException(400, f"could not decode: {pcm.stderr.decode()[-200:]}")
+    x = np.frombuffer(pcm.stdout[:len(pcm.stdout) // 2 * 2], np.int16)
+    t = dt.datetime.fromtimestamp(start / 1000)
+    state["chunks"] = {"device": device, "at": time.time()}
+    if state["follower"]:
+        state["follower"].audio_end = t + dt.timedelta(seconds=len(x) / SR)
+    await state["audio_q"].put((t, x))
+    return {"seconds": round(len(x) / SR, 2)}
+
+
 @app.post("/api/record")
 async def record_start(device: str = "phone"):
     """A browser recording session: the file its chunks get appended to, named by the server clock like
     the recorder's files, and the sidecar current_device reads."""
-    cur = newest(state["dir"])
-    if cur and cur.suffix == ".webm" and time.time() - cur.stat().st_mtime < SESSION_STALE_S:
-        who = json.loads(cur.with_suffix(".json").read_text())["device"]
-        if who != device:  # the server follows one stream; a second device would silently take it over
-            raise HTTPException(409, f"{who} 正在录音，服务端同一时刻只收一路")
+    busy(device)
     stem = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     path = state["dir"] / f"{stem}.webm"
     if path.exists():
