@@ -354,14 +354,16 @@ def clip_turns(segs: list[dict], since_s: float) -> list[dict]:
 
 
 def final_rows(segs: list[dict], names: dict, t0: dt.datetime, win_s: float, conf: dict | None = None,
-               since: float = EDGE_S) -> tuple[dt.datetime, dt.datetime, list[dict]]:
+               since: float = EDGE_S, at=None) -> tuple[dt.datetime, dt.datetime, list[dict]]:
     """Second pass: the diarized speaker turns of one window become the final rows for [from, to).
 
     VAD utterances glue fast back-and-forth into one line (no pause to cut at), so the final
     layer is built from the diarized turns instead. Consecutive pieces of one speaker are joined;
     rows near the window edges may be cut mid-turn and are left for the next, later window.
     `since` (seconds into the window) is where the previous pass stopped: rows before it are
-    already final and never rewritten.
+    already final and never rewritten. `at` maps seconds into the window to wall time; the default
+    is linear from t0, the live server passes the segmenter's clock (a new session's file starting
+    inside the window jumps it).
     """
     rows = []
     for g in sorted(segs, key=lambda g: g["start_ms"]):
@@ -374,7 +376,7 @@ def final_rows(segs: list[dict], names: dict, t0: dt.datetime, win_s: float, con
     keep = [r for r in rows if r["a"] >= lo - 0.05]  # turns are clipped to `since` by the caller
     cut = next((i for i, r in enumerate(keep) if r["b"] > hi), len(keep))
     to = keep[cut]["a"] if cut < len(keep) else hi
-    at = lambda s: t0 + dt.timedelta(seconds=s)
+    at = at or (lambda s: t0 + dt.timedelta(seconds=s))
     out = [dict(id="f" + at(r["a"]).strftime("%Y%m%d%H%M%S%f")[:17], start=at(r["a"]).isoformat(timespec="milliseconds"),
                 end=at(r["b"]).isoformat(timespec="milliseconds"), speaker=r["speaker"], text=r["text"].strip(),
                 speaker_confidence=(conf or {}).get(r["speaker"]), state="final")
@@ -580,10 +582,12 @@ async def pipeline(directory: Path, from_start: bool, key: str):
             nonlocal done_to
             t_run = time.perf_counter()
             t0, x = seg.window(REFINE_WINDOW_S, done_to - dt.timedelta(seconds=REFINE_CONTEXT_S) if done_to else None)
-            since = EDGE_S if done_to is None else max(EDGE_S, (done_to - t0).total_seconds())
+            a0 = seg.sample_at(t0)
+            at = lambda s: seg.time_at(a0 + int(s * SR))  # the window may span a session boundary, where the clock jumps
+            since = EDGE_S if done_to is None else max(EDGE_S, (seg.sample_at(done_to) - a0) / SR)
             if len(x) / SR - since < EDGE_S + 10:
                 return False
-            hi = t0 + dt.timedelta(seconds=len(x) / SR - EDGE_S)
+            hi = at(len(x) / SR - EDGE_S)
             if state["last_speech"] is None or state["last_speech"] <= (done_to or t0):
                 # silence: nothing to diarize, but the clock must advance so a conversation can close on time
                 done_to = hi
@@ -621,7 +625,12 @@ async def pipeline(directory: Path, from_start: bool, key: str):
             by_label = {}
             for k, c in conf.items():  # final_rows keys confidence by label; two clusters may share one
                 by_label[labels[k]] = max(by_label.get(labels[k], 0.0), c)
-            lo, hi, rows = final_rows(segs, labels, t0, len(x) / SR, by_label, since)
+            lo, hi, rows = final_rows(segs, labels, t0, len(x) / SR, by_label, since, at)
+            with open(DATA / f"{lo.date()}.passes.jsonl", "a") as f:  # every pass's raw engine output, for tracing lost rows
+                f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"), "t0": t0.isoformat(timespec="milliseconds"),
+                                    "since": since, "from": lo.isoformat(timespec="milliseconds"), "to": hi.isoformat(timespec="milliseconds"),
+                                    "labels": labels, "scores": {k: round(v, 3) for k, v in score.items()}, "segs": all_segs},
+                                   ensure_ascii=False) + "\n")
             for r in rows:
                 r["source"], r["engine"] = device, engine or "stepfun-sse"
             lo_s, hi_s = lo.isoformat(timespec="milliseconds"), hi.isoformat(timespec="milliseconds")
