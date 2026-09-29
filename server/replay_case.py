@@ -6,6 +6,7 @@
 Candidates
   vad            Stream-VAD utterances + StepFun SSE per utterance, no speaker (the live first layer)
   vad-owner      same, each utterance labelled 我 if its CAM++ score against the owner >= OWNER_MIN (per-sentence rule)
+  volc-window    same windows through Volcengine seed-asr-2.0 (streaming API, speaker ids), cached in work/volc/
   cloud-window   every 30 s, last 240 s to StepFun file diarization (via the file-mode ASR service), cluster mean vs owner,
                  final_rows replace the window (the live second layer as designed)
   local-window   same cadence, diarization by sherpa-onnx pyannote-segmentation-3.0 + CAM++ clustering on the Mac,
@@ -144,6 +145,30 @@ def hybrid_segs(utts: list[tuple[float, float]], segs: list[dict], min_piece=0.5
     return out
 
 
+def _volc_window(self, a: float, b: float) -> list[dict]:
+    p = self.work / "volc" / f"{a:.1f}-{b:.1f}.json"
+    if p.exists():
+        return json.load(open(p))
+    p.parent.mkdir(exist_ok=True)
+    import volc_asr
+    for attempt in range(3):
+        try:
+            utts, info = volc_asr.transcribe(self.x[int(a * SR):int(b * SR)])
+            break
+        except Exception as e:
+            print(f"  volc {a:.0f}-{b:.0f} attempt {attempt + 1} failed: {e!r}"[:160], flush=True)
+            time.sleep(5)
+    else:
+        raise RuntimeError(f"volc gave up on {a:.0f}-{b:.0f}")
+    segs = [{"speaker": "SPEAKER_0", **u, "engine": "volc"} for u in utts]
+    print(f"  volc {a:.0f}-{b:.0f}: {info['seconds']} s, {len(segs)} utterances", flush=True)
+    json.dump(segs, open(p, "w"), ensure_ascii=False)
+    return segs
+
+
+Case.volc_window = _volc_window
+
+
 def rows_from_windows(case: Case, spk: Speakers, diar, name: str, need_asr: bool, utts=None):
     """The live second layer: windows of REFINE_WINDOW_S every REFINE_EVERY_S, later windows replace earlier rows."""
     total = len(case.x) / SR
@@ -224,6 +249,10 @@ def run(case: Case, name: str) -> list[dict]:
         def cloud(a, e):
             return case.cloud_diarize(a, e)
         return rows_from_windows(case, spk, cloud, name, need_asr=False)
+    if name == "volc-window":  # Volcengine seed-asr-2.0 streaming API with speaker ids, one connection per window
+        def volc(a, e):
+            return case.volc_window(a, e)
+        return rows_from_windows(case, spk, volc, name, need_asr=False)
     if name in ("local-window", "hybrid-window"):
         d = LocalDiarizer()
 
