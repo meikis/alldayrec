@@ -81,6 +81,7 @@ def current_device(directory: Path) -> str:
     return json.loads(side.read_text())["device"]
 
 
+SESSION_STALE_S = 45  # chunks arrive every 20 s; a session without one for this long has ended
 FORMATS = {".ogg": "ogg", ".webm": "matroska"}   # the recorder's Opus files; the browser page's MediaRecorder stream
 
 
@@ -735,6 +736,11 @@ async def record_page():
 async def record_start(device: str = "phone"):
     """A browser recording session: the file its chunks get appended to, named by the server clock like
     the recorder's files, and the sidecar current_device reads."""
+    cur = newest(state["dir"])
+    if cur and cur.suffix == ".webm" and time.time() - cur.stat().st_mtime < SESSION_STALE_S:
+        who = json.loads(cur.with_suffix(".json").read_text())["device"]
+        if who != device:  # the server follows one stream; a second device would silently take it over
+            raise HTTPException(409, f"{who} 正在录音，服务端同一时刻只收一路")
     stem = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     path = state["dir"] / f"{stem}.webm"
     if path.exists():
