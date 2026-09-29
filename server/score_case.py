@@ -74,20 +74,20 @@ def score(gt, hyp):
         by_gt.append(votes.most_common(1)[0][0] if votes else None)
     labels = sorted({l for l in by_gt if l is not None}, key=str)
     truths = sorted({g["speaker"] for g in gt})
-    # Hungarian on a 2 x n table is just: try all one-to-one assignments of truths onto labels
-    m = {(t, l): sum(1 for g, x in zip(gt, by_gt) if x == l and g["speaker"] == t) for t in truths for l in labels}
-    best, mapping = -1, {}
-    from itertools import permutations
-    for perm in permutations(labels, min(len(labels), len(truths))):
-        cand = dict(zip(perm, truths))
-        s = sum(m[(t, l)] for l, t in cand.items())
-        if s > best:
-            best, mapping = s, cand
+    # one-to-one labels -> truths maximizing agreement (Hungarian); every truth can be matched, however many
+    from scipy.optimize import linear_sum_assignment
+    M = [[sum(1 for g, x in zip(gt, by_gt) if x == l and g["speaker"] == t) for t in truths] for l in labels]
+    mapping = {}
+    if labels:
+        r, c = linear_sum_assignment([[-v for v in row] for row in M])
+        mapping = {labels[i]: truths[j] for i, j in zip(r, c) if M[i][j] > 0}
 
-    def direct(l):
-        return None if l is None else ("我" if l == "我" else "同事")
+    def direct(l):  # 我 vs everyone else, whatever the other truth labels are called
+        return None if l is None else l == "我"
 
     def acc(rows, fn):
+        if fn is direct:
+            return sum(1 for g, x in rows if x is not None and direct(x) == (g["speaker"] == "我")), len(rows)
         ok = sum(1 for g, x in rows if fn(x) == g["speaker"])
         return ok, len(rows)
 

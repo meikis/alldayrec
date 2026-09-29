@@ -8,11 +8,14 @@ dependencies = [
     "uvicorn>=0.32",
     "numpy==1.26.4",
     "torch==2.5.1",
+    "torchaudio==2.5.1",
     "kaldi-native-fbank==1.22.3",
     "fireredvad==0.0.2",
     "sherpa-onnx==1.13.8",
     "sherpa-onnx-core==1.13.8",
     "websockets>=17.1",
+    "scikit-learn>=1.9.1",
+    "scipy>=1.17.1",
 ]
 
 [[tool.uv.index]]
@@ -22,3 +25,4 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]  # the VAD runs on CPU; the PyPI Linux wheel drags in 2 GB of CUDA
+torchaudio = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]  # ReDimNet2's feature layer

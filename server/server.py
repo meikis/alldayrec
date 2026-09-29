@@ -55,7 +55,6 @@ OWNER_MIN = 0.25                           # best cluster must also score this a
 OWNER_SURE = float(os.environ.get("OWNER_SURE", "0.5"))  # any cluster this close to the owner is me too (clustering often splits me in 2-5)
 ASR_PAD_S = 0.4                            # context added around a diarized turn before ASR
 MIN_SPEAKER_S = 2.0                        # a sentence shorter than this opens no new speaker id (noise, "嗯")
-MIN_EMBED_S = 1.0                          # shorter sentences get no voiceprint at all: S?
 LINK_MIN = float(os.environ.get("LINK_MIN", "0.55"))   # cosine to link a window's cluster to a known speaker
 # Per input device: lapel one-on-one wants coarse clusters and easy linking (0.65 split the same person
 # into 3 ids); the far-field MacBook meeting wants finer clusters and stricter linking (0.55 merged
@@ -371,6 +370,22 @@ def clip_turns(segs: list[dict], since_s: float) -> list[dict]:
     return out
 
 
+def label_sentences(dia, embed, segs: list[dict], x: np.ndarray) -> list:
+    """Speaker labels from the conversation clustering, in time order; returns the diarist mark after each
+    sentence (None when too short to embed) so a pass can take back the sentences it leaves open."""
+    marks = []
+    for g in segs:
+        a, b = g["start_ms"] / 1000, g["end_ms"] / 1000
+        g["engine_speaker"] = g.get("speaker")
+        if b - a < 0.3:
+            g["speaker"], g["confidence"] = "S?", 0.0
+            marks.append(None)
+            continue
+        g["speaker"], g["confidence"] = dia.add(embed(x[int(a * SR):int(min(b, a + 15) * SR)]), b - a)
+        marks.append(dia.mark())
+    return marks
+
+
 def final_rows(segs: list[dict], names: dict, t0: dt.datetime, win_s: float, conf: dict | None = None,
                since: float = EDGE_S, at=None) -> tuple[dt.datetime, dt.datetime, list[dict]]:
     """Second pass: the diarized speaker turns of one window become the final rows for [from, to).
@@ -431,29 +446,6 @@ class Speakers:
         if owner is None:
             raise RuntimeError(f"no owner voiceprint for {device!r}; run owner.py")
         return owner
-
-    def sentences(self, segs: list[dict], x: np.ndarray, device: str, reg: "Registry", link: float) -> None:
-        """Sets each sentence's speaker from its own voiceprint, against the conversation's running speakers:
-        no window clustering, so a pass needs no context before the new audio. 我 is relative: the sentence
-        must be closer to the owner than to every other known speaker (an absolute per-sentence owner
-        threshold was 57 % on 09-09, other people's single sentences score as high as mine)."""
-        owner = self.owner_for(device)
-        for g in segs:
-            g["engine_speaker"] = g.get("speaker")
-            a, b = g["start_ms"] / 1000, min(g["end_ms"] / 1000, g["start_ms"] / 1000 + 15)
-            if b - a < MIN_EMBED_S:
-                g["speaker"], g["confidence"] = "S?", 0.0
-                continue
-            e = self.embed(x[int(a * SR):int(b * SR)])
-            me = float(e @ owner)
-            k, sim = reg.best(e)
-            if me >= OWNER_SURE or (me >= OWNER_MIN and me >= sim):
-                g["speaker"], g["confidence"] = "我", round(me, 3)
-            elif sim >= link or b - a >= MIN_SPEAKER_S:
-                g["speaker"], g["confidence"] = reg.assign(e, b - a, link)
-            else:
-                g["speaker"], g["confidence"] = "S?", 0.0
-            g["owner_sim"], g["best"] = round(me, 3), [k, round(sim, 3)]
 
     def label(self, segs: list[dict], x: np.ndarray, device: str) -> tuple[dict, dict, dict, dict]:
         """(cluster -> 我/他人, cluster -> owner score, cluster -> unit mean voiceprint, cluster -> seconds)."""
@@ -603,7 +595,8 @@ async def pipeline(directory: Path, from_start: bool, key: str):
             del recent[:-300]
 
     async def refine_loop():
-        spk, reg, grouper = Speakers(), Registry(), Grouper(path=DATA / "grouper.json")
+        from diarist import Diarist, load_embedder
+        embed, dia, grouper = load_embedder(), Diarist(dict(np.load(DATA / "owner-redimnet2.npz"))), Grouper(path=DATA / "grouper.json")
         if grouper.open:
             log.info("continuing the open conversation from %s", grouper.open["start"])
             note(f"服务启动，接着上次打开的对话 {grouper.open['start'][11:19]}", "state")
@@ -628,7 +621,7 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                 g["text"] = await asr.transcribe(x[max(0, a):b])
 
         def close(c: dict):
-            reg.reset()
+            dia.reset()
             rec = {"id": "c" + c["start"].replace("-", "").replace(":", "").replace("T", "")[:14], "start": c["start"], "end": c["end"],
                    "state": "closed", "participants": c["participants"], "sentences": [r["id"] for r in c["sentences"]],
                    "speech_s": round(c["speech_s"], 1)}
@@ -662,6 +655,7 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                 state["done_to"] = hi
                 return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
             was_open = bool(grouper.open)
+            m0 = dia.mark()
             try:
                 device = state["device"] or current_device(follower.dir)
                 segs = await asyncio.to_thread(local_for(device), x) if local else await asyncio.to_thread(engine_segs, x)
@@ -677,8 +671,9 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                     engine = segs[0]["engine"] if segs else None
                 elif local:  # turns are only cut, not transcribed: ASR the ones this pass will finalize
                     await asyncio.gather(*[transcribe_turn(g, x) for g in segs if g["end_ms"] / 1000 > since])
-                await asyncio.to_thread(spk.sentences, segs, x, device, reg, DEVICE_PARAMS.get(device, {}).get("link", LINK_MIN))
+                marks = await asyncio.to_thread(label_sentences, dia, embed, segs, x)
             except Exception as e:
+                dia.rollback(m0)
                 log.warning("refine failed: %r", e)
                 note(f"这一轮引擎调用失败：{str(e)[:120]}，下一轮重试", "error")
                 state["refine"] = {"error": str(e)[:200]}
@@ -688,10 +683,12 @@ async def pipeline(directory: Path, from_start: bool, key: str):
             for g in segs:  # final_rows keys confidence by label
                 by_label[g["speaker"]] = max(by_label.get(g["speaker"], 0.0), g["confidence"])
             lo, hi, rows = final_rows(segs, labels, t0, len(x) / SR, by_label, since, at)
+            kept = [m for g, m in zip(segs, marks) if m and at(g["start_ms"] / 1000) < hi]  # sentences left open come back next pass
+            dia.rollback(kept[-1] if kept else m0)
             with open(DATA / f"{lo.date()}.passes.jsonl", "a") as f:  # every pass's raw engine output, for tracing lost rows
                 f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"), "t0": t0.isoformat(timespec="milliseconds"),
                                     "since": since, "from": lo.isoformat(timespec="milliseconds"), "to": hi.isoformat(timespec="milliseconds"),
-                                    "segs": segs},  # each sentence carries engine_speaker, owner_sim, best
+                                    "segs": segs},  # each sentence carries engine_speaker and its cluster's owner score (confidence)
                                    ensure_ascii=False) + "\n")
             for r in rows:
                 r["source"], r["engine"] = device, engine or "stepfun-sse"

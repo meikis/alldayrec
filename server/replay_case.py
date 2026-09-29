@@ -7,6 +7,7 @@ Candidates
   vad            Stream-VAD utterances + StepFun SSE per utterance, no speaker (the live first layer)
   vad-owner      same, each utterance labelled 我 if its CAM++ score against the owner >= OWNER_MIN (per-sentence rule)
   volc-window    same windows through Volcengine seed-asr-2.0 (streaming API, speaker ids), cached in work/volc/
+  volc-sentence  the live pipeline since 09-29 21:40: no context, Volcengine sentences, conversation clustering (diarist)
   cloud-window   every 30 s, last 240 s to StepFun file diarization (via the file-mode ASR service), cluster mean vs owner,
                  final_rows replace the window (the live second layer as designed)
   local-window   same cadence, diarization by sherpa-onnx pyannote-segmentation-3.0 + CAM++ clustering on the Mac,
@@ -229,6 +230,36 @@ def rows_from_windows(case: Case, spk: Speakers, diar, name: str, need_asr: bool
     return apply_final(records)
 
 
+def rows_per_sentence(case: Case, dia, embed) -> list[dict]:
+    """The live second layer since 09-29 21:40: every REFINE_EVERY_S a window from 1 s before the sentence the
+    last pass left open (no context), Volcengine sentences, speakers from the conversation clustering (diarist).
+    Sequential like the live loop: a window's start depends on where the previous one stopped."""
+    from server import EDGE_S, REFINE_MARGIN_S, label_sentences
+    total = min(len(case.x) / SR, float(os.environ.get("REPLAY_UNTIL_S", "inf")))
+    records, done, t_run = [], None, time.time()
+    for n, now in enumerate(list(np.arange(REFINE_EVERY_S, total, REFINE_EVERY_S)) + [total]):
+        while True:  # the live loop drains a backlog before waiting again
+            a = 0.0 if done is None else round(done - REFINE_MARGIN_S, 1)
+            e = round(min(now, a + REFINE_WINDOW_S), 1)
+            since = EDGE_S if done is None else done - a
+            if e - a - since < EDGE_S + 10:
+                break
+            x = case.x[int(a * SR):int(e * SR)]
+            segs = clip_turns(case.volc_window(a, e), since)
+            m0 = dia.mark()
+            marks = label_sentences(dia, embed, segs, x)
+            lo, hi, rows = final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, EPOCH + dt.timedelta(seconds=a), e - a, since=since)
+            kept = [m for g, m in zip(segs, marks) if m and EPOCH + dt.timedelta(seconds=a + g["start_ms"] / 1000) < hi]
+            dia.rollback(kept[-1] if kept else m0)
+            records.append({"from": lo.isoformat(timespec="milliseconds"), "to": hi.isoformat(timespec="milliseconds"), "rows": rows})
+            done = (hi - EPOCH).total_seconds()
+            if now - done <= REFINE_WINDOW_S - REFINE_MARGIN_S:
+                break
+        if n % 20 == 0:
+            print(f"  per-sentence t={now:.0f}s {time.time() - t_run:.0f}s", flush=True)
+    return apply_final(records)
+
+
 def run(case: Case, name: str) -> list[dict]:
     if name in ("vad", "vad-owner"):
         utts = vad_utterances(case)
@@ -254,6 +285,9 @@ def run(case: Case, name: str) -> list[dict]:
         def volc(a, e):
             return case.volc_window(a, e)
         return rows_from_windows(case, spk, volc, name, need_asr=False)
+    if name == "volc-sentence":
+        from diarist import Diarist, load_embedder
+        return rows_per_sentence(case, Diarist(dict(np.load(os.environ.get("OWNER_BANK", os.environ["LIVE_DATA"] + "/owner-redimnet2.npz")))), load_embedder())
     if name in ("local-window", "hybrid-window"):
         d = LocalDiarizer()
 
@@ -303,7 +337,7 @@ def main():
     for name in sys.argv[2:]:
         t = time.time()
         rows = run(case, name)
-        out = case.dir / "hyp" / f"{name}.jsonl"
+        out = case.dir / "hyp" / f"{os.environ.get('HYP_NAME', name)}.jsonl"
         with open(out, "w") as f:
             for r in rows:
                 if not r.get("text"):
