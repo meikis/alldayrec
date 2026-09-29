@@ -13,7 +13,7 @@
   h1 { font-size: 17px; margin: 0; color: var(--accent); white-space: nowrap; }
   #status { font-size: 12px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
   #status .bad { color: var(--err); }
-  main { max-width: 860px; margin: 0 auto; padding: 8px 16px 80px; }
+  main { max-width: 860px; margin: 0 auto; padding: 8px 16px 120px; }
   .row { display: grid; grid-template-columns: 80px 48px 1fr; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
   .play { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0 4px 0 0; font-size: 12px; }
   .play:disabled { color: var(--muted); cursor: default; }
@@ -27,7 +27,16 @@
   .err { color: var(--err); font-size: 13px; }
   .gap { color: var(--muted); font-size: 12px; text-align: center; padding: 10px 0 4px; }
   #empty { color: var(--muted); text-align: center; padding: 60px 0; }
-  #jump { position: fixed; right: 24px; bottom: 24px; display: none; border: 1px solid var(--line); background: var(--bg);
+  #syslog { position: fixed; left: 0; right: 0; bottom: 0; background: var(--bg); border-top: 1px solid var(--line); z-index: 2; }
+  #syslog summary { max-width: 860px; margin: 0 auto; padding: 6px 16px; font-size: 12px; color: var(--muted); cursor: pointer; list-style: none; }
+  #syslog summary::before { content: "▸ "; }
+  #syslog[open] summary::before { content: "▾ "; }
+  #events { max-width: 860px; margin: 0 auto; padding: 0 16px 8px; max-height: 32vh; overflow: auto; font: 12px/1.5 ui-monospace, monospace; }
+  #events div { white-space: pre-wrap; word-break: break-all; }
+  #events .state { color: var(--accent); }
+  #events .warn { color: #9a6b1f; }
+  #events .error { color: var(--err); }
+  #jump { position: fixed; right: 24px; bottom: 64px; display: none; border: 1px solid var(--line); background: var(--bg);
           color: var(--accent); border-radius: 16px; padding: 6px 14px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
 </style>
 </head>
@@ -35,6 +44,7 @@
 <header><div class="bar"><h1>Record Live</h1><div id="status">连接中…</div></div></header>
 <main><div id="list"></div><div id="empty">今天还没有转写内容</div></main>
 <button id="jump">回到最新</button>
+<details id="syslog"><summary>系统日志 <span id="lastev"></span></summary><div id="events"></div></details>
 <script>
 const list = document.getElementById("list"), empty = document.getElementById("empty"), jump = document.getElementById("jump");
 let last = null, follow = true;
@@ -98,13 +108,22 @@ function conversation(c) {
   insert(d, c.end);
 }
 
+const events = document.getElementById("events"), lastev = document.getElementById("lastev");
+function event(e) {                                        // one line of the server's system log, newest at the bottom
+  const d = document.createElement("div"); d.className = e.kind; d.textContent = `${e.at.slice(11, 19)}  ${e.text}`;
+  events.append(d);
+  while (events.children.length > 300) events.firstChild.remove();
+  lastev.textContent = `· ${e.at.slice(11, 19)} ${e.text}`.slice(0, 90);
+  if (document.getElementById("syslog").open) events.scrollTop = events.scrollHeight;
+}
+
 function status(m) {
   const behind = m.behind_s == null ? "—" : `${m.behind_s} 秒`;
   document.getElementById("status").innerHTML =
     `<span>${m.file || "等待录音"}</span><span class="${m.behind_s > 30 ? "bad" : ""}">落后 ${behind}</span><span class="${m.latency_s > 60 ? "bad" : ""}">上屏 ${m.latency_s ?? "—"} 秒</span>` +
     `<span>ASR ${m.asr_ms ?? "—"} ms</span><span class="${m.errors ? "bad" : ""}">失败 ${m.errors}</span><span>无人声 ${m.no_speech}</span>` +
     `<span class="${m.refine && m.refine.error ? "bad" : ""}">分离 ${m.refine ? (m.refine.error ? "失败" : m.refine.at.slice(11) + " " + (m.refine.ms / 1000).toFixed(0) + "s") : "等待"}</span>` +
-    `<span>${m.conversation ? "对话中 " + m.conversation.start.slice(11, 16) + " · " + m.conversation.sentences + " 句" : "无对话"}</span>` +
+    `<span class="${m.conversation ? "" : ""}">状态机 ${m.conversation ? "对话打开 " + m.conversation.start.slice(11, 19) + " · " + m.conversation.sentences + " 句" : "空闲，无打开的对话"}</span>` +
     `<span>${m.diarizer || ""} ${m.commit}</span>`;
 }
 
@@ -115,13 +134,15 @@ function connect() {
     if (m.type === "sentence") add(m);
     else if (m.type === "final") finalize(m);
     else if (m.type === "conversation") conversation(m);
+    else if (m.type === "event") event(m);
     else status(m);
   };
   ws.onclose = () => { document.getElementById("status").textContent = "连接断开，重连中…"; setTimeout(connect, 2000); };
 }
 
 fetch("/api/sentences").then(r => r.json()).then(rows => { rows.forEach(add); return fetch("/api/conversations"); })
-  .then(r => r.json()).then(cs => { cs.filter(c => c.state === "closed").forEach(conversation); connect(); });
+  .then(r => r.json()).then(cs => { cs.filter(c => c.state === "closed").forEach(conversation); return fetch("/api/events"); })
+  .then(r => r.json()).then(es => { es.forEach(event); connect(); });
 </script>
 </body>
 </html>

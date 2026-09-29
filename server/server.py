@@ -484,7 +484,7 @@ class LocalDiarizer:
 
 app = FastAPI()
 clients: set[WebSocket] = set()
-state = {"follower": None, "chunks": None, "audio_q": None, "end_at": None, "done_to": None, "audio_start": None, "latency": [], "asr_ms": None, "errors": 0, "no_speech": 0, "commit": "", "refine": None, "device": None,
+state = {"follower": None, "chunks": None, "audio_q": None, "end_at": None, "done_to": None, "audio_start": None, "latency": [], "events": [], "asr_ms": None, "errors": 0, "no_speech": 0, "commit": "", "refine": None, "device": None,
          "conversation": None, "last_speech": None}
 
 
@@ -494,6 +494,14 @@ async def broadcast(msg: dict):
             await ws.send_json(msg)
         except Exception:
             clients.discard(ws)
+
+
+def note(text: str, kind: str = "info"):
+    """One line of the system log the page shows: what arrived, what each pass did, state changes."""
+    e = {"type": "event", "at": dt.datetime.now().isoformat(timespec="seconds"), "kind": kind, "text": text}
+    state["events"].append(e)
+    del state["events"][:-300]
+    asyncio.ensure_future(broadcast(e))
 
 
 def sentences_path(day: dt.date) -> Path:
@@ -564,6 +572,9 @@ async def pipeline(directory: Path, from_start: bool, key: str):
         spk, reg, grouper = Speakers(), Registry(), Grouper(path=DATA / "grouper.json")
         if grouper.open:
             log.info("continuing the open conversation from %s", grouper.open["start"])
+            note(f"服务启动，接着上次打开的对话 {grouper.open['start'][11:19]}", "state")
+        else:
+            note("服务启动", "state")
         locals_: dict[float, LocalDiarizer] = {}  # one per clustering threshold, built on first use
 
         def local_for(device: str) -> LocalDiarizer:
@@ -591,6 +602,7 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             state["conversation"] = None
             log.info("conversation closed %s", {k: v for k, v in rec.items() if k != "sentences"})
+            note(f"对话结束：{rec['start'][11:19]} 到 {rec['end'][11:19]}，{len(rec['sentences'])} 句，参与 {'、'.join(rec['participants']) or '—'}", "state")
             return {"type": "conversation", **rec}
 
         async def refine_pass() -> bool:
@@ -614,6 +626,7 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                     await broadcast(close(c))
                 state["done_to"] = hi
                 return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_CONTEXT_S
+            was_open = bool(grouper.open)
             try:
                 device = state["device"] or current_device(follower.dir)
                 segs = await asyncio.to_thread(local_for(device), x) if local else await asyncio.to_thread(engine_segs, x)
@@ -632,6 +645,7 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                 names, score, means, secs = await asyncio.to_thread(spk.label, all_segs, x, device)
             except Exception as e:
                 log.warning("refine failed: %r", e)
+                note(f"这一轮引擎调用失败：{str(e)[:120]}，下一轮重试", "error")
                 state["refine"] = {"error": str(e)[:200]}
                 return False
             labels, conf = {}, {}
@@ -683,6 +697,10 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                                "scores": {k: round(v, 3) for k, v in score.items()}, "labels": labels, "changed": len(rows),
                                "backlog_s": round((seg.time_at(seg.samples) - hi).total_seconds())}
             log.info("refine %s: %s", device, state["refine"])
+            note(f"定稿一轮：{device} 送 {len(x) / SR:.0f} s（含 {since:.0f} s 上下文）给 {engine or ENGINE}，"
+                 f"{state['refine']['ms'] / 1000:.1f} s，{len(rows)} 句，定稿到 {hi.strftime('%H:%M:%S')}，积压 {state['refine']['backlog_s']} s")
+            if grouper.open and not was_open:
+                note(f"对话开始：{grouper.open['start'][11:19]}", "state")
             return state["refine"]["backlog_s"] > REFINE_WINDOW_S - REFINE_CONTEXT_S
 
         last_end = None
@@ -703,7 +721,10 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                 closed += grouper.end(state["end_at"])
                 state["end_at"] = None
             last_end = follower.audio_end
-            closed += grouper.tick()  # the safety net: nothing at all for IDLE_S (the recorder died without an end)
+            idle = grouper.tick()  # the safety net: nothing at all for IDLE_S (the recorder died without an end)
+            if idle:
+                note("20 分钟没有任何事件，按兜底规则关闭对话", "warn")
+            closed += idle
             for c in closed:
                 await broadcast(close(c))
             if not grouper.open:
@@ -712,7 +733,8 @@ async def pipeline(directory: Path, from_start: bool, key: str):
     def watched(coro, name):
         """A task whose death is logged: an unhandled exception would otherwise stop the pipeline silently."""
         t = asyncio.create_task(coro, name=name)
-        t.add_done_callback(lambda t: log.error("task %s ended: %r", name, t.exception()) if not t.cancelled() else None)
+        t.add_done_callback(lambda t: (log.error("task %s ended: %r", name, t.exception()),
+                                       note(f"内部任务 {name} 退出：{t.exception()!r}"[:160], "error")) if not t.cancelled() else None)
         return t
 
     watched(transcribe_worker(), "transcribe")
@@ -799,6 +821,7 @@ def busy(device: str):
     """One stream at a time: a second device would silently take the pipeline over."""
     c = state["chunks"]
     if c and time.time() - c["at"] < SESSION_STALE_S and c["device"] != device:
+        note(f"拒绝 {device} 开录：{c['device']} 正在录音", "warn")
         raise HTTPException(409, f"{c['device']} 正在录音，服务端同一时刻只收一路")
 
 
@@ -812,6 +835,7 @@ async def chunk(request: Request, device: str, start: int):
     behind = state["done_to"] or state["audio_start"]
     if f and f.audio_end and (f.audio_end - behind).total_seconds() > BUFFER_S - 300:
         # a client catching up after an outage would push audio out of the buffer before it is finalized
+        note(f"积压 {(f.audio_end - behind).total_seconds():.0f} s，让 {device} 等 20 s 再传", "warn")
         raise HTTPException(429, "服务端积压中，稍后再传", headers={"Retry-After": "20"})
     body = await request.body()
     pcm = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "s16le", "-ac", "1",
@@ -825,6 +849,7 @@ async def chunk(request: Request, device: str, start: int):
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{start}.{ext}").write_bytes(body)
     state["chunks"] = {"device": device, "at": time.time()}
+    note(f"收到 {device} 的块 {len(x) / SR:.1f} s，起于 {t.strftime('%H:%M:%S')}")
     if state["follower"]:
         state["follower"].audio_end = t + dt.timedelta(seconds=len(x) / SR)
     await state["audio_q"].put((t, x))
@@ -836,7 +861,13 @@ async def chunk_end(device: str, t: int):
     """The recorder stopped at device time t (unix ms): the open conversation closes once its audio is processed."""
     state["end_at"] = dt.datetime.fromtimestamp(t / 1000)
     log.info("%s stopped recording at %s", device, state["end_at"].time())
+    note(f"{device} 停止录音（{state['end_at'].strftime('%H:%M:%S')}），处理完剩余音频后关闭对话")
     return {"ok": True}
+
+
+@app.get("/api/events")
+async def events():
+    return state["events"]
 
 
 @app.get("/api/status")
