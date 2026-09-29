@@ -146,14 +146,15 @@ def hybrid_segs(utts: list[tuple[float, float]], segs: list[dict], min_piece=0.5
 
 
 def _volc_window(self, a: float, b: float) -> list[dict]:
-    p = self.work / "volc" / f"{a:.1f}-{b:.1f}.json"
+    mode = os.environ.get("VOLC_MODE", "nostream")
+    p = self.work / ("volc" if mode == "nostream" else f"volc-{mode}") / f"{a:.1f}-{b:.1f}.json"
     if p.exists():
         return json.load(open(p))
     p.parent.mkdir(exist_ok=True)
     import volc_asr
     for attempt in range(3):
         try:
-            utts, info = volc_asr.transcribe(self.x[int(a * SR):int(b * SR)])
+            utts, info = volc_asr.transcribe(self.x[int(a * SR):int(b * SR)], mode=mode)
             break
         except Exception as e:
             print(f"  volc {a:.0f}-{b:.0f} attempt {attempt + 1} failed: {e!r}"[:160], flush=True)

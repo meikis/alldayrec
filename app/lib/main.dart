@@ -1,14 +1,10 @@
-// live-record Android client. The native side (MainActivity.kt) keeps the microphone open and cuts the
-// continuous Opus stream into Ogg files whose length follows the app state; this side uploads them in
-// order to the server's /api/chunks and shows the transcript page in a WebView.
+// live-record Android client. RecorderService.kt (native, START_STICKY) keeps the microphone open,
+// cuts the Opus stream into Ogg pieces whose length follows the app state, uploads them in order and
+// survives the process being killed. This side is settings, status and the transcript page in a WebView.
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_foreground_task/flutter_foreground_task.dart';
-import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -17,17 +13,18 @@ const sliceForegroundS = 5, sliceBackgroundS = 20, sliceScreenOffS = 60;
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  FlutterForegroundTask.initCommunicationPort();
   runApp(const MaterialApp(home: Home(), debugShowCheckedModeBanner: false));
 }
 
 class Settings {
   String server = 'https://lr.example.com', token = '', device = 'phone';
+  bool archive = true;
   static Future<Settings> load() async {
     final p = await SharedPreferences.getInstance(), s = Settings();
     s.server = p.getString('server') ?? s.server;
     s.token = p.getString('token') ?? '';
     s.device = p.getString('device') ?? s.device;
+    s.archive = p.getBool('archive') ?? true;
     return s;
   }
 
@@ -36,67 +33,18 @@ class Settings {
     await p.setString('server', server);
     await p.setString('token', token);
     await p.setString('device', device);
+    await p.setBool('archive', archive);
   }
 }
 
-/// The native slicer: files named <start ms>.ogg appear in `dir`; .part is the one being written.
 class Recorder {
   static const _ch = MethodChannel('live_record/recorder');
-  static Future<void> start(String dir) => _ch.invokeMethod('start',
-      {'dir': dir, 'foreground': sliceForegroundS, 'background': sliceBackgroundS, 'screenOff': sliceScreenOffS});
+  static Future<void> start(Settings s) => _ch.invokeMethod('start', {
+        'server': s.server, 'token': s.token, 'device': s.device, 'archive': s.archive,
+        'foreground': sliceForegroundS, 'background': sliceBackgroundS, 'screenOff': sliceScreenOffS});
   static Future<void> stop() => _ch.invokeMethod('stop');
   static Future<void> foreground(bool on) => _ch.invokeMethod('foreground', {'on': on});
-  static Future<Map?> status() async => (await _ch.invokeMethod('status')) as Map?;
-}
-
-/// Uploads the .ogg files in start order, one at a time, retrying forever; a file is deleted once
-/// the server has it, so the directory is the offline queue.
-class Uploader {
-  final Directory dir;
-  final Settings settings;
-  final void Function(String) onStatus;
-  bool running = false;
-  int sent = 0, fails = 0;
-  Uploader(this.dir, this.settings, this.onStatus);
-
-  List<File> get pending =>
-      dir.listSync().whereType<File>().where((f) => f.path.endsWith('.ogg')).toList()..sort((a, b) => a.path.compareTo(b.path));
-
-  Future<void> run() async {
-    running = true;
-    while (running) {
-      final files = pending;
-      if (files.isEmpty) {
-        await Future.delayed(const Duration(seconds: 1));
-        continue;
-      }
-      final f = files.first, start = f.uri.pathSegments.last.split('.').first;
-      try {
-        final r = await http
-            .post(Uri.parse('${settings.server}/api/chunks?device=${Uri.encodeComponent(settings.device)}&start=$start'),
-                headers: {'Authorization': 'Bearer ${settings.token}', 'Content-Type': 'audio/ogg'}, body: await f.readAsBytes())
-            .timeout(const Duration(seconds: 60));
-        if (r.statusCode == 200) {
-          await f.delete();
-          sent++;
-          fails = 0;
-        } else if (r.statusCode == 429) {
-          onStatus('服务端积压中，20 秒后继续');  // catching up after an outage: keep the file, wait
-          await Future.delayed(const Duration(seconds: 20));
-          continue;
-        } else if (r.statusCode == 400) {
-          await f.delete();  // undecodable piece (e.g. an empty one from a crash): nothing to retry
-          onStatus('服务端无法解码一块，已丢弃');
-        } else {
-          throw Exception('HTTP ${r.statusCode} ${r.body}');
-        }
-      } catch (e) {
-        fails++;
-        onStatus('上传失败 $e');
-        await Future.delayed(Duration(seconds: 5 * (fails > 6 ? 6 : fails)));
-      }
-    }
-  }
+  static Future<Map> status() async => (await _ch.invokeMethod('status')) as Map;
 }
 
 class Home extends StatefulWidget {
@@ -107,11 +55,10 @@ class Home extends StatefulWidget {
 
 class _HomeState extends State<Home> with WidgetsBindingObserver {
   Settings? settings;
-  bool on = false;
-  Uploader? uploader;
-  Timer? ticker;
-  String status = '未开始', note = '';
+  Map status = {};
+  String note = '';
   WebViewController? web;
+  Timer? ticker;
   final serverCtl = TextEditingController(), tokenCtl = TextEditingController(), deviceCtl = TextEditingController();
 
   @override
@@ -125,17 +72,14 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           deviceCtl.text = s.device;
           _loadWeb();
         }));
-    FlutterForegroundTask.init(
-      androidNotificationOptions: AndroidNotificationOptions(channelId: 'live_record', channelName: '录音中'),
-      iosNotificationOptions: const IOSNotificationOptions(),
-      foregroundTaskOptions: ForegroundTaskOptions(eventAction: ForegroundTaskEventAction.nothing()),
-    );
+    ticker = Timer.periodic(const Duration(seconds: 2), (_) async {  // the service may be running from before this UI opened
+      final s = await Recorder.status();
+      if (mounted) setState(() => status = s);
+    });
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (on) Recorder.foreground(state == AppLifecycleState.resumed);
-  }
+  void didChangeAppLifecycleState(AppLifecycleState state) => Recorder.foreground(state == AppLifecycleState.resumed);
 
   void _loadWeb() {
     final s = settings!;
@@ -156,52 +100,32 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
 
   Future<void> _start() async {
     await _save();
-    if (!await AudioRecorder().hasPermission()) return _note('没有麦克风权限');
-    await FlutterForegroundTask.requestNotificationPermission();
-    final dir = Directory('${(await getApplicationDocumentsDirectory()).path}/chunks')..createSync(recursive: true);
-    await FlutterForegroundTask.startService(
-        serviceTypes: [ForegroundServiceTypes.microphone], notificationTitle: 'live-record 正在录音', notificationText: '');
-    await Recorder.start(dir.path);
-    uploader = Uploader(dir, settings!, _note);
-    unawaited(uploader!.run());
-    setState(() => on = true);
-    ticker = Timer.periodic(const Duration(seconds: 2), (_) async {
-      final s = await Recorder.status();
-      if (!mounted) return;
-      setState(() => status = s == null
-          ? '录音中'
-          : '录音中 · 切片 ${s['slice']} 秒 · 已切 ${s['files']} 已传 ${uploader?.sent} 待传 ${uploader?.pending.length}${s['error'] != null ? ' · 错误 ${s['error']}' : ''}');
-    });
+    if (!await AudioRecorder().hasPermission()) return setState(() => note = '没有麦克风权限');
+    note = '';
+    await Recorder.start(settings!);
   }
 
   Future<void> _stop() async {
-    final at = DateTime.now().millisecondsSinceEpoch, s = settings!;
-    ticker?.cancel();
+    setState(() => note = '停止中，等最后几块传完');
     await Recorder.stop();
-    setState(() => status = '停止，等最后几块传完');
-    final t0 = DateTime.now();
-    while (uploader != null && uploader!.pending.isNotEmpty && DateTime.now().difference(t0).inSeconds < 120) {
+    while ((await Recorder.status())['running'] == true) {
       await Future.delayed(const Duration(milliseconds: 500));
     }
-    uploader?.running = false;
-    try {  // tells the server the conversation can close now instead of after its idle timeout
-      await http.post(Uri.parse('${s.server}/api/chunks/end?device=${Uri.encodeComponent(s.device)}&t=$at'),
-          headers: {'Authorization': 'Bearer ${s.token}'}).timeout(const Duration(seconds: 15));
-    } catch (e) {
-      _note('结束信号失败 $e');
-    }
-    await FlutterForegroundTask.stopService();
-    final left = uploader?.pending.length ?? 0;
-    setState(() {
-      on = false;
-      status = left == 0 ? '已停止' : '已停止，剩余 $left 块会在下次开始时继续传';
-    });
+    setState(() => note = '已停止');
   }
 
-  void _note(String s) => mounted ? setState(() => note = s) : null;
+  String get line {
+    if (status['running'] != true) return note.isEmpty ? '未开始' : note;
+    final hhmm = status['interruptedAt'] == null
+        ? ''
+        : ' · ${TimeOfDay.fromDateTime(DateTime.fromMillisecondsSinceEpoch(status['interruptedAt'])).format(context)} 被系统中断过，已恢复';
+    return '录音中 · 切片 ${status['slice']} 秒 · 已切 ${status['files']} 已传 ${status['sent']} 待传 ${status['pending']}'
+        '${status['error'] != null ? ' · 录音错误 ${status['error']}' : ''}${status['note'] != null ? ' · ${status['note']}' : ''}$hhmm';
+  }
 
   @override
   Widget build(BuildContext context) {
+    final on = status['running'] == true;
     return Scaffold(
       body: SafeArea(
         child: Column(children: [
@@ -215,6 +139,13 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
                   TextField(controller: serverCtl, decoration: const InputDecoration(labelText: '服务器')),
                   TextField(controller: tokenCtl, decoration: const InputDecoration(labelText: 'Token'), obscureText: true),
                   TextField(controller: deviceCtl, decoration: const InputDecoration(labelText: '设备名')),
+                  SwitchListTile(
+                    title: const Text('本地保留录音', style: TextStyle(fontSize: 14)),
+                    subtitle: const Text('Android/data/com.suyiiyii.live_record/files/recordings/日期/', style: TextStyle(fontSize: 11)),
+                    value: settings?.archive ?? true,
+                    onChanged: (v) => setState(() => settings?.archive = v),
+                    contentPadding: EdgeInsets.zero,
+                  ),
                   TextButton(onPressed: _save, child: const Text('保存')),
                 ],
               ),
@@ -225,7 +156,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
                   child: Text(on ? '停止' : '开始录音'),
                 ),
                 const SizedBox(width: 12),
-                Expanded(child: Text('$status${note.isEmpty ? '' : '\n$note'}', style: const TextStyle(fontSize: 12, color: Colors.black54))),
+                Expanded(child: Text(line, style: const TextStyle(fontSize: 12, color: Colors.black54))),
               ]),
             ]),
           ),

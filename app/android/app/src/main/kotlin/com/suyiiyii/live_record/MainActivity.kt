@@ -1,53 +1,48 @@
 package com.suyiiyii.live_record
 
-import android.content.BroadcastReceiver
-import android.content.Context
+import android.Manifest
 import android.content.Intent
-import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaCodec
-import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaRecorder
-import android.os.PowerManager
+import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
-import java.nio.ByteBuffer
 
 class MainActivity : FlutterActivity() {
-    private var slicer: Slicer? = null
-    private val screen = object : BroadcastReceiver() {
-        override fun onReceive(c: Context, i: Intent) { slicer?.screenOff = i.action == Intent.ACTION_SCREEN_OFF }
-    }
-
     override fun configureFlutterEngine(engine: FlutterEngine) {
         super.configureFlutterEngine(engine)
-        registerReceiver(screen, IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON) })
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)  // the page is meant to be watched
         MethodChannel(engine.dartExecutor.binaryMessenger, "live_record/recorder").setMethodCallHandler { call, result ->
             when (call.method) {
                 "start" -> {
-                    if (slicer == null) {
-                        val s = Slicer(File(call.argument<String>("dir")!!), call.argument<Int>("foreground")!!,
-                            call.argument<Int>("background")!!, call.argument<Int>("screenOff")!!)
-                        s.screenOff = !(getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
-                        s.start()
-                        slicer = s
-                    }
+                    if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                    val i = Intent(this, RecorderService::class.java)
+                    for (k in listOf("server", "token", "device")) i.putExtra(k, call.argument<String>(k))
+                    for (k in listOf("foreground", "background", "screenOff")) i.putExtra(k, call.argument<Int>(k)!!)
+                    i.putExtra("archive", call.argument<Boolean>("archive") ?: true)
+                    startForegroundService(i)
                     result.success(null)
                 }
-                "stop" -> { slicer?.stop(); slicer = null; result.success(null) }
-                "foreground" -> { slicer?.foreground = call.argument<Boolean>("on")!!; result.success(null) }
-                "status" -> result.success(slicer?.status())
+                "stop" -> { startService(Intent(this, RecorderService::class.java).setAction("stop")); result.success(null) }
+                "foreground" -> {
+                    val on = call.argument<Boolean>("on")!!
+                    RecorderService.foregroundApp = on
+                    RecorderService.slicer?.foreground = on
+                    result.success(null)
+                }
+                "status" -> result.success(RecorderService.status())
                 else -> result.notImplemented()
             }
         }
     }
-
-    override fun onDestroy() { unregisterReceiver(screen); super.onDestroy() }
 }
 
 /** The microphone stays open; the continuous Opus frame stream is cut into self-contained Ogg files
@@ -56,22 +51,21 @@ class Slicer(private val dir: File, private val fgS: Int, private val bgS: Int, 
     @Volatile var foreground = true
     @Volatile var screenOff = false
     @Volatile private var running = false
-    @Volatile private var files = 0
-    @Volatile private var error: String? = null
+    @Volatile var files = 0
+    @Volatile var error: String? = null
     private lateinit var thread: Thread
     private val sr = 16000
 
-    private fun sliceS() = if (screenOff) offS else if (foreground) fgS else bgS
+    fun sliceS() = if (screenOff) offS else if (foreground) fgS else bgS
 
     fun start() {
+        android.util.Log.i("live-record", "slicer start fg=$fgS bg=$bgS off=$offS")
         running = true
         thread = Thread { try { loop() } catch (e: Exception) { error = e.toString() } }
         thread.start()
     }
 
-    fun stop() { running = false; thread.join(5000) }
-
-    fun status() = mapOf("files" to files, "error" to error, "slice" to sliceS())
+    fun stop() { android.util.Log.i("live-record", "slicer stop"); running = false; thread.join(5000) }
 
     private fun loop() {
         val startWall = System.currentTimeMillis()
