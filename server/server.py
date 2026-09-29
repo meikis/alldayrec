@@ -285,18 +285,23 @@ def diarize(x: np.ndarray, model: str = FILE_MODELS[0]) -> list[dict]:
     """File-mode ASR with speakers and word times on a window of audio (via the file-mode ASR service).
     StepFun's risk control refuses some content outright; that window is then sent to Doubao and every
     segment carries `engine` so the rows say which engine wrote them."""
+    t_enc = time.perf_counter()
     ogg = subprocess.run(["ffmpeg", "-v", "error", "-f", "s16le", "-ar", str(SR), "-ac", "1", "-i", "pipe:0",
                           "-c:a", "libopus", "-b:a", "16k", "-f", "ogg", "pipe:1"], input=x.tobytes(),
                          capture_output=True, check=True).stdout
+    t_up = time.perf_counter()
     up = json.loads(_http(BRIDGE, json.dumps({"filename": "live.ogg", "content_type": "audio/ogg"}).encode(),
                           {"Authorization": f"Bearer {os.environ['ASR_UPLOAD_BRIDGE_TOKEN']}", "Content-Type": "application/json"}))
     _http(up["upload_url"], ogg, {"Content-Type": "audio/ogg"}, "PUT")
     auth = {"Authorization": "Basic " + base64.b64encode(os.environ["ASR_SERVICE_BASIC_AUTH"].encode()).decode()}
     job = json.loads(_http(f"{DIARIZE}/audio/transcriptions", json.dumps({"audio_url": up["download_url"], "model": model}).encode(),
                            {**auth, "Content-Type": "application/json"}))["job_id"]
+    t_job = time.perf_counter()
     for _ in range(120):
         r = json.loads(_http(f"{DIARIZE}/jobs/{job}", headers=auth))
         if r["status"] == "COMPLETED":
+            log.info("diarize %s: %.0f s audio, encode %.1f s, upload %.1f s, job %.1f s", model, len(x) / SR,
+                     t_up - t_enc, t_job - t_up, time.perf_counter() - t_job)
             for g in r["segments"]:
                 g["engine"] = model.split("-")[0]
             return r["segments"]
@@ -330,13 +335,17 @@ def words_to_turns(turns: list[dict], file_segs: list[dict], reach_ms: int = 100
     return lost
 
 
+CLIP_JITTER_MS = 300  # a re-cut turn's start moves about this much between passes
+
+
 def clip_turns(segs: list[dict], since_s: float) -> list[dict]:
-    """Turns are re-cut every pass with slightly different boundaries. A turn that straddles the last
-    finalized time keeps only its part after it (the part before was finalized already); turns wholly
-    before it are dropped. Done before text is attached, so no text is emitted twice."""
+    """The previous pass finalized every turn starting before `since` (its `to` is the start of the first
+    turn it left out), so those are dropped here, whole: keeping the part after `since` re-emitted the
+    sentence of a speaker overlapping the cut turn (phone case 09-29 13:12). Only a turn starting within
+    the re-cut jitter of `since` is kept, clipped to it."""
     out = []
     for g in segs:
-        if g["end_ms"] <= since_s * 1000 + 200:
+        if g["start_ms"] < since_s * 1000 - CLIP_JITTER_MS or g["end_ms"] <= since_s * 1000 + 200:
             continue
         if g["start_ms"] < since_s * 1000:
             g = {**g, "start_ms": int(since_s * 1000)}

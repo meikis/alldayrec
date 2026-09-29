@@ -5,7 +5,7 @@ import subprocess
 
 import numpy as np
 
-from server import SR, Segmenter
+from server import SR, Segmenter, clip_turns
 
 CLIP = os.environ.get("TEST_CLIP", "")  # any recorder file with speech; the test skips the audio part without it
 
@@ -47,3 +47,17 @@ if __name__ == "__main__":
     a, b, n = whole[0]
     assert dt.datetime(2026, 9, 9, 11, 7) <= a < b and n == round((b - a).total_seconds() * SR), whole[0]
     print(f"ok: {len(whole)} utterances, first {a.time()}-{b.time()}")
+
+
+def test_clip_turns():
+    since = 100.0
+    segs = [dict(start_ms=95_000, end_ms=101_000, speaker="A", text="finalized by the previous pass"),
+            dict(start_ms=99_800, end_ms=104_000, speaker="B", text="the cut turn, re-cut 0.2 s early"),
+            dict(start_ms=100_500, end_ms=103_000, speaker="A", text="new")]
+    out = clip_turns(segs, since)
+    assert [g["text"][:3] for g in out] == ["the", "new"], out
+    assert out[0]["start_ms"] == 100_000
+
+
+test_clip_turns()
+print("ok: clip_turns")
