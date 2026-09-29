@@ -1,56 +1,85 @@
-"""Group a time-ordered sentence stream into conversations.
+"""Group a time-ordered sentence stream into conversations: a reducer over four kinds of events.
 
-A conversation closes when no sentence starts within GAP_S of its end, or when it has run MAX_S.
-Conversations with less than MIN_S of speech are dropped. Sentences whose speaker is in IGNORE
-(far-field, undecided) neither open nor extend a conversation but are kept inside one that is open.
+    sentence(row)   a final sentence; opens a conversation or extends the open one; a gap of GAP_S closes it first
+    advance(t)      the audio clock reached t without speech; closes the open conversation once the gap has passed
+    end(t)          the recorder stopped at t; applied by the caller once the audio before t is processed
+    tick(now)       wall clock; only for the IDLE_S safety net (the recorder died without saying so)
+
+Every decision but tick uses the times carried by the events, so a network outage between the recorder
+and the server does not split a conversation: the late sentences arrive with their original times.
+The state is one open conversation, kept in a json file so a restart continues it.
 """
 import datetime as dt
+import json
+import time
+from pathlib import Path
 
-GAP_S, MIN_S, MAX_S = 120, 10, 4 * 3600
+GAP_S, MIN_S, MAX_S, IDLE_S = 120, 10, 4 * 3600, 20 * 60
 IGNORE = {"远处", "far", "不确定", "未知", "unknown", "S?"}  # S?: too short for a voiceprint
-
 P = dt.datetime.fromisoformat
 
 
 class Grouper:
-    """Feed sentences in time order; `push` returns the conversations closed by that sentence,
-    `flush(now)` those closed by the clock."""
-
-    def __init__(self, gap_s=GAP_S, min_s=MIN_S, max_s=MAX_S):
-        self.gap, self.min, self.max = gap_s, min_s, max_s
+    def __init__(self, gap_s=GAP_S, min_s=MIN_S, max_s=MAX_S, idle_s=IDLE_S, path: Path | None = None):
+        self.gap, self.min, self.max, self.idle, self.path = gap_s, min_s, max_s, idle_s, path
         self.open = None
+        self.last_event = time.time()
+        if path and path.exists():
+            self.open = json.loads(path.read_text()).get("open")
 
-    def push(self, s: dict) -> list[dict]:
+    def sentence(self, s: dict) -> list[dict]:
         a, b = P(s["start"]), P(s["end"])
-        out = self.flush(a)
+        out = self._close_if_stale(a)
         if s.get("speaker") in IGNORE:
             if self.open:
                 self.open["sentences"].append(s)
-            return out
-        if self.open is None:
-            self.open = dict(start=s["start"], end=s["end"], sentences=[], speech_s=0.0)
-        self.open["sentences"].append(s)
-        self.open["end"] = max(self.open["end"], s["end"])
-        self.open["speech_s"] += (b - a).total_seconds()
-        return out
+        else:
+            if self.open is None:
+                self.open = dict(start=s["start"], end=s["end"], sentences=[], speech_s=0.0)
+            self.open["sentences"].append(s)
+            self.open["end"] = max(self.open["end"], s["end"])
+            self.open["speech_s"] += (b - a).total_seconds()
+        return self._touch(out)
 
-    def flush(self, now: dt.datetime) -> list[dict]:
-        c = self.open
-        if c and ((now - P(c["end"])).total_seconds() >= self.gap or (now - P(c["start"])).total_seconds() >= self.max):
-            self.open = None
-            if c["speech_s"] >= self.min:
-                c["participants"] = sorted({x.get("speaker") for x in c["sentences"] if x.get("speaker") and x["speaker"] not in IGNORE}, key=str)
-                c["state"] = "closed"
-                return [c]
+    def advance(self, t: dt.datetime) -> list[dict]:
+        return self._touch(self._close_if_stale(t))
+
+    def end(self, t: dt.datetime) -> list[dict]:
+        return self._touch(self._close() if self.open else [])
+
+    def tick(self, now: float | None = None) -> list[dict]:
+        if self.open and (now or time.time()) - self.last_event >= self.idle:
+            return self._touch(self._close())
         return []
+
+    def _close_if_stale(self, t: dt.datetime) -> list[dict]:
+        c = self.open
+        if c and ((t - P(c["end"])).total_seconds() >= self.gap or (t - P(c["start"])).total_seconds() >= self.max):
+            return self._close()
+        return []
+
+    def _close(self) -> list[dict]:
+        c, self.open = self.open, None
+        if c["speech_s"] < self.min:
+            return []
+        c["participants"] = sorted({x.get("speaker") for x in c["sentences"] if x.get("speaker") and x["speaker"] not in IGNORE}, key=str)
+        c["state"] = "closed"
+        return [c]
+
+    def _touch(self, out: list[dict]) -> list[dict]:
+        self.last_event = time.time()
+        if self.path:
+            self.path.write_text(json.dumps({"open": self.open}, ensure_ascii=False))
+        return out
 
 
 def split(sentences: list[dict], **kw) -> list[dict]:
+    """Offline: fold a day's sentences through the same reducer."""
     g, out = Grouper(**kw), []
     for s in sorted(sentences, key=lambda s: s["start"]):
-        out += g.push(s)
+        out += g.sentence(s)
     if g.open:
-        out += g.flush(P(g.open["end"]) + dt.timedelta(seconds=g.gap))
+        out += g.advance(P(g.open["end"]) + dt.timedelta(seconds=g.gap))
     return out
 
 
@@ -64,4 +93,13 @@ if __name__ == "__main__":
     cs = split(rows)
     assert [len(c["sentences"]) for c in cs] == [3, 1], cs
     assert cs[0]["participants"] == ["S1", "我"] and cs[0]["end"] == T(1, 20)
+    g = Grouper()  # an outage: no events for a while, then late sentences with their original times
+    g.sentence(dict(start=T(0), end=T(0, 20), speaker="我"))
+    g.last_event -= 10 * 60
+    assert g.tick() == [] and g.open, "10 quiet minutes on the wall clock must not close it"
+    assert g.sentence(dict(start=T(1), end=T(1, 30), speaker="S1")) == [] and len(g.open["sentences"]) == 2
+    assert g.end(P(T(2))) and g.open is None, "end closes at once"
+    g.sentence(dict(start=T(3), end=T(3, 20), speaker="我"))
+    g.last_event -= IDLE_S
+    assert g.tick() and g.open is None, "the idle safety net closes"
     print("ok", len(cs), "conversations")

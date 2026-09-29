@@ -23,22 +23,26 @@
 </div>
 <iframe src="/" title="字幕"></iframe>
 <script>
+// Every SLICE_MS the recorder is stopped and restarted, so each blob is a complete webm file that
+// POSTs to /api/chunks with its own start time, the same way the app sends its Opus pieces.
 const SLICE_MS = 20000, BPS = 32000;
 const $ = id => document.getElementById(id);
 $("device").value = localStorage.device || "phone";
-let rec = null, sid, queue = [], sending = false, sent = 0, fails = 0;
+let rec = null, stream = null, queue = [], sending = false, sent = 0, fails = 0;
 const log = s => { $("log").textContent = (new Date().toLocaleTimeString() + " " + s + "\n" + $("log").textContent).slice(0, 4000); };
 const status = () => { $("stat").textContent = rec ? `录音中 · 已传 ${sent} 块 · 待传 ${queue.length}` : "已停止"; };
-async function post(url, body) {
-  const r = await fetch(url, { method: "POST", body });
+async function post(url, body, type) {
+  const r = await fetch(url, { method: "POST", body, headers: type ? { "Content-Type": type } : {} });
+  if (r.status === 429) { await new Promise(r => setTimeout(r, 20000)); return post(url, body, type); }  // server catching up
   if (!r.ok) throw new Error("HTTP " + r.status + " " + ((await r.json().catch(() => ({}))).detail || ""));
   return r.json();
 }
-async function drain() {  // a session's chunks are one webm stream: strictly in order, one at a time, retried until sent
+async function drain() {  // in start order, one at a time, retried until sent
   if (sending) return;
   sending = true;
   while (queue.length) {
-    try { await post(`/api/record/${sid}`, queue[0]); queue.shift(); sent++; fails = 0; }
+    const { blob, start } = queue[0];
+    try { await post(`/api/chunks?device=${encodeURIComponent($("device").value)}&start=${start}`, blob, "audio/webm"); queue.shift(); sent++; fails = 0; }
     catch (e) {
       fails++;
       log(`上传失败 ${e.message}，${Math.min(fails, 6) * 5} 秒后重试`);
@@ -48,23 +52,32 @@ async function drain() {  // a session's chunks are one webm stream: strictly in
   }
   sending = false;
 }
+function piece() {  // one recorder per piece
+  const r = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus", audioBitsPerSecond: BPS }), start = Date.now();
+  r.ondataavailable = e => { if (e.data.size) { queue.push({ blob: e.data, start }); drain(); } };
+  r.onerror = e => log("recorder error " + (e.error || e));
+  r.start();
+  setTimeout(() => { if (rec === r) { r.stop(); rec = piece(); } }, SLICE_MS);
+  return r;
+}
 async function start() {
   localStorage.device = $("device").value;
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
   const track = stream.getAudioTracks()[0];
   track.onended = () => log("麦克风被系统收回，录音停了");
-  sid = (await post(`/api/record?device=${encodeURIComponent($("device").value)}`)).id;
-  rec = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus", audioBitsPerSecond: BPS });
-  rec.ondataavailable = e => { if (e.data.size) { queue.push(e.data); drain(); } };
-  rec.onerror = e => log("recorder error " + (e.error || e));
-  rec.start(SLICE_MS);
+  rec = piece();
   sent = 0;
-  log(`开始 ${sid} · ${track.label} · ${JSON.stringify(track.getSettings())}`);
+  log(`开始 · ${track.label} · ${JSON.stringify(track.getSettings())}`);
   $("btn").textContent = "停止"; $("btn").className = "on"; status();
 }
-function stop() {
-  rec.stop(); rec.stream.getTracks().forEach(t => t.stop()); rec = null;
-  $("btn").textContent = "开始录音"; $("btn").className = ""; status(); log("停止");
+async function stop() {
+  const r = rec, at = Date.now();
+  rec = null; r.stop(); stream.getTracks().forEach(t => t.stop());
+  $("btn").textContent = "开始录音"; $("btn").className = ""; status(); log("停止，等最后几块传完");
+  await new Promise(res => setTimeout(res, 500));
+  while (queue.length || sending) await new Promise(res => setTimeout(res, 500));
+  await post(`/api/chunks/end?device=${encodeURIComponent($("device").value)}&t=${at}`).catch(e => log("结束信号失败 " + e.message));
+  log("已停止");
 }
 $("btn").onclick = () => rec ? stop() : start().catch(e => log("启动失败 " + e));
 document.addEventListener("visibilitychange", () => rec && log(`页面${document.hidden ? "进后台" : "回前台"}，已传 ${sent} 块`));

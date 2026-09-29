@@ -2,7 +2,7 @@
 
     set -a; . .env; set +a; uv run python server.py [--dir <recordings>] [--port 8770] [--from-start]   (variables: .env.example)
 
-Tails the newest recording (the recorder's Opus segment, or the webm stream the /record page uploads), cuts speech with FireRed Stream-VAD,
+Tails the recorder's newest Opus segment, or takes the 20 s pieces the /record page and the app upload, cuts speech with FireRed Stream-VAD,
 sends each utterance to StepFun streaming ASR, appends sentences to data/<date>.jsonl and
 pushes them to the page at http://127.0.0.1:<port>/.
 """
@@ -82,7 +82,8 @@ def current_device(directory: Path) -> str:
 
 
 SESSION_STALE_S = 45  # chunks arrive every 20 s; a session without one for this long has ended
-FORMATS = {".ogg": "ogg", ".webm": "matroska"}   # the recorder's Opus files; the browser page's MediaRecorder stream
+FORMATS = {".ogg": "ogg"}   # the recorder's Opus files (tailed while being written)
+CHUNK_MAX_S = 30            # an uploaded piece is at most this long (the clients cut every 20 s)
 
 
 def recordings(directory: Path) -> list[Path]:
@@ -471,7 +472,7 @@ class LocalDiarizer:
 
 app = FastAPI()
 clients: set[WebSocket] = set()
-state = {"follower": None, "chunks": None, "audio_q": None, "asr_ms": None, "errors": 0, "no_speech": 0, "commit": "", "refine": None, "device": None,
+state = {"follower": None, "chunks": None, "audio_q": None, "end_at": None, "done_to": None, "audio_start": None, "asr_ms": None, "errors": 0, "no_speech": 0, "commit": "", "refine": None, "device": None,
          "conversation": None, "last_speech": None}
 
 
@@ -548,7 +549,9 @@ async def pipeline(directory: Path, from_start: bool, key: str):
             del recent[:-300]
 
     async def refine_loop():
-        spk, reg, grouper = Speakers(), Registry(), Grouper()
+        spk, reg, grouper = Speakers(), Registry(), Grouper(path=DATA / "grouper.json")
+        if grouper.open:
+            log.info("continuing the open conversation from %s", grouper.open["start"])
         locals_: dict[float, LocalDiarizer] = {}  # one per clustering threshold, built on first use
 
         def local_for(device: str) -> LocalDiarizer:
@@ -581,8 +584,11 @@ async def pipeline(directory: Path, from_start: bool, key: str):
         async def refine_pass() -> bool:
             """One pass over [done_to - context, + window]; True when a backlog remains."""
             nonlocal done_to
+            if not seg.anchors:
+                return False  # no audio yet
             t_run = time.perf_counter()
-            t0, x = seg.window(REFINE_WINDOW_S, done_to - dt.timedelta(seconds=REFINE_CONTEXT_S) if done_to else None)
+            # from where the last pass stopped, or from the oldest buffered audio (a client may burst a backlog at startup)
+            t0, x = seg.window(REFINE_WINDOW_S, done_to - dt.timedelta(seconds=REFINE_CONTEXT_S) if done_to else seg.time_at(seg.audio_base))
             a0 = seg.sample_at(t0)
             at = lambda s: seg.time_at(a0 + int(s * SR))  # the window may span a session boundary, where the clock jumps
             since = EDGE_S if done_to is None else max(EDGE_S, (seg.sample_at(done_to) - a0) / SR)
@@ -592,8 +598,9 @@ async def pipeline(directory: Path, from_start: bool, key: str):
             if state["last_speech"] is None or state["last_speech"] <= (done_to or t0):
                 # silence: nothing to diarize, but the clock must advance so a conversation can close on time
                 done_to = hi
-                for c in grouper.flush(hi):
+                for c in grouper.advance(hi):
                     await broadcast(close(c))
+                state["done_to"] = hi
                 return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_CONTEXT_S
             try:
                 device = state["device"] or current_device(follower.dir)
@@ -647,8 +654,9 @@ async def pipeline(directory: Path, from_start: bool, key: str):
             done_to = hi
             closed = []
             for r in rows:
-                closed += grouper.push(r)
-            closed += grouper.flush(hi)
+                closed += grouper.sentence(r)
+            closed += grouper.advance(hi)
+            state["done_to"] = hi
             for c in closed:
                 await broadcast(close(c))
             if grouper.open:
@@ -660,7 +668,7 @@ async def pipeline(directory: Path, from_start: bool, key: str):
             log.info("refine %s: %s", device, state["refine"])
             return state["refine"]["backlog_s"] > REFINE_WINDOW_S - REFINE_CONTEXT_S
 
-        stalled = (None, time.monotonic())  # (audio_end, when it was first seen there)
+        last_end = None
         while True:
             await asyncio.sleep(REFINE_EVERY_S)
             c = state["chunks"]
@@ -673,13 +681,16 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                     pass
             while await refine_pass():  # timer-driven: silence also advances, so conversations close on time
                 pass
-            end = follower.audio_end
-            if end != stalled[0]:
-                stalled = (end, time.monotonic())
-            elif end and grouper.open and time.monotonic() - stalled[1] > grouper.gap:
-                # the recorder stopped: the audio clock will not advance, so close the open conversation
-                for c in grouper.flush(end + dt.timedelta(seconds=grouper.gap)):
-                    await broadcast(close(c))
+            closed = []
+            if state["end_at"] and follower.audio_end == last_end:  # the recorder stopped and its last audio is processed
+                closed += grouper.end(state["end_at"])
+                state["end_at"] = None
+            last_end = follower.audio_end
+            closed += grouper.tick()  # the safety net: nothing at all for IDLE_S (the recorder died without an end)
+            for c in closed:
+                await broadcast(close(c))
+            if not grouper.open:
+                state["conversation"] = None
 
     asyncio.create_task(transcribe_worker())
     asyncio.create_task(refine_loop())
@@ -740,6 +751,15 @@ async def index():
     return FileResponse(HERE / "static/index.html")
 
 
+@app.get("/app.apk")
+async def apk():
+    """The Android client, for installing from the phone's browser."""
+    p = DATA / "live-record.apk"
+    if not p.exists():
+        raise HTTPException(404, "no apk uploaded")
+    return FileResponse(p, media_type="application/vnd.android.package-archive", filename="live-record.apk")
+
+
 @app.get("/record")
 async def record_page():
     return FileResponse(HERE / "static/record.html")
@@ -747,11 +767,6 @@ async def record_page():
 
 def busy(device: str):
     """One stream at a time: a second device would silently take the pipeline over."""
-    cur = newest(state["dir"])
-    if cur and cur.suffix == ".webm" and time.time() - cur.stat().st_mtime < SESSION_STALE_S:
-        who = json.loads(cur.with_suffix(".json").read_text())["device"]
-        if who != device:
-            raise HTTPException(409, f"{who} 正在录音，服务端同一时刻只收一路")
     c = state["chunks"]
     if c and time.time() - c["at"] < SESSION_STALE_S and c["device"] != device:
         raise HTTPException(409, f"{c['device']} 正在录音，服务端同一时刻只收一路")
@@ -762,6 +777,12 @@ async def chunk(request: Request, device: str, start: int):
     """One self-contained audio file (the app's 20 s Opus pieces), `start` its device time in unix ms;
     it goes straight into the pipeline, anchored at that time, so gaps between pieces do not drift."""
     busy(device)
+    f = state["follower"]
+    state["audio_start"] = state["audio_start"] or dt.datetime.fromtimestamp(start / 1000)
+    behind = state["done_to"] or state["audio_start"]
+    if f and f.audio_end and (f.audio_end - behind).total_seconds() > BUFFER_S - 300:
+        # a client catching up after an outage would push audio out of the buffer before it is finalized
+        raise HTTPException(429, "服务端积压中，稍后再传", headers={"Retry-After": "20"})
     body = await request.body()
     pcm = await asyncio.to_thread(subprocess.run, ["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "s16le", "-ac", "1",
                                                    "-ar", str(SR), "pipe:1"], input=body, capture_output=True)
@@ -769,6 +790,10 @@ async def chunk(request: Request, device: str, start: int):
         raise HTTPException(400, f"could not decode: {pcm.stderr.decode()[-200:]}")
     x = np.frombuffer(pcm.stdout[:len(pcm.stdout) // 2 * 2], np.int16)
     t = dt.datetime.fromtimestamp(start / 1000)
+    ext = {"audio/ogg": "ogg", "audio/webm": "webm"}.get(request.headers.get("content-type", "").split(";")[0], "bin")
+    d = state["dir"] / "chunks" / re.sub(r"[^\w.-]", "_", device)  # kept for playback (/api/audio)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{start}.{ext}").write_bytes(body)
     state["chunks"] = {"device": device, "at": time.time()}
     if state["follower"]:
         state["follower"].audio_end = t + dt.timedelta(seconds=len(x) / SR)
@@ -776,31 +801,12 @@ async def chunk(request: Request, device: str, start: int):
     return {"seconds": round(len(x) / SR, 2)}
 
 
-@app.post("/api/record")
-async def record_start(device: str = "phone"):
-    """A browser recording session: the file its chunks get appended to, named by the server clock like
-    the recorder's files, and the sidecar current_device reads."""
-    busy(device)
-    stem = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    path = state["dir"] / f"{stem}.webm"
-    if path.exists():
-        raise HTTPException(409, "a session started this second, retry")
-    path.touch()
-    (state["dir"] / f"{stem}.json").write_text(json.dumps({"device": device, "format": "webm"}, ensure_ascii=False))
-    log.info("recording session %s from %s", stem, device)
-    return {"id": stem}
-
-
-@app.post("/api/record/{stem}")
-async def record_append(stem: str, request: Request):
-    """One MediaRecorder timeslice; the chunks of a session are one webm stream, so they must arrive in order."""
-    path = state["dir"] / f"{stem}.webm"
-    if not re.fullmatch(r"\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d", stem) or not path.exists():
-        raise HTTPException(404, "no such session")
-    body = await request.body()
-    with open(path, "ab") as f:
-        f.write(body)
-    return {"bytes": path.stat().st_size}
+@app.post("/api/chunks/end")
+async def chunk_end(device: str, t: int):
+    """The recorder stopped at device time t (unix ms): the open conversation closes once its audio is processed."""
+    state["end_at"] = dt.datetime.fromtimestamp(t / 1000)
+    log.info("%s stopped recording at %s", device, state["end_at"].time())
+    return {"ok": True}
 
 
 @app.get("/api/sentences")
@@ -825,16 +831,28 @@ async def conversations(date: str | None = None):
 
 @app.get("/api/audio")
 async def audio(start: str, end: str):
-    """WAV of [start, end] (+0.2 s each side) cut from the recording that covers it."""
+    """WAV of [start, end] (+0.2 s each side) cut from the uploaded pieces, or the recorder's file, covering it."""
     a, b = dt.datetime.fromisoformat(start), dt.datetime.fromisoformat(end)
-    files = [p for p in recordings(state["dir"]) if file_start(p) <= a]
-    if not files or b <= a or (b - a).total_seconds() > 120:
+    if b <= a or (b - a).total_seconds() > 120:
         raise HTTPException(404, "no recording covers this time")
-    path = max(files, key=file_start)
-    off = max(0.0, (a - file_start(path)).total_seconds() - 0.2)
-    wav = await asyncio.to_thread(subprocess.run, [
-        "ffmpeg", "-v", "error", "-ss", f"{off:.3f}", "-t", f"{(b - a).total_seconds() + 0.4:.3f}", "-i", str(path),
-        "-ac", "1", "-ar", str(SR), "-f", "wav", "pipe:1"], capture_output=True)
+    a_ms, b_ms = int(a.timestamp() * 1000), int(b.timestamp() * 1000)
+    pieces = sorted(p for p in (state["dir"] / "chunks").glob("*/*.*")
+                    if p.stem.isdigit() and int(p.stem) <= b_ms and int(p.stem) + CHUNK_MAX_S * 1000 >= a_ms)
+    if pieces:  # uploaded pieces: concatenated back to back (the small gaps between them are ignored)
+        path, off = pieces[0], max(0.0, (a_ms - int(pieces[0].stem)) / 1000 - 0.2)
+        ins = [x for p in pieces for x in ("-i", str(p))]
+        cmd = ["ffmpeg", "-v", "error", *ins, "-filter_complex", "".join(f"[{i}:a]" for i in range(len(pieces))) +
+               f"concat=n={len(pieces)}:v=0:a=1[a]", "-map", "[a]", "-ss", f"{off:.3f}", "-t", f"{(b - a).total_seconds() + 0.4:.3f}",
+               "-ac", "1", "-ar", str(SR), "-f", "wav", "pipe:1"]
+    else:
+        files = [p for p in recordings(state["dir"]) if file_start(p) <= a]
+        if not files:
+            raise HTTPException(404, "no recording covers this time")
+        path = max(files, key=file_start)
+        off = max(0.0, (a - file_start(path)).total_seconds() - 0.2)
+        cmd = ["ffmpeg", "-v", "error", "-ss", f"{off:.3f}", "-t", f"{(b - a).total_seconds() + 0.4:.3f}", "-i", str(path),
+               "-ac", "1", "-ar", str(SR), "-f", "wav", "pipe:1"]
+    wav = await asyncio.to_thread(subprocess.run, cmd, capture_output=True)
     if wav.returncode or len(wav.stdout) <= 44:
         raise HTTPException(404, f"could not cut {path.name}: {wav.stderr.decode()[-200:]}")
     return Response(wav.stdout, media_type="audio/wav")
