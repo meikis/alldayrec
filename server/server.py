@@ -46,7 +46,7 @@ ROTATE_IDLE_S = 5.0                        # file stopped growing and a newer on
 REFINE_EVERY_S = int(os.environ.get("REFINE_EVERY_S", "30"))  # finalization cadence
 FIRST_LAYER = os.environ.get("FIRST_LAYER", "on") != "off"   # off: no per-utterance ASR; text only comes from the finalization pass
 REFINE_WINDOW_S = int(os.environ.get("REFINE_WINDOW_S", "240"))    # most audio one pass takes (catching up a backlog)
-REFINE_CONTEXT_S = int(os.environ.get("REFINE_CONTEXT_S", "15"))   # audio before the last finalized time re-read for cluster context
+REFINE_CONTEXT_S = int(os.environ.get("REFINE_CONTEXT_S", "30"))   # audio before the last finalized time re-read for cluster context
 ENGINE = os.environ.get("ENGINE", "volc")  # second-layer engine: volc (seed-asr-2.0 streaming API) | stepfun (file-mode service)
 BUFFER_S = 900                             # audio kept for refinement; a stalled refiner catches up from here
 TURN_GAP_S = float(os.environ.get("TURN_GAP_S", "1.0"))  # same speaker, closer than this: one final row; 0 keeps the engine's sentences as rows
