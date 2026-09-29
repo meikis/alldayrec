@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import base64
 import datetime as dt
+import hmac
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
 from conversations import Grouper
 
@@ -65,6 +66,7 @@ SEG_MODEL = Path(os.environ.get("SEG_MODEL", ""))  # sherpa-onnx pyannote segmen
 EMB_MODEL = Path(env("EMB_MODEL"))                # sherpa-onnx speaker embedding model (CAM++ by default)
 BRIDGE = env("ASR_UPLOAD_BRIDGE_URL")             # returns {upload_url, download_url} for a file name
 DIARIZE = env("ASR_SERVICE_URL")                   # file-mode ASR service: POST /audio/transcriptions, GET /jobs/{id}
+AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")      # empty: no auth (loopback only); set when a proxy exposes the server
 
 log = logging.getLogger("live")
 
@@ -679,6 +681,28 @@ async def status_loop():
         await asyncio.sleep(2)
 
 
+def authorized(cookies, headers) -> bool:
+    ok = lambda v: bool(v) and hmac.compare_digest(v, AUTH_TOKEN)
+    return ok(cookies.get("token")) or ok(headers.get("authorization", "")[7:])
+
+
+@app.middleware("http")
+async def auth(request: Request, call_next):
+    """Open any page once with ?token=<AUTH_TOKEN>: a year-long cookie replaces the browser's basic-auth prompt
+    that Android Chrome forgets on every reload."""
+    if not AUTH_TOKEN:
+        return await call_next(request)
+    t = request.query_params.get("token")
+    if t and hmac.compare_digest(t, AUTH_TOKEN):
+        u = request.url.remove_query_params("token")
+        resp = RedirectResponse(u.path + (f"?{u.query}" if u.query else ""), status_code=303)  # relative: the proxy owns the scheme
+        resp.set_cookie("token", AUTH_TOKEN, max_age=365 * 86400, httponly=True, samesite="lax")
+        return resp
+    if authorized(request.cookies, request.headers):
+        return await call_next(request)
+    return Response("token required: open /?token=<AUTH_TOKEN> once", 401)
+
+
 @app.get("/")
 async def index():
     return FileResponse(HERE / "static/index.html")
@@ -754,6 +778,9 @@ async def audio(start: str, end: str):
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    if AUTH_TOKEN and not authorized(ws.cookies, ws.headers):
+        await ws.close(code=4401)
+        return
     await ws.accept()
     clients.add(ws)
     try:
