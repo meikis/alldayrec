@@ -1,6 +1,6 @@
 """Conversation-level speaker labels. Every new sentence re-clusters the open conversation's voiceprints
 (ReDimNet2, average-link cosine) and takes its cluster's label: 我 when that cluster's mean voiceprint is
-the one closest to the owner bank (>= OWNER_MIN), else the S<n> most of the cluster's earlier sentences
+close to the owner bank (>= OWNER_MIN; a split owner stays 我 in every piece), else the S<n> most of the cluster's earlier sentences
 carry, so ids follow membership as clusters grow and merge. Only the new sentence is labelled; earlier
 rows are never rewritten. Case replays 09-29: see artifacts/record/voiceprint.
 
@@ -10,7 +10,7 @@ import os
 
 import numpy as np
 
-TH = float(os.environ.get("DIAR_TH", "0.6"))  # cosine distance; 0.55-0.65 flat on four cases, 0.75 merges people
+TH = float(os.environ.get("DIAR_TH", "0.5"))  # cosine distance; lower splits one person into several ids (mergeable later), higher merges people (not undoable): 0.6 merged two colleagues in the 05-26 meeting
 OWNER_MIN = 0.7   # ReDimNet2 cluster vs owner bank: my clusters 0.79-0.99, others <= 0.63 (incl. unseen channels)
 MIN_DUR = 1.0     # shorter sentences are not clustered: they join the nearest labelled centroid
 JOIN = float(os.environ.get("DIAR_JOIN", "0.35"))  # ... when at least this close, else S?; also for a lone long sentence
@@ -66,13 +66,12 @@ class Diarist:
         lab = AgglomerativeClustering(n_clusters=None, distance_threshold=self.th, metric="cosine",
                                       linkage="average").fit_predict(E[big]) if len(big) > 1 else np.zeros(1, int)
         owner = {c: max(float(_unit(E[big][lab == c].mean(0)) @ o) for o in self.bank) for c in set(lab)}
-        me = max((c for c in owner if (lab == c).sum() >= MIN_ME), key=owner.get, default=None)
-        me = me if me is not None and owner[me] >= OWNER_MIN else None
+        me = {c for c in owner if (lab == c).sum() >= MIN_ME and owner[c] >= OWNER_MIN}
         c = lab[big.index(i)]
-        if c == me:
+        if c in me:
             self.ids[i] = "我"
             return "我", round(owner[c], 3)
-        clusters = sorted(set(lab) - {me})
+        clusters = sorted(set(lab) - me)
         known = sorted({v for v in self.ids if v not in (None, "S?", "我")})
         cmap = {}
         if known:

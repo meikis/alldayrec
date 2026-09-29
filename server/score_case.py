@@ -115,6 +115,13 @@ def score(gt, hyp):
             t[g["speaker"]] += overlap(g, h)
         mixed += sum(1 for v in t.values() if v >= 0.5) >= 2
     out["mixed"] = (mixed, len(hyp))
+    # purity: share of covered truth sentences whose label's majority truth is their own; merged people lower it
+    by_label = {}
+    for g, x in pairs:
+        if x is not None and x != "S?":
+            by_label.setdefault(x, Counter())[g["speaker"]] += 1
+    n = sum(sum(c.values()) for c in by_label.values())
+    out["purity"] = sum(c.most_common(1)[0][1] for c in by_label.values()) / n if n else None
     out["hyp_labels"] = dict(Counter(h["speaker"] for h in hyp).most_common(8))  # registry ids: ideally one per real person
     # CER per 60 s window
     t0 = gt[0]["a"]
