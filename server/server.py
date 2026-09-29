@@ -2,7 +2,7 @@
 
     set -a; . .env; set +a; uv run python server.py [--dir <recordings>] [--port 8770] [--from-start]   (variables: .env.example)
 
-Tails the newest Opus segment the recorder is writing, cuts speech with FireRed Stream-VAD,
+Tails the newest recording (the recorder's Opus segment, or the webm stream the /record page uploads), cuts speech with FireRed Stream-VAD,
 sends each utterance to StepFun streaming ASR, appends sentences to data/<date>.jsonl and
 pushes them to the page at http://127.0.0.1:<port>/.
 """
@@ -13,14 +13,14 @@ import datetime as dt
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 import uuid
 from pathlib import Path
 
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 
 from conversations import Grouper
@@ -58,6 +58,7 @@ LINK_MIN = float(os.environ.get("LINK_MIN", "0.55"))   # cosine to link a window
 # into 3 ids); the far-field MacBook meeting wants finer clusters and stricter linking (0.55 merged
 # two colleagues). Case 09-28 vs case 05-26, see the 2026-09-29 iteration record.
 DEVICE_PARAMS = {"Wireless Mic Rx": {"diar": 1.0, "link": 0.55}, "MacBook Pro麦克风": {"diar": 0.8, "link": 0.65}}
+OWNER_DEFAULT_DEVICE = os.environ.get("OWNER_DEFAULT_DEVICE", "")  # voiceprint used for devices owner.py has not seen (a new phone)
 DIARIZER = os.environ.get("DIARIZER", "cloud")   # cloud: speakers from the file-mode ASR result; local: sherpa-onnx on this machine
 TEXT_SOURCE = os.environ.get("TEXT_SOURCE", "file")  # local diarizer's turn text: file (one StepFun file call per pass, words split by turn) | sse (one call per turn)
 SEG_MODEL = Path(os.environ.get("SEG_MODEL", ""))  # sherpa-onnx pyannote segmentation model; only for DIARIZER=local
@@ -78,8 +79,15 @@ def current_device(directory: Path) -> str:
     return json.loads(side.read_text())["device"]
 
 
-def newest(directory: Path) -> Path:
-    return max(directory.glob("20*.ogg"), key=lambda p: p.name)
+FORMATS = {".ogg": "ogg", ".webm": "matroska"}   # the recorder's Opus files; the browser page's MediaRecorder stream
+
+
+def recordings(directory: Path) -> list[Path]:
+    return [p for p in directory.glob("20*") if p.suffix in FORMATS]
+
+
+def newest(directory: Path) -> Path | None:
+    return max(recordings(directory), key=lambda p: p.name, default=None)
 
 
 class Follower:
@@ -95,19 +103,23 @@ class Follower:
         self.audio_end: dt.datetime | None = None
 
     async def chunks(self):
-        path, skip_until = newest(self.dir), None if self.from_start else (self.resume or dt.datetime.now())
+        skip_until = None if self.from_start else (self.resume or dt.datetime.now())
         while True:
+            path = newest(self.dir)
+            if path is None or path == self.path:
+                await asyncio.sleep(1)  # nothing recorded yet
+                continue
             self.path = path
             async for t, x in self._decode(path):
                 if skip_until and t + dt.timedelta(seconds=len(x) / SR) <= skip_until:
                     continue
                 self.audio_end = t + dt.timedelta(seconds=len(x) / SR)
                 yield t, x
-            path = newest(self.dir)
+            skip_until = None  # only the file found at startup holds already-transcribed audio
 
     async def _decode(self, path: Path):
         proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-v", "error", "-f", "ogg", "-i", "pipe:0", "-f", "s16le", "-ac", "1",
+            "ffmpeg", "-v", "error", "-f", FORMATS[path.suffix], "-i", "pipe:0", "-f", "s16le", "-ac", "1",
             "-ar", str(SR), "-flush_packets", "1", "pipe:1",
             stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         feeder = asyncio.create_task(self._feed(path, proc))
@@ -369,6 +381,7 @@ class Speakers:
         self.ex = sherpa_onnx.SpeakerEmbeddingExtractor(
             sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(EMB_MODEL), num_threads=2))
         self.owner = dict(np.load(DATA / "owner.npz"))
+        self.warned: set[str] = set()
 
     def embed(self, x: np.ndarray) -> np.ndarray:
         s = self.ex.create_stream()
@@ -380,6 +393,11 @@ class Speakers:
     def label(self, segs: list[dict], x: np.ndarray, device: str) -> tuple[dict, dict, dict, dict]:
         """(cluster -> 我/他人, cluster -> owner score, cluster -> unit mean voiceprint, cluster -> seconds)."""
         owner = self.owner.get(device)
+        if owner is None and OWNER_DEFAULT_DEVICE in self.owner:
+            owner = self.owner[OWNER_DEFAULT_DEVICE]
+            if device not in self.warned:
+                self.warned.add(device)
+                log.warning("no owner voiceprint for %r, scoring against %r", device, OWNER_DEFAULT_DEVICE)
         if owner is None:
             raise RuntimeError(f"no owner voiceprint for {device!r}; run owner.py")
         mean, secs = {}, {}
@@ -666,6 +684,37 @@ async def index():
     return FileResponse(HERE / "static/index.html")
 
 
+@app.get("/record")
+async def record_page():
+    return FileResponse(HERE / "static/record.html")
+
+
+@app.post("/api/record")
+async def record_start(device: str = "phone"):
+    """A browser recording session: the file its chunks get appended to, named by the server clock like
+    the recorder's files, and the sidecar current_device reads."""
+    stem = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    path = state["dir"] / f"{stem}.webm"
+    if path.exists():
+        raise HTTPException(409, "a session started this second, retry")
+    path.touch()
+    (state["dir"] / f"{stem}.json").write_text(json.dumps({"device": device, "format": "webm"}, ensure_ascii=False))
+    log.info("recording session %s from %s", stem, device)
+    return {"id": stem}
+
+
+@app.post("/api/record/{stem}")
+async def record_append(stem: str, request: Request):
+    """One MediaRecorder timeslice; the chunks of a session are one webm stream, so they must arrive in order."""
+    path = state["dir"] / f"{stem}.webm"
+    if not re.fullmatch(r"\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d", stem) or not path.exists():
+        raise HTTPException(404, "no such session")
+    body = await request.body()
+    with open(path, "ab") as f:
+        f.write(body)
+    return {"bytes": path.stat().st_size}
+
+
 @app.get("/api/sentences")
 async def sentences(date: str | None = None):
     day = dt.date.fromisoformat(date) if date else dt.date.today()
@@ -690,7 +739,7 @@ async def conversations(date: str | None = None):
 async def audio(start: str, end: str):
     """WAV of [start, end] (+0.2 s each side) cut from the recording that covers it."""
     a, b = dt.datetime.fromisoformat(start), dt.datetime.fromisoformat(end)
-    files = [p for p in state["dir"].glob("20*.ogg") if file_start(p) <= a]
+    files = [p for p in recordings(state["dir"]) if file_start(p) <= a]
     if not files or b <= a or (b - a).total_seconds() > 120:
         raise HTTPException(404, "no recording covers this time")
     path = max(files, key=file_start)
@@ -730,6 +779,7 @@ def main():
         raise SystemExit(f"not set: {', '.join(missing)} (see .env.example)")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     state["dir"] = args.dir
+    args.dir.mkdir(parents=True, exist_ok=True)
     state["commit"] = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--short", "HEAD"],
                                      capture_output=True, text=True).stdout.strip()
 
@@ -739,7 +789,7 @@ def main():
         asyncio.create_task(status_loop())
 
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

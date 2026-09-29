@@ -14,3 +14,11 @@ dependencies = [
     "sherpa-onnx-core==1.13.8",
     "websockets>=17.1",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]  # the VAD runs on CPU; the PyPI Linux wheel drags in 2 GB of CUDA
