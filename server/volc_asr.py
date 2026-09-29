@@ -103,7 +103,9 @@ async def _run(x: np.ndarray, mode: str, pace_s: float, speakers: bool, log=None
 
 
 def transcribe(x: np.ndarray, mode: str = "nostream", pace_s: float = 0.02, speakers: bool = True):  # 0.02: 10x real time
-    return asyncio.run(_run(x, mode, pace_s, speakers))
+    """Bounded: a stalled connection (send blocked, no answer) must fail so the caller retries next pass."""
+    budget = 30 + len(x) / SR * (pace_s * 5 + 0.3)  # sending time plus the engine's ~0.25x real time, with headroom
+    return asyncio.run(asyncio.wait_for(_run(x, mode, pace_s, speakers), timeout=budget))
 
 
 def main():

@@ -709,19 +709,31 @@ async def pipeline(directory: Path, from_start: bool, key: str):
             if not grouper.open:
                 state["conversation"] = None
 
-    asyncio.create_task(transcribe_worker())
-    asyncio.create_task(refine_loop())
+    def watched(coro, name):
+        """A task whose death is logged: an unhandled exception would otherwise stop the pipeline silently."""
+        t = asyncio.create_task(coro, name=name)
+        t.add_done_callback(lambda t: log.error("task %s ended: %r", name, t.exception()) if not t.cancelled() else None)
+        return t
+
+    watched(transcribe_worker(), "transcribe")
+    watched(refine_loop(), "refine")
     audio_q: asyncio.Queue = asyncio.Queue()
     state["audio_q"] = audio_q
+    state["seg"] = seg
 
     async def follow():
         async for t, x in follower.chunks():
             await audio_q.put((t, x))
 
-    asyncio.create_task(follow())
+    watched(follow(), "follow")
     while True:
         t, x = await audio_q.get()  # from the followed file, or /api/chunks
-        for u in seg.push(t, x):
+        try:
+            utts = seg.push(t, x)
+        except Exception:
+            log.exception("segmenter failed on %.1f s at %s", len(x) / SR, t.time())
+            continue
+        for u in utts:
             state["last_speech"] = u[1]  # the refiner skips diarizing stretches with no VAD speech
             if FIRST_LAYER:
                 await queue.put(u)
@@ -827,6 +839,19 @@ async def chunk_end(device: str, t: int):
     return {"ok": True}
 
 
+@app.get("/api/status")
+async def status():
+    """What the page's status line shows, plus the pipeline's clocks, for diagnosis."""
+    f, seg = state["follower"], state.get("seg")
+    return {"audio_end": f.audio_end.isoformat(timespec="seconds") if f and f.audio_end else None,
+            "audio_seconds": round(seg.samples / SR, 1) if seg else None,
+            "last_speech": state["last_speech"].isoformat(timespec="seconds") if state["last_speech"] else None,
+            "done_to": state["done_to"].isoformat(timespec="seconds") if state["done_to"] else None,
+            "chunks": state["chunks"], "refine": state["refine"], "conversation": state["conversation"],
+            "latency_s": sorted(state["latency"])[len(state["latency"]) // 2] if state["latency"] else None,
+            "errors": state["errors"], "engine": ENGINE, "commit": state["commit"]}
+
+
 @app.get("/api/sentences")
 async def sentences(date: str | None = None):
     day = dt.date.fromisoformat(date) if date else dt.date.today()
@@ -916,8 +941,9 @@ def main():
 
     @app.on_event("startup")
     async def start():
-        asyncio.create_task(pipeline(args.dir, args.from_start, key))
-        asyncio.create_task(status_loop())
+        for name, coro in (("pipeline", pipeline(args.dir, args.from_start, key)), ("status", status_loop())):
+            asyncio.create_task(coro, name=name).add_done_callback(
+                lambda t, n=name: log.error("task %s ended: %r", n, t.exception()) if not t.cancelled() else None)
 
     import uvicorn
     uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=args.port, log_level="warning")
