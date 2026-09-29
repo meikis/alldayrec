@@ -1,9 +1,11 @@
-// live-record Android client: records 20 s Opus pieces in a foreground service and uploads them
-// in order to the server's /api/chunks; the transcript page is shown in a WebView below.
+// live-record Android client. The native side (MainActivity.kt) keeps the microphone open and cuts the
+// continuous Opus stream into Ogg files whose length follows the app state; this side uploads them in
+// order to the server's /api/chunks and shows the transcript page in a WebView.
 import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
@@ -11,7 +13,7 @@ import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
-const sliceMs = 20000;
+const sliceForegroundS = 5, sliceBackgroundS = 20, sliceScreenOffS = 60;
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -37,41 +39,14 @@ class Settings {
   }
 }
 
-/// Cuts the microphone into self-contained Opus files named by their start time (unix ms).
-/// Stop/start between pieces loses a little audio; the server anchors each piece at its start
-/// time, so the loss does not drift the clock. ponytail: encode from a PCM stream if that gap matters.
-class Cutter {
-  final AudioRecorder rec = AudioRecorder();
-  final Directory dir;
-  Timer? timer;
-  int? startMs;
-  Cutter(this.dir);
-
-  Future<void> start() async {
-    await _begin();
-    timer = Timer.periodic(const Duration(milliseconds: sliceMs), (_) => _rotate());
-  }
-
-  Future<void> _begin() async {
-    startMs = DateTime.now().millisecondsSinceEpoch;
-    await rec.start(
-      const RecordConfig(encoder: AudioEncoder.opus, sampleRate: 16000, numChannels: 1, bitRate: 24000,
-          echoCancel: false, noiseSuppress: false, autoGain: false),
-      path: '${dir.path}/$startMs.part',
-    );
-  }
-
-  Future<void> _rotate() async {
-    final p = await rec.stop();
-    if (p != null) await File(p).rename(p.replaceFirst('.part', '.ogg'));  // .ogg = ready to upload
-    await _begin();
-  }
-
-  Future<void> stop() async {
-    timer?.cancel();
-    final p = await rec.stop();
-    if (p != null) await File(p).rename(p.replaceFirst('.part', '.ogg'));
-  }
+/// The native slicer: files named <start ms>.ogg appear in `dir`; .part is the one being written.
+class Recorder {
+  static const _ch = MethodChannel('live_record/recorder');
+  static Future<void> start(String dir) => _ch.invokeMethod('start',
+      {'dir': dir, 'foreground': sliceForegroundS, 'background': sliceBackgroundS, 'screenOff': sliceScreenOffS});
+  static Future<void> stop() => _ch.invokeMethod('stop');
+  static Future<void> foreground(bool on) => _ch.invokeMethod('foreground', {'on': on});
+  static Future<Map?> status() async => (await _ch.invokeMethod('status')) as Map?;
 }
 
 /// Uploads the .ogg files in start order, one at a time, retrying forever; a file is deleted once
@@ -92,7 +67,7 @@ class Uploader {
     while (running) {
       final files = pending;
       if (files.isEmpty) {
-        await Future.delayed(const Duration(seconds: 2));
+        await Future.delayed(const Duration(seconds: 1));
         continue;
       }
       final f = files.first, start = f.uri.pathSegments.last.split('.').first;
@@ -120,7 +95,6 @@ class Uploader {
         onStatus('上传失败 $e');
         await Future.delayed(Duration(seconds: 5 * (fails > 6 ? 6 : fails)));
       }
-      onStatus(null == running ? '' : '已传 $sent 块 · 待传 ${pending.length}');
     }
   }
 }
@@ -131,17 +105,19 @@ class Home extends StatefulWidget {
   State<Home> createState() => _HomeState();
 }
 
-class _HomeState extends State<Home> {
+class _HomeState extends State<Home> with WidgetsBindingObserver {
   Settings? settings;
-  Cutter? cutter;
+  bool on = false;
   Uploader? uploader;
-  String status = '未开始';
+  Timer? ticker;
+  String status = '未开始', note = '';
   WebViewController? web;
   final serverCtl = TextEditingController(), tokenCtl = TextEditingController(), deviceCtl = TextEditingController();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     Settings.load().then((s) => setState(() {
           settings = s;
           serverCtl.text = s.server;
@@ -154,6 +130,11 @@ class _HomeState extends State<Home> {
       iosNotificationOptions: const IOSNotificationOptions(),
       foregroundTaskOptions: ForegroundTaskOptions(eventAction: ForegroundTaskEventAction.nothing()),
     );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (on) Recorder.foreground(state == AppLifecycleState.resumed);
   }
 
   void _loadWeb() {
@@ -175,23 +156,29 @@ class _HomeState extends State<Home> {
 
   Future<void> _start() async {
     await _save();
-    if (!await AudioRecorder().hasPermission()) return _say('没有麦克风权限');
+    if (!await AudioRecorder().hasPermission()) return _note('没有麦克风权限');
     await FlutterForegroundTask.requestNotificationPermission();
     final dir = Directory('${(await getApplicationDocumentsDirectory()).path}/chunks')..createSync(recursive: true);
     await FlutterForegroundTask.startService(
         serviceTypes: [ForegroundServiceTypes.microphone], notificationTitle: 'live-record 正在录音', notificationText: '');
-    cutter = Cutter(dir);
-    await cutter!.start();
-    uploader = Uploader(dir, settings!, _say);
+    await Recorder.start(dir.path);
+    uploader = Uploader(dir, settings!, _note);
     unawaited(uploader!.run());
-    _say('录音中');
+    setState(() => on = true);
+    ticker = Timer.periodic(const Duration(seconds: 2), (_) async {
+      final s = await Recorder.status();
+      if (!mounted) return;
+      setState(() => status = s == null
+          ? '录音中'
+          : '录音中 · 切片 ${s['slice']} 秒 · 已切 ${s['files']} 已传 ${uploader?.sent} 待传 ${uploader?.pending.length}${s['error'] != null ? ' · 错误 ${s['error']}' : ''}');
+    });
   }
 
   Future<void> _stop() async {
     final at = DateTime.now().millisecondsSinceEpoch, s = settings!;
-    await cutter?.stop();
-    cutter = null;
-    _say('停止，等最后几块传完');
+    ticker?.cancel();
+    await Recorder.stop();
+    setState(() => status = '停止，等最后几块传完');
     final t0 = DateTime.now();
     while (uploader != null && uploader!.pending.isNotEmpty && DateTime.now().difference(t0).inSeconds < 120) {
       await Future.delayed(const Duration(milliseconds: 500));
@@ -201,18 +188,20 @@ class _HomeState extends State<Home> {
       await http.post(Uri.parse('${s.server}/api/chunks/end?device=${Uri.encodeComponent(s.device)}&t=$at'),
           headers: {'Authorization': 'Bearer ${s.token}'}).timeout(const Duration(seconds: 15));
     } catch (e) {
-      _say('结束信号失败 $e');
+      _note('结束信号失败 $e');
     }
     await FlutterForegroundTask.stopService();
     final left = uploader?.pending.length ?? 0;
-    _say(left == 0 ? '已停止' : '已停止，剩余 $left 块会在下次开始时继续传');
+    setState(() {
+      on = false;
+      status = left == 0 ? '已停止' : '已停止，剩余 $left 块会在下次开始时继续传';
+    });
   }
 
-  void _say(String s) => mounted ? setState(() => status = s) : null;
+  void _note(String s) => mounted ? setState(() => note = s) : null;
 
   @override
   Widget build(BuildContext context) {
-    final on = cutter != null;
     return Scaffold(
       body: SafeArea(
         child: Column(children: [
@@ -236,7 +225,7 @@ class _HomeState extends State<Home> {
                   child: Text(on ? '停止' : '开始录音'),
                 ),
                 const SizedBox(width: 12),
-                Expanded(child: Text(status, style: const TextStyle(fontSize: 13, color: Colors.black54))),
+                Expanded(child: Text('$status${note.isEmpty ? '' : '\n$note'}', style: const TextStyle(fontSize: 12, color: Colors.black54))),
               ]),
             ]),
           ),

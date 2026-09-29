@@ -174,14 +174,14 @@ def rows_from_windows(case: Case, spk: Speakers, diar, name: str, need_asr: bool
     total = len(case.x) / SR
     ends = list(np.arange(REFINE_WINDOW_S, total, REFINE_EVERY_S)) + [total]
     records, t_run, reg = [], time.time(), Registry()
-    if diar.__name__ == "cloud":  # independent calls, 4 in flight; results land in the cache
+    if diar.__name__ in ("cloud", "volc"):  # independent calls, 4 in flight; results land in the cache
         with cf.ThreadPoolExecutor(4) as ex:
             list(ex.map(lambda e: diar(max(0.0, e - REFINE_WINDOW_S), e), ends))
         print(f"  cloud diarizations cached in {time.time() - t_run:.0f}s", flush=True)
     for n, e in enumerate(ends):
         a = max(0.0, e - REFINE_WINDOW_S)
         x = case.x[int(a * SR):int(e * SR)]
-        if diar.__name__ == "cloud":
+        if diar.__name__ in ("cloud", "volc"):
             segs = diar(a, e)
         else:  # cache local diarizations per window so relabelling is cheap
             emb = os.path.basename(os.environ.get("EMB_MODEL", "campplus")).split("_")[2] if os.environ.get("EMB_MODEL") else "campplus"
