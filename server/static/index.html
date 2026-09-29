@@ -101,7 +101,7 @@ function conversation(c) {
 function status(m) {
   const behind = m.behind_s == null ? "—" : `${m.behind_s} 秒`;
   document.getElementById("status").innerHTML =
-    `<span>${m.file || "等待录音"}</span><span class="${m.behind_s > 30 ? "bad" : ""}">落后 ${behind}</span>` +
+    `<span>${m.file || "等待录音"}</span><span class="${m.behind_s > 30 ? "bad" : ""}">落后 ${behind}</span><span class="${m.latency_s > 60 ? "bad" : ""}">上屏 ${m.latency_s ?? "—"} 秒</span>` +
     `<span>ASR ${m.asr_ms ?? "—"} ms</span><span class="${m.errors ? "bad" : ""}">失败 ${m.errors}</span><span>无人声 ${m.no_speech}</span>` +
     `<span class="${m.refine && m.refine.error ? "bad" : ""}">分离 ${m.refine ? (m.refine.error ? "失败" : m.refine.at.slice(11) + " " + (m.refine.ms / 1000).toFixed(0) + "s") : "等待"}</span>` +
     `<span>${m.conversation ? "对话中 " + m.conversation.start.slice(11, 16) + " · " + m.conversation.sentences + " 句" : "无对话"}</span>` +

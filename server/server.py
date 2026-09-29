@@ -45,8 +45,9 @@ MAX_UTTERANCE_S = 15.0
 ROTATE_IDLE_S = 5.0                        # file stopped growing and a newer one exists -> switch
 REFINE_EVERY_S = int(os.environ.get("REFINE_EVERY_S", "30"))  # finalization cadence
 FIRST_LAYER = os.environ.get("FIRST_LAYER", "on") != "off"   # off: no per-utterance ASR; text only comes from the finalization pass
-REFINE_WINDOW_S = 240                      # audio diarized per refinement pass
-REFINE_CONTEXT_S = 30                      # audio before the last finalized time that a pass re-reads for cluster context
+REFINE_WINDOW_S = int(os.environ.get("REFINE_WINDOW_S", "240"))    # most audio one pass takes (catching up a backlog)
+REFINE_CONTEXT_S = int(os.environ.get("REFINE_CONTEXT_S", "15"))   # audio before the last finalized time re-read for cluster context
+ENGINE = os.environ.get("ENGINE", "volc")  # second-layer engine: volc (seed-asr-2.0 streaming API) | stepfun (file-mode service)
 BUFFER_S = 900                             # audio kept for refinement; a stalled refiner catches up from here
 TURN_GAP_S = float(os.environ.get("TURN_GAP_S", "1.0"))  # same speaker, closer than this: one final row; 0 keeps the engine's sentences as rows
 EDGE_S = 3.0                               # rows touching the window edges may be cut: left to the next pass
@@ -283,6 +284,17 @@ def _http(url, data=None, headers=None, method=None) -> bytes:
 FILE_MODELS = tuple(os.environ.get("FILE_MODELS", "stepaudio-2.5-asr-8006,doubao-seedasr-2.0").split(","))  # file-mode engines, in order of preference
 
 
+def engine_segs(x: np.ndarray) -> list[dict]:
+    """Sentences with times and speaker ids for a window of audio, from the configured engine."""
+    if ENGINE != "volc":
+        return diarize(x)
+    import volc_asr
+    t = time.perf_counter()
+    utts, info = volc_asr.transcribe(x)
+    log.info("volc: %.0f s audio in %.1f s, %d utterances, logid %s", len(x) / SR, time.perf_counter() - t, len(utts), info.get("logid"))
+    return [{"speaker": "SPEAKER_0", **u, "engine": "volc"} for u in utts]
+
+
 def diarize(x: np.ndarray, model: str = FILE_MODELS[0]) -> list[dict]:
     """File-mode ASR with speakers and word times on a window of audio (via the file-mode ASR service).
     StepFun's risk control refuses some content outright; that window is then sent to Doubao and every
@@ -472,7 +484,7 @@ class LocalDiarizer:
 
 app = FastAPI()
 clients: set[WebSocket] = set()
-state = {"follower": None, "chunks": None, "audio_q": None, "end_at": None, "done_to": None, "audio_start": None, "asr_ms": None, "errors": 0, "no_speech": 0, "commit": "", "refine": None, "device": None,
+state = {"follower": None, "chunks": None, "audio_q": None, "end_at": None, "done_to": None, "audio_start": None, "latency": [], "asr_ms": None, "errors": 0, "no_speech": 0, "commit": "", "refine": None, "device": None,
          "conversation": None, "last_speech": None}
 
 
@@ -604,7 +616,7 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                 return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_CONTEXT_S
             try:
                 device = state["device"] or current_device(follower.dir)
-                segs = await asyncio.to_thread(local_for(device), x) if local else await asyncio.to_thread(diarize, x)
+                segs = await asyncio.to_thread(local_for(device), x) if local else await asyncio.to_thread(engine_segs, x)
                 all_segs, segs = segs, clip_turns(segs, since)  # voiceprints use the whole window, text and rows only the new part
                 engine = None
                 if local and TEXT_SOURCE == "file":  # one file-mode call for the window; its words go to the local turns
@@ -647,6 +659,11 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                     rows.append({**p, "speaker": None, "speaker_confidence": None, "state": "final", "words": None})
                     log.info("kept first-layer row %s without a diarized turn", p["start"][11:19])
             rows.sort(key=lambda r: r["start"])
+            shown = dt.datetime.now()
+            for r in rows:  # end of speech -> on the page: the latency the person sees
+                r["shown_at"] = shown.isoformat(timespec="milliseconds")
+                state["latency"].append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
+            del state["latency"][:-50]
             rec = {"from": lo.isoformat(timespec="milliseconds"), "to": hi.isoformat(timespec="milliseconds"), "rows": rows}
             with open(final_path(lo.date()), "a") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -720,7 +737,8 @@ async def status_loop():
                          "asr_ms": state["asr_ms"], "errors": state["errors"],
                          "no_speech": state["no_speech"], "commit": state["commit"], "refine": state["refine"],
                          "conversation": state["conversation"], "diarizer": DIARIZER,
-                         "mode": f"{'two-layer' if FIRST_LAYER else 'final-only'}/{TEXT_SOURCE}/{REFINE_EVERY_S}s"})
+                         "latency_s": sorted(state["latency"])[len(state["latency"]) // 2] if state["latency"] else None,
+                         "mode": f"{'two-layer' if FIRST_LAYER else 'final-only'}/{ENGINE}/{REFINE_EVERY_S}s+{REFINE_CONTEXT_S}s"})
         await asyncio.sleep(2)
 
 
@@ -882,6 +900,10 @@ def main():
         raise SystemExit(f"DIARIZER must be cloud or local, not {DIARIZER!r}")
     key = os.environ.get("STEPFUN_API_KEY", "")
     missing = [k for k in ("ASR_UPLOAD_BRIDGE_TOKEN", "ASR_SERVICE_BASIC_AUTH") if not os.environ.get(k)]
+    if ENGINE == "volc" and not os.environ.get("VOLC_ASR_KEY"):
+        missing.append("VOLC_ASR_KEY")
+    if ENGINE not in ("volc", "stepfun"):
+        raise SystemExit(f"ENGINE must be volc or stepfun, not {ENGINE!r}")
     if (FIRST_LAYER or TEXT_SOURCE == "sse") and not (key and ASR_URL):
         missing += ["STEPFUN_API_KEY / STEPFUN_SSE_URL"]
     if missing:
