@@ -26,6 +26,15 @@
   .muted { color: var(--muted); } .bad { color: var(--err); }
   button { font: inherit; font-size: 13px; border: 1px solid var(--line); background: var(--bg); color: var(--accent); border-radius: 8px; padding: 4px 12px; cursor: pointer; }
   #more { display: block; margin: 16px auto; }
+  .find { position: sticky; background: var(--bg); padding: 10px 0 6px; z-index: 1; }
+  header ~ main .find { top: 49px; } .in-app header ~ main .find { top: 0; }
+  .find input { width: 100%; font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; outline: none; }
+  .find input:focus { border-color: var(--accent); }
+  .tags { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding-top: 8px; }
+  .tag { flex: none; font-size: 12px; border: 1px solid var(--line); border-radius: 12px; padding: 1px 10px; color: #4a4f63; background: var(--bg); cursor: pointer; }
+  .tag.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .card .tag { cursor: inherit; margin-right: 4px; padding: 0 8px; }
+  .card .tagline { margin-top: 6px; }
   #empty { color: var(--muted); text-align: center; padding: 60px 0; }
   h2 { font-size: 20px; margin: 16px 0 4px; }
   h3 { font-size: 14px; color: var(--muted); font-weight: 600; margin: 22px 0 6px; }
@@ -61,27 +70,52 @@ const mins = c => Math.max(1, Math.round((new Date(c.end) - new Date(c.start)) /
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const convId = location.pathname.startsWith("/c/") ? decodeURIComponent(location.pathname.slice(3)) : null;
 
-// ---- list: newest day first, a week at a time
-let days = [], shown = 0;
+// ---- list: newest first, 30 at a time as the end scrolls into view; search words and one tag filter it
+const params = new URLSearchParams(location.search);
+let q = params.get("q") || "", tag = params.get("tag") || "", before = "", lastDay = "", loading = false, done = false, results;
+const more = el("button", null, "更早"); more.id = "more"; more.onclick = () => page();
+new IntersectionObserver(es => es[0].isIntersecting && page()).observe(more);
+
 async function list() {
   main.textContent = "";
-  days = await (await fetch("/api/days")).json();
-  const today = new Date().toLocaleDateString("sv");
-  if (!days.includes(today)) days.unshift(today);  // the open conversation lives in today even before anything closed
-  shown = 0;
-  await more();
-}
-async function more() {
-  document.getElementById("more")?.remove();
-  for (const d of days.slice(shown, shown + 7)) {
-    const cs = (await (await fetch("/api/conversations?date=" + d)).json()).reverse();
-    if (!cs.length) continue;
-    main.append(el("div", "day", d));
-    for (const c of cs) main.append(card(c));
+  const find = el("div", "find"), input = el("input"); input.type = "search"; input.placeholder = "搜索标题、摘要、待办、原文"; input.value = q;
+  let timer; input.oninput = () => { clearTimeout(timer); timer = setTimeout(() => { q = input.value.trim(); restart(); }, 300); };
+  const chips = el("div", "tags");
+  find.append(input, chips); results = el("div");
+  main.append(find, results, more);
+  const counts = await (await fetch("/api/tags")).json();
+  for (const [t, n] of Object.entries(counts).slice(0, 40)) {
+    const b = el("button", "tag" + (t === tag ? " on" : ""), `${t} ${n}`);
+    b.onclick = () => { tag = tag === t ? "" : t; chips.querySelectorAll(".tag").forEach(x => x.classList.toggle("on", x === b && tag)); restart(); };
+    chips.append(b);
   }
-  shown += 7;
-  if (!main.children.length) main.append(el("div", null, "还没有对话")).id = "empty";
-  if (shown < days.length) { const b = el("button", null, "更早"); b.id = "more"; b.onclick = more; main.append(b); }
+  await restart();
+}
+async function restart() {
+  history.replaceState(null, "", "/conversations" + (q || tag ? "?" + new URLSearchParams({ ...(q && { q }), ...(tag && { tag }) }) : ""));
+  results.textContent = ""; before = ""; lastDay = ""; done = false;
+  if (!q && !tag) {  // the open conversation is not in the index yet
+    const st = await (await fetch("/api/status")).json();
+    if (st.conversation) results.append(card({ ...st.conversation, state: "open" }));
+  }
+  await page();
+}
+async function page() {
+  if (loading || done) return;
+  loading = true; more.textContent = "加载中…";
+  const want = { q, tag, before };
+  const cs = await (await fetch("/api/search?" + new URLSearchParams({ q, tag, before, limit: 30 }))).json();
+  loading = false;
+  if (want.q !== q || want.tag !== tag || want.before !== before) return;  // a newer search started meanwhile
+  for (const c of cs) {
+    const d = c.start.slice(0, 10);
+    if (d !== lastDay) { results.append(el("div", "day", d)); lastDay = d; }
+    results.append(card(c));
+  }
+  done = cs.length < 30;
+  if (cs.length) before = cs[cs.length - 1].start;
+  if (!results.querySelector(".card")) results.append(el("div", null, q || tag ? "没有匹配的对话" : "还没有对话")).id = "empty";
+  more.style.display = done ? "none" : "block"; more.textContent = "更早";
 }
 function card(c) {
   if (c.state === "open") {
@@ -96,6 +130,7 @@ function card(c) {
   a.append(el("div", "title" + (s.status === "failed" ? " bad" : s.status === "done" ? "" : " muted"),
     s.status === "done" ? (s.title || "（无标题）") : s.status === "failed" ? "摘要生成失败" : "摘要生成中…"));
   if (s.summary) a.append(el("div", "gist", s.summary));
+  if ((s.tags || []).length) { const t = el("div", "tagline"); for (const x of s.tags) t.append(el("span", "tag", x)); a.append(t); }
   return a;
 }
 
@@ -109,6 +144,11 @@ async function detail() {
   const s = c.summary || {};
   main.append(el("h2", null, s.status === "done" ? (s.title || "（无标题）") : "对话 " + hhmm(c.start)));
   main.append(el("div", "muted", `${c.start.slice(0, 10)} ${hhmm(c.start)}–${hhmm(c.end)} · ${mins(c)} 分钟 · ${c.rows.length} 句 · ${(c.participants || []).join("、") || "—"}`));
+  if ((s.tags || []).length) {
+    const t = el("div", "tags");
+    for (const x of s.tags) { const a = el("a", "tag", x); a.href = "/conversations?tag=" + encodeURIComponent(x); t.append(a); }
+    main.append(t);
+  }
   if (s.status === "done") {
     if (s.summary) main.append(el("div", "summary", s.summary));
     section("待办", s.todos, t => [el("span", "who", t.owner || "未知"), t.text, t.due ? el("span", "due", t.due) : "", at(t.at), quote(t.quote)]);
@@ -171,7 +211,8 @@ function connect() {  // a summary or a closed conversation redraws the view
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
-    if (convId ? m.type === "summary" && m.conversation === convId : m.type === "summary" || m.type === "conversation") convId ? detail() : list();
+    if (convId) { if (m.type === "summary" && m.conversation === convId) detail(); }
+    else if ((m.type === "summary" || m.type === "conversation") && !q && !tag && window.scrollY < 200) restart();
   };
   ws.onclose = () => setTimeout(connect, 3000);
 }

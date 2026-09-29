@@ -553,39 +553,73 @@ def find_conversation(conv_id: str) -> dict | None:
     return next((c for c in map(json.loads, open(p)) if c["id"] == conv_id), None) if p.exists() else None
 
 
-def conversation_rows(c: dict) -> list[dict]:
+def conversation_rows(c: dict, cache: dict | None = None) -> list[dict]:
+    """`cache` keeps each day's rows across calls (a search over many conversations of the same day)."""
+    cache = {} if cache is None else cache
     a, b = dt.date.fromisoformat(c["start"][:10]), dt.date.fromisoformat(c["end"][:10])
     days = [a + dt.timedelta(days=i) for i in range((b - a).days + 1)]
-    return [r for d in days for r in day_rows(d) if c["start"] <= r["start"] <= c["end"]]
+    for d in days:
+        if d not in cache:
+            cache[d] = day_rows(d)
+    return [r for d in days for r in cache[d] if c["start"] <= r["start"] <= c["end"]]
 
 
 summary_q: asyncio.Queue = asyncio.Queue()
 
 
-def queue_summary(c: dict):
+def queue_summary(c: dict, keep: bool = False):
+    """keep: the current summary stays on the page until the new one is written (an upgrade to a newer prompt)."""
     summary_path(c["id"]).parent.mkdir(exist_ok=True)
-    summary_path(c["id"]).write_text(json.dumps({"conversation": c["id"], "status": "pending", "error": None}))
+    if not keep:
+        summary_path(c["id"]).write_text(json.dumps({"conversation": c["id"], "status": "pending", "error": None}))
     summary_q.put_nowait(c)
 
 
+def all_conversations() -> list[dict]:
+    """Every closed conversation with its summary, newest first."""
+    # ponytail: reads every file per call; fine for years of conversations, an index when it is not
+    cs = [{**c, "summary": load_summary(c["id"])} for p in DATA.glob("*.conversations.jsonl") for c in map(json.loads, open(p))]
+    return sorted(cs, key=lambda c: c["start"], reverse=True)
+
+
+_tags = {"at": 0.0, "counts": {}}
+
+
+def tag_counts() -> dict[str, int]:
+    """Recounted at most once a minute: a backfill summarizes thousands in a row."""
+    if time.time() - _tags["at"] < 60:
+        return _tags["counts"]
+    n = {}
+    for c in all_conversations():
+        for t in (c["summary"] or {}).get("tags") or []:
+            n[t] = n.get(t, 0) + 1
+    _tags.update(at=time.time(), counts=dict(sorted(n.items(), key=lambda kv: -kv[1])))
+    return _tags["counts"]
+
+
 async def summary_worker():
-    """Conversations closed while the service was down, or whose summary never finished, are queued first."""
-    for p in sorted(DATA.glob("*.conversations.jsonl"))[-7:]:
-        for c in map(json.loads, open(p)):
-            sp = summary_path(c["id"])
-            if not sp.exists() or json.loads(sp.read_text())["status"] == "pending":
-                queue_summary(c)
+    """Queued first: conversations closed while the service was down, summaries that never finished,
+    and summaries from an older prompt (a new field such as tags reaches the old ones too)."""
+    for c in reversed(all_conversations()):
+        s = c["summary"]
+        if not s or s["status"] == "pending":
+            queue_summary(c)
+        elif s["status"] == "done" and s.get("prompt_version", 0) < summary.PROMPT_VERSION:
+            queue_summary(c, keep=True)
     while True:
         c = await summary_q.get()
         for delay in (10, 60, 300, None):
             try:
-                res = await asyncio.to_thread(summary.summarize, c, conversation_rows(c))
+                res = await asyncio.to_thread(summary.summarize, c, conversation_rows(c), list(tag_counts())[:60])
                 break
             except Exception as e:  # HTTP errors, timeouts, a reply that is not JSON
                 log.warning("summary %s failed: %r", c["id"], e)
                 res = {"conversation": c["id"], "status": "failed", "error": repr(e)[:300]}
                 if delay:
                     await asyncio.sleep(delay)
+        old = load_summary(c["id"])
+        if res["status"] == "failed" and old and old["status"] == "done":  # a failed upgrade keeps the old summary
+            continue
         summary_path(c["id"]).write_text(json.dumps(res, ensure_ascii=False, indent=1))
         note(f"对话 {c['start'][11:19]} 的摘要" + (f"：{res['title']}" if res["status"] == "done" else f"生成失败：{res['error']}"),
              "state" if res["status"] == "done" else "error")
@@ -998,8 +1032,33 @@ async def conversations(date: str | None = None):
 
 @app.get("/api/days")
 async def days():
-    """Days that have conversations, newest first."""
-    return sorted((p.name[:10] for p in DATA.glob("*.conversations.jsonl")), reverse=True)
+    """Days that have sentences, newest first."""
+    return sorted({p.name[:10] for p in DATA.glob("????-??-??.*jsonl")}, reverse=True)
+
+
+@app.get("/api/search")
+async def search(q: str = "", tag: str = "", before: str = "", limit: int = 30):
+    """Closed conversations newest first, filtered by a tag and by words in the title, summary, tags or
+    todos (and in the transcript when the summary does not match); `before` is the start of the last one
+    already shown."""
+    out, cache = [], {}
+    for c in all_conversations():
+        s = c["summary"] or {}
+        if before and c["start"] >= before or tag and tag not in (s.get("tags") or []):
+            continue
+        if q:
+            meta = json.dumps([s.get(k) for k in ("title", "summary", "tags", "todos", "decisions")], ensure_ascii=False)
+            if q.lower() not in meta.lower() and not any(q in (r.get("text") or "") for r in conversation_rows(c, cache)):
+                continue
+        out.append({k: v for k, v in c.items() if k != "sentences"} | {"sentences": len(c["sentences"])})
+        if len(out) == limit:
+            break
+    return out
+
+
+@app.get("/api/tags")
+async def tags():
+    return tag_counts()
 
 
 @app.get("/api/conversation/{conv_id}")

@@ -10,11 +10,12 @@ import os
 import urllib.request
 
 MIN_SPEECH_S = 60
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2  # 2: tags
 SYSTEM = """你在整理一段现场录音转写出来的对话。每行是「[时间] 说话人: 文本」。说话人标签来自声纹聚类：「我」是录音者本人，S1、S2… 是其他人，同一个人可能被拆成多个标签，S? 是太短没认出来的句子。转写有错别字和同音误识别，按意图理解。
 只输出一个 JSON 对象：
 {"title": "不超过 20 字的标题",
  "summary": "3~6 句话的摘要，第一人称写「我」",
+ "tags": ["2~5 个标签：这段对话和什么相关（项目、领域、活动、人际场合），优先沿用已有标签"],
  "topics": [{"title": "议题", "points": ["要点"], "at": "议题开始那一行的时间 HH:MM:SS"}],
  "todos": [{"owner": "我 | S1 | 未知", "text": "要做的事", "due": "原话里的时间，没有写 null", "quote": "依据的原句", "at": "原句那一行的时间 HH:MM:SS"}],
  "decisions": [{"text": "定下来的事", "quote": "依据的原句", "at": "原句那一行的时间 HH:MM:SS"}]}
@@ -25,10 +26,11 @@ def transcript(rows: list[dict]) -> str:
     return "\n".join(f'[{r["start"][11:19]}] {r.get("speaker") or "S?"}: {r["text"]}' for r in rows if r.get("text"))
 
 
-def chat(text: str) -> tuple[dict, dict]:
+def chat(text: str, known_tags: list[str]) -> tuple[dict, dict]:
     """(parsed result, raw response); raises on HTTP errors and on a reply that is not JSON."""
+    system = SYSTEM + ("\n已有标签：" + "、".join(known_tags) if known_tags else "")
     req = {"model": os.environ["LLM_MODEL"], "response_format": {"type": "json_object"},
-           "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": text}]}
+           "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}]}
     r = urllib.request.urlopen(urllib.request.Request(
         os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions", json.dumps(req).encode(),
         {"Authorization": f'Bearer {os.environ["LLM_API_KEY"]}', "Content-Type": "application/json"}), timeout=300)
@@ -47,16 +49,16 @@ def anchor(res: dict, rows: list[dict]) -> dict:
     return res
 
 
-def summarize(conv: dict, rows: list[dict]) -> dict:
+def summarize(conv: dict, rows: list[dict], known_tags: list[str] = ()) -> dict:
     base = {"conversation": conv["id"], "prompt_version": PROMPT_VERSION,
             "created_at": dt.datetime.now().isoformat(timespec="seconds"), "error": None}
     if conv.get("speech_s", 0) < MIN_SPEECH_S or not rows:
         first = next((r["text"] for r in rows if r.get("text")), "")
-        return {**base, "status": "done", "model": None, "title": first[:20], "summary": "", "topics": [], "todos": [], "decisions": []}
-    res, raw = chat(transcript(rows))
+        return {**base, "status": "done", "model": None, "title": first[:20], "summary": "", "tags": [], "topics": [], "todos": [], "decisions": []}
+    res, raw = chat(transcript(rows), list(known_tags))
     res = anchor(res, rows)
     return {**base, "status": "done", "model": raw.get("model"), "usage": raw.get("usage"),
-            **{k: res.get(k) or ("" if k in ("title", "summary") else []) for k in ("title", "summary", "topics", "todos", "decisions")}}
+            **{k: res.get(k) or ("" if k in ("title", "summary") else []) for k in ("title", "summary", "tags", "topics", "todos", "decisions")}}
 
 
 if __name__ == "__main__":

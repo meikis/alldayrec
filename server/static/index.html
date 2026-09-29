@@ -30,6 +30,9 @@
   .text { word-break: break-word; }
   .err { color: var(--err); font-size: 13px; }
   .gap { color: var(--muted); font-size: 12px; text-align: center; padding: 10px 0 4px; }
+  .day { color: var(--accent); font-size: 13px; font-weight: 600; text-align: center; padding: 16px 0 4px; }
+  #earlier { display: block; margin: 12px auto 4px; font: inherit; font-size: 13px; border: 1px solid var(--line); background: var(--bg);
+             color: var(--accent); border-radius: 8px; padding: 4px 14px; cursor: pointer; }
   #empty { color: var(--muted); text-align: center; padding: 60px 0; }
   #syslog { position: fixed; left: 0; right: 0; bottom: 0; background: var(--bg); border-top: 1px solid var(--line); z-index: 2; }
   #syslog summary { max-width: 860px; margin: 0 auto; padding: 6px 16px; font-size: 12px; color: var(--muted); cursor: pointer; list-style: none; }
@@ -56,7 +59,7 @@
 </head>
 <body>
 <header><div class="bar"><h1>Record Live</h1><nav><a href="/" class="on">实时字幕</a><a href="/conversations">对话</a></nav><div id="status">连接中…</div></div></header>
-<main><div id="list"></div><div id="empty">今天还没有转写内容</div></main>
+<main><button id="earlier" hidden></button><div id="list"></div><div id="empty">今天还没有转写内容</div></main>
 <button id="jump">回到最新</button>
 <details id="syslog"><summary>系统日志 <span id="lastev"></span></summary><div id="events"></div></details>
 <script>
@@ -71,10 +74,42 @@ jump.onclick = () => { window.scrollTo(0, document.body.scrollHeight); };
 function add(s) {
   empty.style.display = "none";
   const start = new Date(s.start);
-  if (last && start - last > 5 * 60 * 1000) {          // a quiet stretch: mark it so conversations separate
-    const g = document.createElement("div"); g.className = "gap"; g.textContent = `— ${hhmmss(s.start).slice(0, 5)} —`; list.append(g);
-  }
+  if (last && start - last > 5 * 60 * 1000) list.append(gap(s.start));  // a quiet stretch: mark it so conversations separate
   last = new Date(s.end);
+  insert(makeRow(s), s.start);
+  if (follow) window.scrollTo(0, document.body.scrollHeight);
+}
+
+function gap(iso) {
+  const g = document.createElement("div"); g.className = "gap"; g.textContent = `— ${hhmmss(iso).slice(0, 5)} —`; return g;
+}
+
+// earlier days go on top, one per click; the scroll position stays on what the reader was looking at
+const earlier = document.getElementById("earlier");
+let days = [], shownDay = new Date().toLocaleDateString("sv");
+async function loadEarlier() {
+  const day = days.find(d => d < shownDay); if (!day) return;
+  earlier.disabled = true; earlier.textContent = "加载中…";
+  const [rows, cs] = await Promise.all([fetch("/api/sentences?date=" + day).then(r => r.json()), fetch("/api/conversations?date=" + day).then(r => r.json())]);
+  const h = document.body.scrollHeight, frag = document.createDocumentFragment();
+  if (!list.querySelector(".day")) frag.append(dayMark(shownDay === new Date().toLocaleDateString("sv") ? "今天" : shownDay));
+  const nodes = [dayMark(day)]; let prev = null;
+  for (const s of rows) { if (prev && new Date(s.start) - prev > 5 * 60 * 1000) nodes.push(gap(s.start)); prev = new Date(s.end); nodes.push(makeRow(s)); }
+  list.prepend(...nodes, frag);
+  cs.filter(c => c.state === "closed").forEach(conversation);
+  window.scrollBy(0, document.body.scrollHeight - h);
+  empty.style.display = list.querySelector(".row") ? "none" : "";
+  shownDay = day; earlier.disabled = false; setEarlier();
+}
+function dayMark(d) { const m = document.createElement("div"); m.className = "day"; m.textContent = d; return m; }
+function setEarlier() {
+  const day = days.find(d => d < shownDay);
+  earlier.hidden = !day; if (day) earlier.textContent = `加载 ${day} 的字幕`;
+}
+earlier.onclick = loadEarlier;
+fetch("/api/days").then(r => r.json()).then(ds => { days = ds; setEarlier(); });
+
+function makeRow(s) {
   const row = document.createElement("div"); row.className = "row" + (s.state === "final" ? "" : " pending"); row.id = "s" + s.id;
   row.dataset.start = s.start;
   row.innerHTML = `<div class="t"></div><div class="spk"></div><div class="text"></div>`;
@@ -84,8 +119,7 @@ function add(s) {
   setSpeaker(row, s.speaker, s.speaker_confidence);
   if (s.error) { row.children[2].className = "err"; row.children[2].textContent = "识别失败：" + s.error; }
   else row.children[2].textContent = s.text || "（空）";
-  insert(row, s.start);
-  if (follow) window.scrollTo(0, document.body.scrollHeight);
+  return row;
 }
 
 let current = null;
