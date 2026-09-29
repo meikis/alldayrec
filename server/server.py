@@ -798,9 +798,12 @@ async def auth(request: Request, call_next):
     return Response("token required: open /?token=<AUTH_TOKEN> once", 401)
 
 
+NO_CACHE = {"Cache-Control": "no-cache"}  # pages change with deploys; revalidate by etag instead of heuristic caching
+
+
 @app.get("/")
 async def index():
-    return FileResponse(HERE / "static/index.html")
+    return FileResponse(HERE / "static/index.html", headers=NO_CACHE)
 
 
 @app.get("/app.apk")
@@ -814,7 +817,7 @@ async def apk():
 
 @app.get("/record")
 async def record_page():
-    return FileResponse(HERE / "static/record.html")
+    return FileResponse(HERE / "static/record.html", headers=NO_CACHE)
 
 
 def busy(device: str):

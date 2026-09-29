@@ -38,6 +38,15 @@
   #events .error { color: var(--err); }
   #jump { position: fixed; right: 24px; bottom: 64px; display: none; border: 1px solid var(--line); background: var(--bg);
           color: var(--accent); border-radius: 16px; padding: 6px 14px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+  @media (max-width: 600px) {  /* phones: the app bar already carries a title; keep the status on one scrolling line */
+    h1 { display: none; }
+    .bar { padding: 8px 12px; }
+    #status { flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; gap: 12px; scrollbar-width: none; }
+    main { padding: 4px 12px 110px; }
+    .row { grid-template-columns: 70px 30px 1fr; gap: 8px; }
+    .t, .spk { font-size: 12px; }
+    .play { padding: 0 2px 0 0; }
+  }
 </style>
 </head>
 <body>
