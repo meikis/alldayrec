@@ -1,0 +1,746 @@
+"""Live transcript of the continuous recorder.
+
+    set -a; . .env; set +a; uv run python server.py [--dir <recordings>] [--port 8770] [--from-start]   (variables: .env.example)
+
+Tails the newest Opus segment the recorder is writing, cuts speech with FireRed Stream-VAD,
+sends each utterance to StepFun streaming ASR, appends sentences to data/<date>.jsonl and
+pushes them to the page at http://127.0.0.1:<port>/.
+"""
+import argparse
+import asyncio
+import base64
+import datetime as dt
+import json
+import logging
+import os
+import subprocess
+import time
+import uuid
+from pathlib import Path
+
+import numpy as np
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import HTTPException
+from fastapi.responses import FileResponse, Response
+
+from conversations import Grouper
+
+HERE = Path(__file__).resolve().parent
+def env(name: str) -> str:
+    v = os.environ.get(name)
+    if not v:
+        raise SystemExit(f"{name} is not set (see .env.example)")
+    return v
+
+
+VAD_MODEL = Path(env("VAD_MODEL_DIR"))            # FireRedVAD Stream-VAD checkpoint directory
+DATA = Path(env("LIVE_DATA"))                     # sentences, final rows, conversations, owner.npz
+ASR_URL = os.environ.get("STEPFUN_SSE_URL", "")  # per-utterance SSE endpoint; only needed when FIRST_LAYER=on or TEXT_SOURCE=sse
+ASR_MODEL = os.environ.get("STEPFUN_SSE_MODEL", "stepaudio-2.5-asr")
+SR = 16000
+FRAME_LEN, FRAME_SHIFT = 400, 160          # FireRed fbank: 25 ms window, 10 ms shift
+MERGE_GAP_S = 0.6                          # utterances closer than this go to ASR together
+MAX_UTTERANCE_S = 15.0
+ROTATE_IDLE_S = 5.0                        # file stopped growing and a newer one exists -> switch
+REFINE_EVERY_S = int(os.environ.get("REFINE_EVERY_S", "30"))  # finalization cadence
+FIRST_LAYER = os.environ.get("FIRST_LAYER", "on") != "off"   # off: no per-utterance ASR; text only comes from the finalization pass
+REFINE_WINDOW_S = 240                      # audio diarized per refinement pass
+REFINE_CONTEXT_S = 30                      # audio before the last finalized time that a pass re-reads for cluster context
+BUFFER_S = 900                             # audio kept for refinement; a stalled refiner catches up from here
+TURN_GAP_S = float(os.environ.get("TURN_GAP_S", "1.0"))  # same speaker, closer than this: one final row; 0 keeps the engine's sentences as rows
+EDGE_S = 3.0                               # rows touching the window edges may be cut: left to the next pass
+OWNER_MIN = 0.25                           # best cluster must also score this against the owner voiceprint
+OWNER_SURE = float(os.environ.get("OWNER_SURE", "0.5"))  # any cluster this close to the owner is me too (clustering often splits me in 2-5)
+ASR_PAD_S = 0.4                            # context added around a diarized turn before ASR
+MIN_SPEAKER_S = 2.0                        # a window cluster shorter than this gets no speaker id (noise clusters)
+LINK_MIN = float(os.environ.get("LINK_MIN", "0.55"))   # cosine to link a window's cluster to a known speaker
+# Per input device: lapel one-on-one wants coarse clusters and easy linking (0.65 split the same person
+# into 3 ids); the far-field MacBook meeting wants finer clusters and stricter linking (0.55 merged
+# two colleagues). Case 09-28 vs case 05-26, see the 2026-09-29 iteration record.
+DEVICE_PARAMS = {"Wireless Mic Rx": {"diar": 1.0, "link": 0.55}, "MacBook Pro麦克风": {"diar": 0.8, "link": 0.65}}
+DIARIZER = os.environ.get("DIARIZER", "cloud")   # cloud: speakers from the file-mode ASR result; local: sherpa-onnx on this machine
+TEXT_SOURCE = os.environ.get("TEXT_SOURCE", "file")  # local diarizer's turn text: file (one StepFun file call per pass, words split by turn) | sse (one call per turn)
+SEG_MODEL = Path(os.environ.get("SEG_MODEL", ""))  # sherpa-onnx pyannote segmentation model; only for DIARIZER=local
+EMB_MODEL = Path(env("EMB_MODEL"))                # sherpa-onnx speaker embedding model (CAM++ by default)
+BRIDGE = env("ASR_UPLOAD_BRIDGE_URL")             # returns {upload_url, download_url} for a file name
+DIARIZE = env("ASR_SERVICE_URL")                   # file-mode ASR service: POST /audio/transcriptions, GET /jobs/{id}
+
+log = logging.getLogger("live")
+
+
+def file_start(path: Path) -> dt.datetime:
+    return dt.datetime.strptime(path.name[:19], "%Y-%m-%d_%H-%M-%S")
+
+
+def current_device(directory: Path) -> str:
+    """The recorder writes the sidecar when a segment closes, so take the latest closed one."""
+    side = max(directory.glob("20*.json"), key=lambda p: p.name)
+    return json.loads(side.read_text())["device"]
+
+
+def newest(directory: Path) -> Path:
+    return max(directory.glob("20*.ogg"), key=lambda p: p.name)
+
+
+class Follower:
+    """Yields (absolute start time, int16 samples) from the segment being written, across rotations.
+
+    ffmpeg's ogg demuxer seeks to the end of a regular file for the duration, which never
+    returns on a growing file, so the bytes go in through a pipe instead.
+    """
+
+    def __init__(self, directory: Path, from_start: bool, resume: dt.datetime | None = None):
+        self.dir, self.from_start, self.resume = directory, from_start, resume
+        self.path: Path | None = None
+        self.audio_end: dt.datetime | None = None
+
+    async def chunks(self):
+        path, skip_until = newest(self.dir), None if self.from_start else (self.resume or dt.datetime.now())
+        while True:
+            self.path = path
+            async for t, x in self._decode(path):
+                if skip_until and t + dt.timedelta(seconds=len(x) / SR) <= skip_until:
+                    continue
+                self.audio_end = t + dt.timedelta(seconds=len(x) / SR)
+                yield t, x
+            path = newest(self.dir)
+
+    async def _decode(self, path: Path):
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-v", "error", "-f", "ogg", "-i", "pipe:0", "-f", "s16le", "-ac", "1",
+            "-ar", str(SR), "-flush_packets", "1", "pipe:1",
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        feeder = asyncio.create_task(self._feed(path, proc))
+        start, done, rest = file_start(path), 0, b""
+        while chunk := await proc.stdout.read(SR):  # up to 0.5 s
+            chunk = rest + chunk
+            rest = chunk[len(chunk) // 2 * 2:]
+            x = np.frombuffer(chunk[:len(chunk) // 2 * 2], np.int16)
+            yield start + dt.timedelta(seconds=done / SR), x
+            done += len(x)
+        await feeder
+        await proc.wait()
+        log.info("finished %s after %.1f s of audio", path.name, done / SR)
+
+    async def _feed(self, path: Path, proc):
+        idle = 0.0
+        with open(path, "rb") as f:
+            while True:
+                b = f.read(1 << 16)
+                if b:
+                    idle = 0.0
+                    proc.stdin.write(b)
+                    await proc.stdin.drain()
+                    continue
+                idle += 0.2
+                if idle >= ROTATE_IDLE_S and newest(self.dir) != path:
+                    break
+                await asyncio.sleep(0.2)
+        proc.stdin.close()
+
+
+class Segmenter:
+    """FireRed Stream-VAD over a continuous sample stream; emits (start, end, samples) utterances."""
+
+    def __init__(self):
+        from fireredvad import FireRedStreamVad, FireRedStreamVadConfig
+        self.vad = FireRedStreamVad.from_pretrained(str(VAD_MODEL), FireRedStreamVadConfig())
+        self.buf = np.zeros(0, np.int16)      # samples not yet turned into frames
+        self.audio = np.zeros(0, np.int16)    # recent samples for cutting utterances
+        self.audio_base = 0                   # stream sample index of audio[0]
+        self.anchors: list[tuple[int, dt.datetime]] = []  # (stream sample index, wall time)
+        self.samples = 0
+        self.frames = 0
+        self.pending = None                   # utterance waiting for a possible merge
+
+    def time_at(self, sample: int) -> dt.datetime:
+        idx, t = next((a for a in reversed(self.anchors) if a[0] <= sample), self.anchors[0])
+        return t + dt.timedelta(seconds=(sample - idx) / SR)
+
+    def push(self, t: dt.datetime, x: np.ndarray) -> list:
+        if not self.anchors or abs((self.time_at(self.samples) - t).total_seconds()) > 0.5:
+            self.anchors.append((self.samples, t))  # new file or a gap: re-anchor the clock
+        self.samples += len(x)
+        self.audio = np.concatenate([self.audio, x])
+        self.buf = np.concatenate([self.buf, x])
+        out = []
+        if len(self.buf) >= FRAME_LEN:
+            k = (len(self.buf) - FRAME_LEN) // FRAME_SHIFT + 1
+            # Only whole frames, keeping the overlap for the next call: splitting at arbitrary
+            # sample counts drops frames at every boundary and the clock drifts ~2 %.
+            for r in self.vad.detect_chunk(self.buf[:(k - 1) * FRAME_SHIFT + FRAME_LEN]):
+                if r.is_speech_end:
+                    out += self._utterance(r.speech_start_frame - 1, r.speech_end_frame - 1)
+            self.frames += k
+            self.buf = self.buf[k * FRAME_SHIFT:]
+        out += self._flush_if_quiet()
+        keep = self.samples - BUFFER_S * SR
+        if keep > self.audio_base:
+            self.audio = self.audio[keep - self.audio_base:]
+            self.audio_base = keep
+        return out
+
+    def sample_at(self, t: dt.datetime) -> int:
+        idx, t0 = next((a for a in reversed(self.anchors) if a[1] <= t), self.anchors[0])
+        return idx + int((t - t0).total_seconds() * SR)
+
+    def window(self, seconds: float, start: dt.datetime | None = None) -> tuple[dt.datetime, np.ndarray]:
+        """Up to `seconds` of audio from `start` (default: the last `seconds` up to now)."""
+        if start is None:
+            a = max(self.audio_base, self.samples - int(seconds * SR))
+        else:
+            a = min(max(self.audio_base, self.sample_at(start)), self.samples)
+        b = min(self.samples, a + int(seconds * SR))
+        return self.time_at(a), self.audio[a - self.audio_base:b - self.audio_base]
+
+    def _utterance(self, f0: int, f1: int) -> list:
+        a, b = f0 * FRAME_SHIFT, f1 * FRAME_SHIFT
+        p = self.pending
+        if p and (a - p[1]) / SR < MERGE_GAP_S and (b - p[0]) / SR <= MAX_UTTERANCE_S:
+            self.pending = (p[0], b)
+            return []
+        out = self._emit() if p else []
+        self.pending = (a, b)
+        return out
+
+    def _flush_if_quiet(self) -> list:
+        if self.pending and (self.frames * FRAME_SHIFT - self.pending[1]) / SR >= MERGE_GAP_S \
+                and self.vad.postprocessor.state.name == "SILENCE":
+            return self._emit()
+        return []
+
+    def _emit(self) -> list:
+        a, b = self.pending
+        self.pending = None
+        x = self.audio[max(0, a - self.audio_base):max(0, b - self.audio_base)]
+        return [(self.time_at(a), self.time_at(b), x)] if len(x) else []
+
+
+class Asr:
+    """StepFun ASR over Step Plan's SSE endpoint, one request per utterance.
+
+    Stateless, unlike the realtime WebSocket, which acks a no-speech commit and then never
+    answers. SSE ends in ~0.3 s with an empty transcript instead; a 12 s utterance takes ~0.45 s.
+    """
+
+    def __init__(self, key: str):
+        self.key = key
+
+    def _post(self, x: np.ndarray) -> str:
+        import urllib.request
+        body = json.dumps({"audio": {"data": base64.b64encode(x.tobytes()).decode(), "input": {
+            "transcription": {"model": ASR_MODEL, "language": "zh", "enable_itn": True},
+            "format": {"type": "pcm", "codec": "pcm_s16le", "rate": SR, "bits": 16, "channel": 1}}}}).encode()
+        req = urllib.request.Request(ASR_URL, body, {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json",
+                                                     "Accept": "text/event-stream", "User-Agent": "curl/8"})
+        text = ""
+        with urllib.request.urlopen(req, timeout=30) as r:
+            for line in r:
+                if line.startswith(b"data:"):
+                    m = json.loads(line[5:])
+                    if m.get("type") == "transcript.text.done":
+                        text = m.get("text", "")
+                    elif "error" in m:
+                        raise RuntimeError(m)
+        return text
+
+    async def transcribe(self, x: np.ndarray) -> str:
+        """Transcript, or '' when StepFun heard no speech. Backs off on errors (429 when several
+        clients share the key), gives up after 5 tries."""
+        for attempt in range(5):
+            try:
+                return await asyncio.to_thread(self._post, x)
+            except Exception as e:
+                log.warning("ASR attempt %d failed: %r", attempt + 1, e)
+                if attempt == 4:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+
+
+def _http(url, data=None, headers=None, method=None) -> bytes:
+    import urllib.request
+    req = urllib.request.Request(url, data=data, headers={"User-Agent": "curl/8", **(headers or {})}, method=method)
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.read()
+
+
+FILE_MODELS = tuple(os.environ.get("FILE_MODELS", "stepaudio-2.5-asr-8006,doubao-seedasr-2.0").split(","))  # file-mode engines, in order of preference
+
+
+def diarize(x: np.ndarray, model: str = FILE_MODELS[0]) -> list[dict]:
+    """File-mode ASR with speakers and word times on a window of audio (via the file-mode ASR service).
+    StepFun's risk control refuses some content outright; that window is then sent to Doubao and every
+    segment carries `engine` so the rows say which engine wrote them."""
+    ogg = subprocess.run(["ffmpeg", "-v", "error", "-f", "s16le", "-ar", str(SR), "-ac", "1", "-i", "pipe:0",
+                          "-c:a", "libopus", "-b:a", "16k", "-f", "ogg", "pipe:1"], input=x.tobytes(),
+                         capture_output=True, check=True).stdout
+    up = json.loads(_http(BRIDGE, json.dumps({"filename": "live.ogg", "content_type": "audio/ogg"}).encode(),
+                          {"Authorization": f"Bearer {os.environ['ASR_UPLOAD_BRIDGE_TOKEN']}", "Content-Type": "application/json"}))
+    _http(up["upload_url"], ogg, {"Content-Type": "audio/ogg"}, "PUT")
+    auth = {"Authorization": "Basic " + base64.b64encode(os.environ["ASR_SERVICE_BASIC_AUTH"].encode()).decode()}
+    job = json.loads(_http(f"{DIARIZE}/audio/transcriptions", json.dumps({"audio_url": up["download_url"], "model": model}).encode(),
+                           {**auth, "Content-Type": "application/json"}))["job_id"]
+    for _ in range(120):
+        r = json.loads(_http(f"{DIARIZE}/jobs/{job}", headers=auth))
+        if r["status"] == "COMPLETED":
+            for g in r["segments"]:
+                g["engine"] = model.split("-")[0]
+            return r["segments"]
+        if r["status"] == "FAILED":
+            err = str(r.get("error"))
+            if "risk" in err and model == FILE_MODELS[0]:
+                log.warning("StepFun refused the window (%s); sending it to Doubao", err[:80])
+                return diarize(x, FILE_MODELS[1])
+            raise RuntimeError(err)
+        time.sleep(1)
+    raise RuntimeError(f"diarization job {job} still running after 120 s")
+
+
+def words_to_turns(turns: list[dict], file_segs: list[dict], reach_ms: int = 1000) -> int:
+    """Give each diarized turn the text of the file-mode ASR words whose midpoint falls in it (or within
+    reach_ms of it). One file call per pass replaces one SSE call per turn and reads whole sentences,
+    so the text is far better than per-turn ASR; returns the number of words no turn could take."""
+    words = sorted((w for g in file_segs for w in (g.get("words") or []) if w.get("text")), key=lambda w: w["start_ms"])
+    turns = sorted(turns, key=lambda g: g["start_ms"])
+    parts: dict[int, list[str]] = {i: [] for i in range(len(turns))}
+    lost = 0
+    for w in words:
+        mid = (w["start_ms"] + w["end_ms"]) // 2
+        best = min(range(len(turns)), key=lambda i: max(0, turns[i]["start_ms"] - mid, mid - turns[i]["end_ms"]), default=None)
+        if best is None or max(0, turns[best]["start_ms"] - mid, mid - turns[best]["end_ms"]) > reach_ms:
+            lost += 1
+            continue
+        parts[best].append(w["text"])
+    for i, g in enumerate(turns):
+        g["text"] = "".join(parts[i])
+    return lost
+
+
+def clip_turns(segs: list[dict], since_s: float) -> list[dict]:
+    """Turns are re-cut every pass with slightly different boundaries. A turn that straddles the last
+    finalized time keeps only its part after it (the part before was finalized already); turns wholly
+    before it are dropped. Done before text is attached, so no text is emitted twice."""
+    out = []
+    for g in segs:
+        if g["end_ms"] <= since_s * 1000 + 200:
+            continue
+        if g["start_ms"] < since_s * 1000:
+            g = {**g, "start_ms": int(since_s * 1000)}
+        out.append(g)
+    return out
+
+
+def final_rows(segs: list[dict], names: dict, t0: dt.datetime, win_s: float, conf: dict | None = None,
+               since: float = EDGE_S) -> tuple[dt.datetime, dt.datetime, list[dict]]:
+    """Second pass: the diarized speaker turns of one window become the final rows for [from, to).
+
+    VAD utterances glue fast back-and-forth into one line (no pause to cut at), so the final
+    layer is built from the diarized turns instead. Consecutive pieces of one speaker are joined;
+    rows near the window edges may be cut mid-turn and are left for the next, later window.
+    `since` (seconds into the window) is where the previous pass stopped: rows before it are
+    already final and never rewritten.
+    """
+    rows = []
+    for g in sorted(segs, key=lambda g: g["start_ms"]):
+        a, b, who = g["start_ms"] / 1000, g["end_ms"] / 1000, names[g["speaker"]]
+        if rows and rows[-1]["speaker"] == who and a - rows[-1]["b"] < TURN_GAP_S:
+            rows[-1]["b"], rows[-1]["text"] = b, rows[-1]["text"] + g["text"]
+        else:
+            rows.append(dict(a=a, b=b, speaker=who, text=g["text"]))
+    lo, hi = max(EDGE_S, since), win_s - EDGE_S
+    keep = [r for r in rows if r["a"] >= lo - 0.05]  # turns are clipped to `since` by the caller
+    cut = next((i for i, r in enumerate(keep) if r["b"] > hi), len(keep))
+    to = keep[cut]["a"] if cut < len(keep) else hi
+    at = lambda s: t0 + dt.timedelta(seconds=s)
+    out = [dict(id="f" + at(r["a"]).strftime("%Y%m%d%H%M%S%f")[:17], start=at(r["a"]).isoformat(timespec="milliseconds"),
+                end=at(r["b"]).isoformat(timespec="milliseconds"), speaker=r["speaker"], text=r["text"].strip(),
+                speaker_confidence=(conf or {}).get(r["speaker"]), state="final")
+           for r in keep[:cut] if r["text"].strip()]
+    return at(lo), at(to), out
+
+
+class Speakers:
+    """Labels each StepFun speaker of a window 我 or 他人: the cluster whose mean voiceprint is closest
+    to the owner's. Per-cluster, not per-sentence: on a lapel mic in a one-on-one, single sentences
+    of the other person score as high as mine (09-09: 57 % per sentence vs 91 % per cluster)."""
+
+    def __init__(self):
+        import sherpa_onnx
+        self.ex = sherpa_onnx.SpeakerEmbeddingExtractor(
+            sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(EMB_MODEL), num_threads=2))
+        self.owner = dict(np.load(DATA / "owner.npz"))
+
+    def embed(self, x: np.ndarray) -> np.ndarray:
+        s = self.ex.create_stream()
+        s.accept_waveform(SR, x.astype(np.float32) / 32768)
+        s.input_finished()
+        e = np.array(self.ex.compute(s))
+        return e / np.linalg.norm(e)
+
+    def label(self, segs: list[dict], x: np.ndarray, device: str) -> tuple[dict, dict, dict, dict]:
+        """(cluster -> 我/他人, cluster -> owner score, cluster -> unit mean voiceprint, cluster -> seconds)."""
+        owner = self.owner.get(device)
+        if owner is None:
+            raise RuntimeError(f"no owner voiceprint for {device!r}; run owner.py")
+        mean, secs = {}, {}
+        for g in segs:
+            a, b = g["start_ms"] / 1000, min(g["end_ms"] / 1000, g["start_ms"] / 1000 + 15)
+            if b - a >= 1.0:
+                mean[g["speaker"]] = mean.get(g["speaker"], 0) + self.embed(x[int(a * SR):int(b * SR)]) * (b - a)
+                secs[g["speaker"]] = secs.get(g["speaker"], 0.0) + (b - a)
+        mean = {k: v / np.linalg.norm(v) for k, v in mean.items()}
+        score = {k: float(v @ owner) for k, v in mean.items()}
+        me = {k for k, v in score.items() if v >= OWNER_SURE}
+        if not me and score and max(score.values()) >= OWNER_MIN:
+            me = {max(score, key=score.get)}
+        return {k: "我" if k in me else "他人" for k in {g["speaker"] for g in segs}}, score, mean, secs
+
+
+class Registry:
+    """Conversation-local speaker ids. A window's cluster mean voiceprint is matched to the running
+    centroid of each known speaker (cosine >= LINK_MIN, best wins) or opens the next S<n>. Omi's
+    sliding-centroid idea; ids reset when a conversation closes."""
+
+    def __init__(self):
+        self.c: dict[str, tuple[np.ndarray, float]] = {}
+
+    def reset(self):
+        self.c = {}
+
+    def assign(self, vec: np.ndarray, weight: float, link_min: float = LINK_MIN) -> tuple[str, float]:
+        best = max(((k, float(v @ vec)) for k, (v, _) in self.c.items()), key=lambda t: t[1], default=(None, 0.0))
+        if best[0] and best[1] >= link_min:
+            k, (v, w) = best[0], self.c[best[0]]
+            nv = v * w + vec * weight
+            self.c[k] = (nv / np.linalg.norm(nv), w + weight)
+            return k, round(best[1], 3)
+        k = f"S{len(self.c) + 1}"
+        self.c[k] = (vec, weight)
+        return k, 1.0  # a new id is certain by definition; how sure it is *not* someone known is 1 - best
+
+
+class LocalDiarizer:
+    """sherpa-onnx pyannote-segmentation-3.0 + CAM++ clustering, RTF about 0.06 on the M2 Pro."""
+
+    def __init__(self, threshold=float(os.environ.get("DIAR_THRESHOLD", "1.0"))):  # 0.5 splits a 2-person chat into 20+ clusters
+        import sherpa_onnx
+        cfg = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+            segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
+                pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=str(SEG_MODEL)), num_threads=4),
+            embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(EMB_MODEL), num_threads=4),
+            clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1, threshold=threshold),
+            min_duration_on=float(os.environ.get("DIAR_MIN_ON", "0.3")), min_duration_off=float(os.environ.get("DIAR_MIN_OFF", "0.5")))
+        self.sd = sherpa_onnx.OfflineSpeakerDiarization(cfg)
+
+    def __call__(self, x: np.ndarray) -> list[dict]:
+        r = self.sd.process(x.astype(np.float32) / 32768).sort_by_start_time()
+        return [dict(start_ms=int(s.start * 1000), end_ms=int(s.end * 1000), speaker=f"S{s.speaker}", text="") for s in r]
+
+
+app = FastAPI()
+clients: set[WebSocket] = set()
+state = {"follower": None, "asr_ms": None, "errors": 0, "no_speech": 0, "commit": "", "refine": None, "device": None,
+         "conversation": None, "last_speech": None}
+
+
+async def broadcast(msg: dict):
+    for ws in list(clients):
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            clients.discard(ws)
+
+
+def sentences_path(day: dt.date) -> Path:
+    return DATA / f"{day.isoformat()}.jsonl"
+
+
+def final_path(day: dt.date) -> Path:
+    return DATA / f"{day.isoformat()}.final.jsonl"  # each line replaces the final rows in [from, to)
+
+
+def conversations_path(day: dt.date) -> Path:
+    return DATA / f"{day.isoformat()}.conversations.jsonl"
+
+
+def apply_final(records) -> list[dict]:
+    rows = []
+    for rec in records:
+        rows = [r for r in rows if not rec["from"] <= r["start"] < rec["to"]] + rec["rows"]
+    return sorted(rows, key=lambda r: r["start"])
+
+
+def last_transcribed(day: dt.date) -> dt.datetime | None:
+    """End of the last first-layer row written today: where a restarted service resumes."""
+    ends = []
+    if sentences_path(day).exists():
+        ends += [json.loads(l)["end"] for l in open(sentences_path(day))]
+    if final_path(day).exists():  # final-only mode writes no first-layer rows
+        ends += [json.loads(l)["to"] for l in open(final_path(day))]
+    return dt.datetime.fromisoformat(max(ends)) if ends else None
+
+
+async def pipeline(directory: Path, from_start: bool, key: str):
+    resume = last_transcribed(dt.date.today())
+    if resume:
+        log.info("resuming after the last transcribed row at %s", resume.time())
+    follower, seg, asr = Follower(directory, from_start, resume), Segmenter(), Asr(key)
+    state["follower"] = follower
+    queue: asyncio.Queue = asyncio.Queue()
+    recent: list[dict] = []
+
+    async def transcribe_worker():
+        while True:
+            a, b, x = await queue.get()
+            t0 = time.perf_counter()
+            try:
+                text, words, error = await asr.transcribe(x), [], None
+                if not text:
+                    state["no_speech"] += 1
+                    log.info("no speech in %s-%s (%.2f s)", a.time(), b.time(), len(x) / SR)
+                    continue
+            except Exception as e:
+                text, words, error = "", [], str(e)
+                state["errors"] += 1
+            state["asr_ms"] = round((time.perf_counter() - t0) * 1000)
+            row = dict(id=a.strftime("%Y%m%d%H%M%S%f")[:17], start=a.isoformat(timespec="milliseconds"),
+                       end=b.isoformat(timespec="milliseconds"), text=text, speaker=None, state="pending",
+                       source=state["device"], words=words,
+                       asr_ms=state["asr_ms"], shown_at=dt.datetime.now().isoformat(timespec="milliseconds"),
+                       error=error)
+            DATA.mkdir(exist_ok=True)
+            with open(sentences_path(a.date()), "a") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            await broadcast({"type": "sentence", **row})
+            recent.append(row)
+            del recent[:-300]
+
+    async def refine_loop():
+        spk, reg, grouper = Speakers(), Registry(), Grouper()
+        locals_: dict[float, LocalDiarizer] = {}  # one per clustering threshold, built on first use
+
+        def local_for(device: str) -> LocalDiarizer:
+            th = DEVICE_PARAMS.get(device, {}).get("diar", float(os.environ.get("DIAR_THRESHOLD", "1.0")))
+            if th not in locals_:
+                locals_[th] = LocalDiarizer(th)
+            return locals_[th]
+        local = DIARIZER == "local"
+        sem = asyncio.Semaphore(4)
+        done_to = None  # wall time up to which rows are final
+
+        async def transcribe_turn(g, x):
+            # Diarizer boundaries clip the first and last syllable; without this margin StepFun hears
+            # no speech in many short turns (case 09-28: coverage 84 % -> 97 %, speaker accuracy 76 % -> 89 %)
+            a, b = int((g["start_ms"] / 1000 - ASR_PAD_S) * SR), int((g["end_ms"] / 1000 + ASR_PAD_S) * SR)
+            async with sem:
+                g["text"] = await asr.transcribe(x[max(0, a):b])
+
+        def close(c: dict):
+            reg.reset()
+            rec = {"id": "c" + c["start"].replace("-", "").replace(":", "").replace("T", "")[:14], "start": c["start"], "end": c["end"],
+                   "state": "closed", "participants": c["participants"], "sentences": [r["id"] for r in c["sentences"]],
+                   "speech_s": round(c["speech_s"], 1)}
+            with open(conversations_path(dt.datetime.fromisoformat(c["start"]).date()), "a") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            state["conversation"] = None
+            log.info("conversation closed %s", {k: v for k, v in rec.items() if k != "sentences"})
+            return {"type": "conversation", **rec}
+
+        async def refine_pass() -> bool:
+            """One pass over [done_to - context, + window]; True when a backlog remains."""
+            nonlocal done_to
+            t_run = time.perf_counter()
+            t0, x = seg.window(REFINE_WINDOW_S, done_to - dt.timedelta(seconds=REFINE_CONTEXT_S) if done_to else None)
+            since = EDGE_S if done_to is None else max(EDGE_S, (done_to - t0).total_seconds())
+            if len(x) / SR - since < EDGE_S + 10:
+                return False
+            hi = t0 + dt.timedelta(seconds=len(x) / SR - EDGE_S)
+            if state["last_speech"] is None or state["last_speech"] <= (done_to or t0):
+                # silence: nothing to diarize, but the clock must advance so a conversation can close on time
+                done_to = hi
+                for c in grouper.flush(hi):
+                    await broadcast(close(c))
+                return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_CONTEXT_S
+            try:
+                device = state["device"] or current_device(follower.dir)
+                segs = await asyncio.to_thread(local_for(device), x) if local else await asyncio.to_thread(diarize, x)
+                all_segs, segs = segs, clip_turns(segs, since)  # voiceprints use the whole window, text and rows only the new part
+                engine = None
+                if local and TEXT_SOURCE == "file":  # one file-mode call for the window; its words go to the local turns
+                    file_segs = await asyncio.to_thread(diarize, x)
+                    engine = file_segs[0]["engine"] if file_segs else None
+                    lost = words_to_turns(segs, file_segs)
+                    if lost:
+                        log.info("%d words fell outside every diarized turn", lost)
+                elif not local:
+                    engine = segs[0]["engine"] if segs else None
+                elif local:  # turns are only cut, not transcribed: ASR the ones this pass will finalize
+                    await asyncio.gather(*[transcribe_turn(g, x) for g in segs if g["end_ms"] / 1000 > since])
+                names, score, means, secs = await asyncio.to_thread(spk.label, all_segs, x, device)
+            except Exception as e:
+                log.warning("refine failed: %r", e)
+                state["refine"] = {"error": str(e)[:200]}
+                return False
+            labels, conf = {}, {}
+            for k, who in names.items():
+                if who == "我":
+                    labels[k], conf[k] = "我", round(score[k], 3)
+                elif k in means and secs[k] >= MIN_SPEAKER_S:
+                    labels[k], conf[k] = reg.assign(means[k], secs[k], DEVICE_PARAMS.get(device, {}).get("link", LINK_MIN))
+                else:
+                    labels[k], conf[k] = "S?", 0.0  # too little speech for a voiceprint: not worth a speaker id
+            by_label = {}
+            for k, c in conf.items():  # final_rows keys confidence by label; two clusters may share one
+                by_label[labels[k]] = max(by_label.get(labels[k], 0.0), c)
+            lo, hi, rows = final_rows(segs, labels, t0, len(x) / SR, by_label, since)
+            for r in rows:
+                r["source"], r["engine"] = device, engine or "stepfun-sse"
+            lo_s, hi_s = lo.isoformat(timespec="milliseconds"), hi.isoformat(timespec="milliseconds")
+            for p in recent:  # first-layer text the second pass produced nothing for: keep it, speaker unknown
+                if lo_s <= p["start"] < hi_s and p.get("text") and not any(r["start"] < p["end"] and p["start"] < r["end"] for r in rows):
+                    rows.append({**p, "speaker": None, "speaker_confidence": None, "state": "final", "words": None})
+                    log.info("kept first-layer row %s without a diarized turn", p["start"][11:19])
+            rows.sort(key=lambda r: r["start"])
+            rec = {"from": lo.isoformat(timespec="milliseconds"), "to": hi.isoformat(timespec="milliseconds"), "rows": rows}
+            with open(final_path(lo.date()), "a") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            await broadcast({"type": "final", **rec})
+            done_to = hi
+            closed = []
+            for r in rows:
+                closed += grouper.push(r)
+            closed += grouper.flush(hi)
+            for c in closed:
+                await broadcast(close(c))
+            if grouper.open:
+                o = grouper.open
+                state["conversation"] = {"start": o["start"], "end": o["end"], "sentences": len(o["sentences"])}
+            state["refine"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
+                               "scores": {k: round(v, 3) for k, v in score.items()}, "labels": labels, "changed": len(rows),
+                               "backlog_s": round((seg.time_at(seg.samples) - hi).total_seconds())}
+            log.info("refine %s: %s", device, state["refine"])
+            return state["refine"]["backlog_s"] > REFINE_WINDOW_S - REFINE_CONTEXT_S
+
+        stalled = (None, time.monotonic())  # (audio_end, when it was first seen there)
+        while True:
+            await asyncio.sleep(REFINE_EVERY_S)
+            try:
+                state["device"] = current_device(follower.dir)
+            except Exception:
+                pass
+            while await refine_pass():  # timer-driven: silence also advances, so conversations close on time
+                pass
+            end = follower.audio_end
+            if end != stalled[0]:
+                stalled = (end, time.monotonic())
+            elif end and grouper.open and time.monotonic() - stalled[1] > grouper.gap:
+                # the recorder stopped: the audio clock will not advance, so close the open conversation
+                for c in grouper.flush(end + dt.timedelta(seconds=grouper.gap)):
+                    await broadcast(close(c))
+
+    asyncio.create_task(transcribe_worker())
+    asyncio.create_task(refine_loop())
+    async for t, x in follower.chunks():
+        for u in seg.push(t, x):
+            state["last_speech"] = u[1]  # the refiner skips diarizing stretches with no VAD speech
+            if FIRST_LAYER:
+                await queue.put(u)
+
+
+async def status_loop():
+    while True:
+        f = state["follower"]
+        end = f.audio_end if f else None
+        await broadcast({"type": "status", "file": f.path.name if f and f.path else None,
+                         "audio_end": end.isoformat(timespec="seconds") if end else None,
+                         "behind_s": round((dt.datetime.now() - end).total_seconds(), 1) if end else None,
+                         "asr_ms": state["asr_ms"], "errors": state["errors"],
+                         "no_speech": state["no_speech"], "commit": state["commit"], "refine": state["refine"],
+                         "conversation": state["conversation"], "diarizer": DIARIZER,
+                         "mode": f"{'two-layer' if FIRST_LAYER else 'final-only'}/{TEXT_SOURCE}/{REFINE_EVERY_S}s"})
+        await asyncio.sleep(2)
+
+
+@app.get("/")
+async def index():
+    return FileResponse(HERE / "static/index.html")
+
+
+@app.get("/api/sentences")
+async def sentences(date: str | None = None):
+    day = dt.date.fromisoformat(date) if date else dt.date.today()
+    p, fp = sentences_path(day), final_path(day)
+    recs = [json.loads(l) for l in open(fp)] if fp.exists() else []
+    final = apply_final(recs)
+    # a pending row stays until a finalized stretch covers it; "everything before the last final row"
+    # hid sentences from stretches that were never finalized (restarts, skipped windows)
+    live = [r for r in map(json.loads, open(p)) if not any(rec["from"] <= r["start"] < rec["to"] for rec in recs)] if p.exists() else []
+    return sorted(final + live, key=lambda r: r["start"])
+
+
+@app.get("/api/conversations")
+async def conversations(date: str | None = None):
+    day = dt.date.fromisoformat(date) if date else dt.date.today()
+    p = conversations_path(day)
+    closed = [json.loads(l) for l in open(p)] if p.exists() else []
+    return closed + ([{**state["conversation"], "state": "open"}] if state["conversation"] else [])
+
+
+@app.get("/api/audio")
+async def audio(start: str, end: str):
+    """WAV of [start, end] (+0.2 s each side) cut from the recording that covers it."""
+    a, b = dt.datetime.fromisoformat(start), dt.datetime.fromisoformat(end)
+    files = [p for p in state["dir"].glob("20*.ogg") if file_start(p) <= a]
+    if not files or b <= a or (b - a).total_seconds() > 120:
+        raise HTTPException(404, "no recording covers this time")
+    path = max(files, key=file_start)
+    off = max(0.0, (a - file_start(path)).total_seconds() - 0.2)
+    wav = await asyncio.to_thread(subprocess.run, [
+        "ffmpeg", "-v", "error", "-ss", f"{off:.3f}", "-t", f"{(b - a).total_seconds() + 0.4:.3f}", "-i", str(path),
+        "-ac", "1", "-ar", str(SR), "-f", "wav", "pipe:1"], capture_output=True)
+    if wav.returncode or len(wav.stdout) <= 44:
+        raise HTTPException(404, f"could not cut {path.name}: {wav.stderr.decode()[-200:]}")
+    return Response(wav.stdout, media_type="audio/wav")
+
+
+@app.websocket("/ws")
+async def ws_endpoint(ws: WebSocket):
+    await ws.accept()
+    clients.add(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        clients.discard(ws)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dir", type=Path, default=Path(env("RECORDINGS_DIR")))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8770")))
+    ap.add_argument("--from-start", action="store_true", help="transcribe the current segment from its beginning")
+    args = ap.parse_args()
+    if DIARIZER not in ("cloud", "local"):
+        raise SystemExit(f"DIARIZER must be cloud or local, not {DIARIZER!r}")
+    key = os.environ.get("STEPFUN_API_KEY", "")
+    missing = [k for k in ("ASR_UPLOAD_BRIDGE_TOKEN", "ASR_SERVICE_BASIC_AUTH") if not os.environ.get(k)]
+    if (FIRST_LAYER or TEXT_SOURCE == "sse") and not (key and ASR_URL):
+        missing += ["STEPFUN_API_KEY / STEPFUN_SSE_URL"]
+    if missing:
+        raise SystemExit(f"not set: {', '.join(missing)} (see .env.example)")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    state["dir"] = args.dir
+    state["commit"] = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--short", "HEAD"],
+                                     capture_output=True, text=True).stdout.strip()
+
+    @app.on_event("startup")
+    async def start():
+        asyncio.create_task(pipeline(args.dir, args.from_start, key))
+        asyncio.create_task(status_loop())
+
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

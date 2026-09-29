@@ -1,0 +1,16 @@
+[project]
+name = "record-live"
+version = "0.1.0"
+description = "Live transcript of the continuous recorder: stream VAD + StepFun streaming ASR + web page"
+requires-python = "==3.11.*"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "numpy==1.26.4",
+    "torch==2.5.1",
+    "kaldi-native-fbank==1.22.3",
+    "fireredvad==0.0.2",
+    "sherpa-onnx==1.13.8",
+    "sherpa-onnx-core==1.13.8",
+    "websockets>=17.1",
+]

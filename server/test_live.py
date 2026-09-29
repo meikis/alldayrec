@@ -1,0 +1,49 @@
+"""Segmenter must give the same utterances however the audio is chunked, on the recorder's clock."""
+import datetime as dt
+import os
+import subprocess
+
+import numpy as np
+
+from server import SR, Segmenter
+
+CLIP = os.environ.get("TEST_CLIP", "")  # any recorder file with speech; the test skips the audio part without it
+
+
+def run(sizes):
+    x = np.frombuffer(subprocess.run(["ffmpeg", "-v", "error", "-ss", "420", "-t", "60", "-i", CLIP, "-f", "s16le",
+                                      "-ac", "1", "-ar", str(SR), "-"], capture_output=True, check=True).stdout, np.int16)
+    seg, t0, i, out, k = Segmenter(), dt.datetime(2026, 9, 9, 11, 7), 0, [], 0
+    while i < len(x):
+        n = sizes[k % len(sizes)]; k += 1
+        out += [(a, b, len(u)) for a, b, u in seg.push(t0 + dt.timedelta(seconds=i / SR), x[i:i + n])]
+        i += n
+    assert seg.frames == (len(x) - 400) // 160 + 1, (seg.frames, len(x))
+    return out
+
+
+def test_final_rows():
+    import server
+    from server import final_rows
+    server.TURN_GAP_S = 1.0  # the merge case below assumes the default, whatever .env says
+    t0 = dt.datetime(2026, 9, 28, 22, 0)
+    ms = lambda s: int(s * 1000)
+    segs = [dict(start_ms=ms(a), end_ms=ms(b), speaker=k, text=t) for a, b, k, t in [
+        (1.0, 2.0, "A", "被边缘截断"), (10.0, 12.0, "A", "你定的吗？"), (12.1, 12.6, "B", "什么？"), (12.7, 14.0, "A", "就是额"),
+        (14.2, 15.0, "A", "度。"), (50.0, 59.0, "B", "可能被窗口尾截断")]]
+    lo, hi, rows = final_rows(segs, {"A": "他人", "B": "我"}, t0, 60.0)
+    assert [(r["speaker"], r["text"]) for r in rows] == [("他人", "你定的吗？"), ("我", "什么？"), ("他人", "就是额度。")], rows
+    assert lo == t0 + dt.timedelta(seconds=3) and hi == t0 + dt.timedelta(seconds=50), (lo, hi)
+
+
+if __name__ == "__main__":
+    test_final_rows()
+    if not CLIP:
+        print("ok: final_rows (set TEST_CLIP for the segmenter check)")
+        raise SystemExit
+    whole = run([SR])
+    odd = run([977, 16001, 333, 8000, 12345])
+    assert whole == odd, (whole[:3], odd[:3])
+    a, b, n = whole[0]
+    assert dt.datetime(2026, 9, 9, 11, 7) <= a < b and n == round((b - a).total_seconds() * SR), whole[0]
+    print(f"ok: {len(whole)} utterances, first {a.time()}-{b.time()}")
