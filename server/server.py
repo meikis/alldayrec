@@ -46,7 +46,7 @@ ROTATE_IDLE_S = 5.0                        # file stopped growing and a newer on
 REFINE_EVERY_S = int(os.environ.get("REFINE_EVERY_S", "30"))  # finalization cadence
 FIRST_LAYER = os.environ.get("FIRST_LAYER", "on") != "off"   # off: no per-utterance ASR; text only comes from the finalization pass
 REFINE_WINDOW_S = int(os.environ.get("REFINE_WINDOW_S", "240"))    # most audio one pass takes (catching up a backlog)
-REFINE_CONTEXT_S = int(os.environ.get("REFINE_CONTEXT_S", "30"))   # audio before the last finalized time re-read for cluster context
+REFINE_MARGIN_S = 1.0                      # audio re-read before the last finalized time: the engine's sentence starts come a little late
 ENGINE = os.environ.get("ENGINE", "volc")  # second-layer engine: volc (seed-asr-2.0 streaming API) | stepfun (file-mode service)
 BUFFER_S = 900                             # audio kept for refinement; a stalled refiner catches up from here
 TURN_GAP_S = float(os.environ.get("TURN_GAP_S", "1.0"))  # same speaker, closer than this: one final row; 0 keeps the engine's sentences as rows
@@ -54,7 +54,8 @@ EDGE_S = 3.0                               # rows touching the window edges may 
 OWNER_MIN = 0.25                           # best cluster must also score this against the owner voiceprint
 OWNER_SURE = float(os.environ.get("OWNER_SURE", "0.5"))  # any cluster this close to the owner is me too (clustering often splits me in 2-5)
 ASR_PAD_S = 0.4                            # context added around a diarized turn before ASR
-MIN_SPEAKER_S = 2.0                        # a window cluster shorter than this gets no speaker id (noise clusters)
+MIN_SPEAKER_S = 2.0                        # a sentence shorter than this opens no new speaker id (noise, "嗯")
+MIN_EMBED_S = 1.0                          # shorter sentences get no voiceprint at all: S?
 LINK_MIN = float(os.environ.get("LINK_MIN", "0.55"))   # cosine to link a window's cluster to a known speaker
 # Per input device: lapel one-on-one wants coarse clusters and easy linking (0.65 split the same person
 # into 3 ids); the far-field MacBook meeting wants finer clusters and stricter linking (0.55 merged
@@ -389,7 +390,7 @@ def final_rows(segs: list[dict], names: dict, t0: dt.datetime, win_s: float, con
             rows[-1]["b"], rows[-1]["text"] = b, rows[-1]["text"] + g["text"]
         else:
             rows.append(dict(a=a, b=b, speaker=who, text=g["text"]))
-    lo, hi = max(EDGE_S, since), win_s - EDGE_S
+    lo, hi = since, win_s - EDGE_S
     keep = [r for r in rows if r["a"] >= lo - 0.05]  # turns are clipped to `since` by the caller
     cut = next((i for i, r in enumerate(keep) if r["b"] > hi), len(keep))
     to = keep[cut]["a"] if cut < len(keep) else hi
@@ -420,8 +421,7 @@ class Speakers:
         e = np.array(self.ex.compute(s))
         return e / np.linalg.norm(e)
 
-    def label(self, segs: list[dict], x: np.ndarray, device: str) -> tuple[dict, dict, dict, dict]:
-        """(cluster -> 我/他人, cluster -> owner score, cluster -> unit mean voiceprint, cluster -> seconds)."""
+    def owner_for(self, device: str) -> np.ndarray:
         owner = self.owner.get(device)
         if owner is None and OWNER_DEFAULT_DEVICE in self.owner:
             owner = self.owner[OWNER_DEFAULT_DEVICE]
@@ -430,6 +430,34 @@ class Speakers:
                 log.warning("no owner voiceprint for %r, scoring against %r", device, OWNER_DEFAULT_DEVICE)
         if owner is None:
             raise RuntimeError(f"no owner voiceprint for {device!r}; run owner.py")
+        return owner
+
+    def sentences(self, segs: list[dict], x: np.ndarray, device: str, reg: "Registry", link: float) -> None:
+        """Sets each sentence's speaker from its own voiceprint, against the conversation's running speakers:
+        no window clustering, so a pass needs no context before the new audio. 我 is relative: the sentence
+        must be closer to the owner than to every other known speaker (an absolute per-sentence owner
+        threshold was 57 % on 09-09, other people's single sentences score as high as mine)."""
+        owner = self.owner_for(device)
+        for g in segs:
+            g["engine_speaker"] = g.get("speaker")
+            a, b = g["start_ms"] / 1000, min(g["end_ms"] / 1000, g["start_ms"] / 1000 + 15)
+            if b - a < MIN_EMBED_S:
+                g["speaker"], g["confidence"] = "S?", 0.0
+                continue
+            e = self.embed(x[int(a * SR):int(b * SR)])
+            me = float(e @ owner)
+            k, sim = reg.best(e)
+            if me >= OWNER_SURE or (me >= OWNER_MIN and me >= sim):
+                g["speaker"], g["confidence"] = "我", round(me, 3)
+            elif sim >= link or b - a >= MIN_SPEAKER_S:
+                g["speaker"], g["confidence"] = reg.assign(e, b - a, link)
+            else:
+                g["speaker"], g["confidence"] = "S?", 0.0
+            g["owner_sim"], g["best"] = round(me, 3), [k, round(sim, 3)]
+
+    def label(self, segs: list[dict], x: np.ndarray, device: str) -> tuple[dict, dict, dict, dict]:
+        """(cluster -> 我/他人, cluster -> owner score, cluster -> unit mean voiceprint, cluster -> seconds)."""
+        owner = self.owner_for(device)
         mean, secs = {}, {}
         for g in segs:
             a, b = g["start_ms"] / 1000, min(g["end_ms"] / 1000, g["start_ms"] / 1000 + 15)
@@ -455,8 +483,11 @@ class Registry:
     def reset(self):
         self.c = {}
 
+    def best(self, vec: np.ndarray) -> tuple[str | None, float]:
+        return max(((k, float(v @ vec)) for k, (v, _) in self.c.items()), key=lambda t: t[1], default=(None, 0.0))
+
     def assign(self, vec: np.ndarray, weight: float, link_min: float = LINK_MIN) -> tuple[str, float]:
-        best = max(((k, float(v @ vec)) for k, (v, _) in self.c.items()), key=lambda t: t[1], default=(None, 0.0))
+        best = self.best(vec)
         if best[0] and best[1] >= link_min:
             k, (v, w) = best[0], self.c[best[0]]
             nv = v * w + vec * weight
@@ -609,16 +640,17 @@ async def pipeline(directory: Path, from_start: bool, key: str):
             return {"type": "conversation", **rec}
 
         async def refine_pass() -> bool:
-            """One pass over [done_to - context, + window]; True when a backlog remains."""
+            """One pass over [done_to - margin, + window]; True when a backlog remains."""
             nonlocal done_to
             if not seg.anchors:
                 return False  # no audio yet
             t_run = time.perf_counter()
             # from where the last pass stopped, or from the oldest buffered audio (a client may burst a backlog at startup)
-            t0, x = seg.window(REFINE_WINDOW_S, done_to - dt.timedelta(seconds=REFINE_CONTEXT_S) if done_to else seg.time_at(seg.audio_base))
+            t0, x = seg.window(REFINE_WINDOW_S, done_to - dt.timedelta(seconds=REFINE_MARGIN_S) if done_to else seg.time_at(seg.audio_base))
             a0 = seg.sample_at(t0)
             at = lambda s: seg.time_at(a0 + int(s * SR))  # the window may span a session boundary, where the clock jumps
-            since = EDGE_S if done_to is None else max(EDGE_S, (seg.sample_at(done_to) - a0) / SR)
+            # a first pass may start mid-sentence: skip its edge; later passes start at a sentence the last one left open
+            since = EDGE_S if done_to is None else max(0.0, (seg.sample_at(done_to) - a0) / SR)
             if len(x) / SR - since < EDGE_S + 10:
                 return False
             hi = at(len(x) / SR - EDGE_S)
@@ -628,12 +660,12 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                 for c in grouper.advance(hi):
                     await broadcast(close(c))
                 state["done_to"] = hi
-                return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_CONTEXT_S
+                return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
             was_open = bool(grouper.open)
             try:
                 device = state["device"] or current_device(follower.dir)
                 segs = await asyncio.to_thread(local_for(device), x) if local else await asyncio.to_thread(engine_segs, x)
-                all_segs, segs = segs, clip_turns(segs, since)  # voiceprints use the whole window, text and rows only the new part
+                segs = clip_turns(segs, since)
                 engine = None
                 if local and TEXT_SOURCE == "file":  # one file-mode call for the window; its words go to the local turns
                     file_segs = await asyncio.to_thread(diarize, x)
@@ -645,28 +677,21 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                     engine = segs[0]["engine"] if segs else None
                 elif local:  # turns are only cut, not transcribed: ASR the ones this pass will finalize
                     await asyncio.gather(*[transcribe_turn(g, x) for g in segs if g["end_ms"] / 1000 > since])
-                names, score, means, secs = await asyncio.to_thread(spk.label, all_segs, x, device)
+                await asyncio.to_thread(spk.sentences, segs, x, device, reg, DEVICE_PARAMS.get(device, {}).get("link", LINK_MIN))
             except Exception as e:
                 log.warning("refine failed: %r", e)
                 note(f"这一轮引擎调用失败：{str(e)[:120]}，下一轮重试", "error")
                 state["refine"] = {"error": str(e)[:200]}
                 return False
-            labels, conf = {}, {}
-            for k, who in names.items():
-                if who == "我":
-                    labels[k], conf[k] = "我", round(score[k], 3)
-                elif k in means and secs[k] >= MIN_SPEAKER_S:
-                    labels[k], conf[k] = reg.assign(means[k], secs[k], DEVICE_PARAMS.get(device, {}).get("link", LINK_MIN))
-                else:
-                    labels[k], conf[k] = "S?", 0.0  # too little speech for a voiceprint: not worth a speaker id
+            labels = {g["speaker"]: g["speaker"] for g in segs}
             by_label = {}
-            for k, c in conf.items():  # final_rows keys confidence by label; two clusters may share one
-                by_label[labels[k]] = max(by_label.get(labels[k], 0.0), c)
+            for g in segs:  # final_rows keys confidence by label
+                by_label[g["speaker"]] = max(by_label.get(g["speaker"], 0.0), g["confidence"])
             lo, hi, rows = final_rows(segs, labels, t0, len(x) / SR, by_label, since, at)
             with open(DATA / f"{lo.date()}.passes.jsonl", "a") as f:  # every pass's raw engine output, for tracing lost rows
                 f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"), "t0": t0.isoformat(timespec="milliseconds"),
                                     "since": since, "from": lo.isoformat(timespec="milliseconds"), "to": hi.isoformat(timespec="milliseconds"),
-                                    "labels": labels, "scores": {k: round(v, 3) for k, v in score.items()}, "segs": all_segs},
+                                    "segs": segs},  # each sentence carries engine_speaker, owner_sim, best
                                    ensure_ascii=False) + "\n")
             for r in rows:
                 r["source"], r["engine"] = device, engine or "stepfun-sse"
@@ -697,14 +722,14 @@ async def pipeline(directory: Path, from_start: bool, key: str):
                 o = grouper.open
                 state["conversation"] = {"start": o["start"], "end": o["end"], "sentences": len(o["sentences"])}
             state["refine"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
-                               "scores": {k: round(v, 3) for k, v in score.items()}, "labels": labels, "changed": len(rows),
+                               "speakers": by_label, "changed": len(rows),
                                "backlog_s": round((seg.time_at(seg.samples) - hi).total_seconds())}
             log.info("refine %s: %s", device, state["refine"])
             note(f"定稿一轮：{device} 送 {len(x) / SR:.0f} s（含 {since:.0f} s 上下文）给 {engine or ENGINE}，"
                  f"{state['refine']['ms'] / 1000:.1f} s，{len(rows)} 句，定稿到 {hi.strftime('%H:%M:%S')}，积压 {state['refine']['backlog_s']} s")
             if grouper.open and not was_open:
                 note(f"对话开始：{grouper.open['start'][11:19]}", "state")
-            return state["refine"]["backlog_s"] > REFINE_WINDOW_S - REFINE_CONTEXT_S
+            return state["refine"]["backlog_s"] > REFINE_WINDOW_S - REFINE_MARGIN_S
 
         last_end = None
         while True:
@@ -775,7 +800,7 @@ async def status_loop():
                          "no_speech": state["no_speech"], "commit": state["commit"], "refine": state["refine"],
                          "conversation": state["conversation"], "diarizer": DIARIZER,
                          "latency_s": sorted(state["latency"])[len(state["latency"]) // 2] if state["latency"] else None,
-                         "mode": f"{'two-layer' if FIRST_LAYER else 'final-only'}/{ENGINE}/{REFINE_EVERY_S}s+{REFINE_CONTEXT_S}s"})
+                         "mode": f"{'two-layer' if FIRST_LAYER else 'final-only'}/{ENGINE}/{REFINE_EVERY_S}s/per-sentence"})
         await asyncio.sleep(2)
 
 

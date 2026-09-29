@@ -5,7 +5,7 @@ import subprocess
 
 import numpy as np
 
-from server import SR, Segmenter, clip_turns
+from server import SR, Registry, Segmenter, Speakers, clip_turns, final_rows
 
 CLIP = os.environ.get("TEST_CLIP", "")  # any recorder file with speech; the test skips the audio part without it
 
@@ -71,3 +71,26 @@ def test_sample_at_gap():
     assert s.sample_at(T(45, 50)) == 50 * SR
     assert s.sample_at(T(50)) == 100 * SR               # in the gap: clamp, do not extrapolate to 300 s
     assert s.sample_at(T(52, 10)) == 110 * SR
+
+
+def test_zero_context_keeps_first_sentence():
+    """With no context the window starts 1 s before the sentence the last pass left open: it must be finalized."""
+    segs = [dict(start_ms=1000, end_ms=4000, speaker="我", text="开头这句"), dict(start_ms=5000, end_ms=8000, speaker="我", text="第二句")]
+    t0 = dt.datetime(2026, 9, 29, 18)
+    lo, hi, rows = final_rows(segs, {"我": "我"}, t0, 20.0, since=1.0)
+    assert [r["text"] for r in rows] == ["开头这句", "第二句"] and lo == t0 + dt.timedelta(seconds=1)
+
+
+def test_sentence_speakers():
+    """Per sentence: closer to the owner than to anyone known -> 我; a long unknown opens S1, a short one does not."""
+    me, other, third = np.eye(4)[0], np.eye(4)[1], np.eye(4)[2]
+    s = object.__new__(Speakers)
+    s.owner, s.warned = {"phone": me}, set()
+    by_start = {0: me, 2000: other, 6000: third, 8000: other * 0.9 + me * 0.3, 11000: me}
+    s.embed = lambda x: by_start[next(k for k in by_start if abs(len_to_ms[len(x)] - k) < 1)]
+    segs = [dict(start_ms=a, end_ms=b, speaker="SPEAKER_0", text="x") for a, b in
+            [(0, 1600), (2000, 5000), (6000, 7500), (8000, 10500), (11000, 11500)]]
+    len_to_ms = {int((min(b, a + 15000) - a) / 1000 * SR): a for a, b in [(g["start_ms"], g["end_ms"]) for g in segs]}
+    reg = Registry()
+    s.sentences(segs, np.zeros(SR * 20, np.int16), "phone", reg, 0.55)
+    assert [g["speaker"] for g in segs] == ["我", "S1", "S?", "S1", "S?"], [g["speaker"] for g in segs]
