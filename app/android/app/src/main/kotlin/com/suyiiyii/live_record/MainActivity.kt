@@ -28,6 +28,7 @@ class MainActivity : FlutterActivity() {
                     for (k in listOf("server", "token", "device")) i.putExtra(k, call.argument<String>(k))
                     for (k in listOf("foreground", "background", "screenOff")) i.putExtra(k, call.argument<Int>(k)!!)
                     i.putExtra("archive", call.argument<Boolean>("archive") ?: true)
+                    i.putExtra("nonce", System.currentTimeMillis())
                     startForegroundService(i)
                     result.success(null)
                 }

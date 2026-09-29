@@ -58,9 +58,13 @@ class RecorderService : Service() {
             Thread { stopAll(prefs); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }.start()
             return START_NOT_STICKY
         }
-        // a start from the UI carries extras; after a kill the system may redeliver them, so a restart is
-        // recognised by the process: a new pid while the last run was still active
-        if (slicer == null && prefs.getBoolean("active", false) && prefs.getInt("pid", 0) != Process.myPid()) {
+        // a start from the UI carries a fresh nonce; after a kill the system restarts us with no intent or
+        // redelivers the old one, so: same or no nonce while the last run was still active = we were killed
+        val nonce = intent?.getLongExtra("nonce", 0L) ?: 0L
+        if (nonce != 0L && nonce != prefs.getLong("nonce", 0L)) {
+            interruptedAt = 0
+            prefs.edit().putLong("nonce", nonce).apply()
+        } else if (slicer == null && prefs.getBoolean("active", false) && prefs.getInt("pid", 0) != Process.myPid()) {
             interruptedAt = System.currentTimeMillis()
             Log.w("live-record", "restarted after being killed")
         }
