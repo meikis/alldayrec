@@ -198,8 +198,11 @@ class Segmenter:
         return out
 
     def sample_at(self, t: dt.datetime) -> int:
-        idx, t0 = next((a for a in reversed(self.anchors) if a[1] <= t), self.anchors[0])
-        return idx + int((t - t0).total_seconds() * SR)
+        i = next((k for k in range(len(self.anchors) - 1, -1, -1) if self.anchors[k][1] <= t), 0)
+        idx, t0 = self.anchors[i]
+        s = idx + int((t - t0).total_seconds() * SR)
+        # a time in the gap before the next session has no audio: the first sample after the gap
+        return min(s, self.anchors[i + 1][0]) if i + 1 < len(self.anchors) else s
 
     def window(self, seconds: float, start: dt.datetime | None = None) -> tuple[dt.datetime, np.ndarray]:
         """Up to `seconds` of audio from `start` (default: the last `seconds` up to now)."""

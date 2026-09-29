@@ -61,3 +61,13 @@ def test_clip_turns():
 
 test_clip_turns()
 print("ok: clip_turns")
+
+
+def test_sample_at_gap():
+    """A time inside the gap between two sessions maps to the first sample after the gap, not past it (09-29 17:55)."""
+    s = object.__new__(Segmenter)
+    T = lambda m, sec=0: dt.datetime(2026, 9, 29, 17, m, sec)
+    s.anchors = [(0, T(45)), (100 * SR, T(52))]          # 100 s of audio from 17:45, then a new session at 17:52
+    assert s.sample_at(T(45, 50)) == 50 * SR
+    assert s.sample_at(T(50)) == 100 * SR               # in the gap: clamp, do not extrapolate to 300 s
+    assert s.sample_at(T(52, 10)) == 110 * SR
