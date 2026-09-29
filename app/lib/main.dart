@@ -63,11 +63,11 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   Map status = {};
   String note = '';
   bool stopping = false;
-  int page = 0;  // 0 字幕, 1 设置
-  WebViewController? web;
+  int page = 0;  // 0 字幕, 1 对话, 2 设置
+  WebViewController? web, convWeb;  // the live page keeps its scroll while the history is browsed
   Timer? ticker;
 
-  static const titles = ['字幕', '设置'];
+  static const titles = ['字幕', '对话', '设置'];
 
   @override
   void initState() {
@@ -91,10 +91,13 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   void _loadWeb() {
     final s = settings!;
     if (s.token.isEmpty) return;
-    web ??= WebViewController()
+    WebViewController make() => WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..clearCache();  // the page changes with server deploys
+    web ??= make();
+    convWeb ??= make();
     web!.loadRequest(Uri.parse('${s.server}/?token=${s.token}'));  // sets the cookie, then the page follows itself
+    convWeb!.loadRequest(Uri.parse('${s.server}/conversations?token=${s.token}'));
   }
 
   Future<void> _saved() async {
@@ -104,6 +107,12 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(running ? '已保存，下次开始录音时生效' : '已保存'), behavior: SnackBarBehavior.floating));
     setState(() => page = 0);
+  }
+
+  Future<void> _back() async {  // back key: history inside 对话 first, then to 字幕, then leave
+    if (page == 1 && await convWeb!.canGoBack()) return convWeb!.goBack();
+    if (page != 0) return setState(() => page = 0);
+    SystemNavigator.pop();
   }
 
   Future<void> _start() async {
@@ -124,7 +133,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    return Scaffold(
+    return PopScope(canPop: false, onPopInvokedWithResult: (didPop, _) => didPop ? null : _back(), child: Scaffold(
       appBar: AppBar(
         title: Text(titles[page]),
         actions: [if (running) const Padding(padding: EdgeInsets.only(right: 16), child: _Live())],
@@ -148,6 +157,8 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           const NavigationDrawerDestination(
               icon: Icon(Icons.subtitles_outlined), selectedIcon: Icon(Icons.subtitles), label: Text('字幕')),
           const NavigationDrawerDestination(
+              icon: Icon(Icons.forum_outlined), selectedIcon: Icon(Icons.forum), label: Text('对话')),
+          const NavigationDrawerDestination(
               icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: Text('设置')),
         ],
       ),
@@ -155,12 +166,15 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           ? const Center(child: CircularProgressIndicator())
           : IndexedStack(index: page, children: [  // keeps the WebView alive across pages
               web == null
-                  ? _Empty(onSetup: () => setState(() => page = 1))
+                  ? _Empty(onSetup: () => setState(() => page = 2))
                   : WebViewWidget(controller: web!),
+              convWeb == null
+                  ? _Empty(onSetup: () => setState(() => page = 2))
+                  : WebViewWidget(controller: convWeb!),
               SettingsPage(settings: settings!, onSaved: _saved),
             ]),
       bottomNavigationBar: page == 0 && settings != null ? _controlBar(cs) : null,
-    );
+    ));
   }
 
   Widget _controlBar(ColorScheme cs) {

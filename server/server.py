@@ -24,6 +24,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse, Response
 
+import summary
 from conversations import Grouper
 
 HERE = Path(__file__).resolve().parent
@@ -542,6 +543,60 @@ def conversations_path(day: dt.date) -> Path:
     return DATA / f"{day.isoformat()}.conversations.jsonl"
 
 
+def summary_path(conv_id: str) -> Path:
+    return DATA / "summaries" / f"{conv_id}.json"
+
+
+def find_conversation(conv_id: str) -> dict | None:
+    """Ids are "c" + the start time as YYYYMMDDhhmmss, so the day file is known from the id."""
+    p = conversations_path(dt.date(int(conv_id[1:5]), int(conv_id[5:7]), int(conv_id[7:9])))
+    return next((c for c in map(json.loads, open(p)) if c["id"] == conv_id), None) if p.exists() else None
+
+
+def conversation_rows(c: dict) -> list[dict]:
+    a, b = dt.date.fromisoformat(c["start"][:10]), dt.date.fromisoformat(c["end"][:10])
+    days = [a + dt.timedelta(days=i) for i in range((b - a).days + 1)]
+    return [r for d in days for r in day_rows(d) if c["start"] <= r["start"] <= c["end"]]
+
+
+summary_q: asyncio.Queue = asyncio.Queue()
+
+
+def queue_summary(c: dict):
+    summary_path(c["id"]).parent.mkdir(exist_ok=True)
+    summary_path(c["id"]).write_text(json.dumps({"conversation": c["id"], "status": "pending", "error": None}))
+    summary_q.put_nowait(c)
+
+
+async def summary_worker():
+    """Conversations closed while the service was down, or whose summary never finished, are queued first."""
+    for p in sorted(DATA.glob("*.conversations.jsonl"))[-7:]:
+        for c in map(json.loads, open(p)):
+            sp = summary_path(c["id"])
+            if not sp.exists() or json.loads(sp.read_text())["status"] == "pending":
+                queue_summary(c)
+    while True:
+        c = await summary_q.get()
+        for delay in (10, 60, 300, None):
+            try:
+                res = await asyncio.to_thread(summary.summarize, c, conversation_rows(c))
+                break
+            except Exception as e:  # HTTP errors, timeouts, a reply that is not JSON
+                log.warning("summary %s failed: %r", c["id"], e)
+                res = {"conversation": c["id"], "status": "failed", "error": repr(e)[:300]}
+                if delay:
+                    await asyncio.sleep(delay)
+        summary_path(c["id"]).write_text(json.dumps(res, ensure_ascii=False, indent=1))
+        note(f"对话 {c['start'][11:19]} 的摘要" + (f"：{res['title']}" if res["status"] == "done" else f"生成失败：{res['error']}"),
+             "state" if res["status"] == "done" else "error")
+        await broadcast({"type": "summary", **res})
+
+
+def load_summary(conv_id: str) -> dict | None:
+    p = summary_path(conv_id)
+    return json.loads(p.read_text()) if p.exists() else None
+
+
 def apply_final(records) -> list[dict]:
     rows = []
     for rec in records:
@@ -628,6 +683,7 @@ async def pipeline(directory: Path, from_start: bool, key: str):
             with open(conversations_path(dt.datetime.fromisoformat(c["start"]).date()), "a") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             state["conversation"] = None
+            queue_summary(rec)
             log.info("conversation closed %s", {k: v for k, v in rec.items() if k != "sentences"})
             note(f"对话结束：{rec['start'][11:19]} 到 {rec['end'][11:19]}，{len(rec['sentences'])} 句，参与 {'、'.join(rec['participants']) or '—'}", "state")
             return {"type": "conversation", **rec}
@@ -831,6 +887,12 @@ async def index():
     return FileResponse(HERE / "static/index.html", headers=NO_CACHE)
 
 
+@app.get("/conversations")
+@app.get("/c/{conv_id}")
+async def conversations_page(conv_id: str = ""):
+    return FileResponse(HERE / "static/conversations.html", headers=NO_CACHE)
+
+
 @app.get("/app.apk")
 async def apk():
     """The Android client, for installing from the phone's browser."""
@@ -913,7 +975,10 @@ async def status():
 
 @app.get("/api/sentences")
 async def sentences(date: str | None = None):
-    day = dt.date.fromisoformat(date) if date else dt.date.today()
+    return day_rows(dt.date.fromisoformat(date) if date else dt.date.today())
+
+
+def day_rows(day: dt.date) -> list[dict]:
     p, fp = sentences_path(day), final_path(day)
     recs = [json.loads(l) for l in open(fp)] if fp.exists() else []
     final = apply_final(recs)
@@ -927,8 +992,31 @@ async def sentences(date: str | None = None):
 async def conversations(date: str | None = None):
     day = dt.date.fromisoformat(date) if date else dt.date.today()
     p = conversations_path(day)
-    closed = [json.loads(l) for l in open(p)] if p.exists() else []
+    closed = [{**c, "summary": load_summary(c["id"])} for c in map(json.loads, open(p))] if p.exists() else []
     return closed + ([{**state["conversation"], "state": "open"}] if state["conversation"] else [])
+
+
+@app.get("/api/days")
+async def days():
+    """Days that have conversations, newest first."""
+    return sorted((p.name[:10] for p in DATA.glob("*.conversations.jsonl")), reverse=True)
+
+
+@app.get("/api/conversation/{conv_id}")
+async def conversation(conv_id: str):
+    c = find_conversation(conv_id)
+    if not c:
+        raise HTTPException(404, "no such conversation")
+    return {**c, "summary": load_summary(conv_id), "rows": conversation_rows(c)}
+
+
+@app.post("/api/conversation/{conv_id}/summarize")
+async def resummarize(conv_id: str):
+    c = find_conversation(conv_id)
+    if not c:
+        raise HTTPException(404, "no such conversation")
+    queue_summary(c)
+    return {"status": "pending"}
 
 
 @app.get("/api/audio")
@@ -990,6 +1078,7 @@ def main():
         raise SystemExit(f"ENGINE must be volc or stepfun, not {ENGINE!r}")
     if (FIRST_LAYER or TEXT_SOURCE == "sse") and not (key and ASR_URL):
         missing += ["STEPFUN_API_KEY / STEPFUN_SSE_URL"]
+    missing += [k for k in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL") if not os.environ.get(k)]
     if missing:
         raise SystemExit(f"not set: {', '.join(missing)} (see .env.example)")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -1000,7 +1089,7 @@ def main():
 
     @app.on_event("startup")
     async def start():
-        for name, coro in (("pipeline", pipeline(args.dir, args.from_start, key)), ("status", status_loop())):
+        for name, coro in (("pipeline", pipeline(args.dir, args.from_start, key)), ("status", status_loop()), ("summary", summary_worker())):
             asyncio.create_task(coro, name=name).add_done_callback(
                 lambda t, n=name: log.error("task %s ended: %r", n, t.exception()) if not t.cancelled() else None)
 

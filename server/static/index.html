@@ -11,6 +11,10 @@
   header { position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--line); z-index: 1; }
   .bar { max-width: 860px; margin: 0 auto; padding: 12px 16px; display: flex; align-items: baseline; gap: 16px; }
   h1 { font-size: 17px; margin: 0; color: var(--accent); white-space: nowrap; }
+  nav { display: flex; gap: 16px; font-size: 14px; white-space: nowrap; }
+  nav a { color: var(--muted); text-decoration: none; } nav a.on { color: var(--accent); font-weight: 600; }
+  .in-app nav { display: none; }
+  .conv a { color: var(--accent); }
   #status { font-size: 12px; color: var(--muted); display: flex; gap: 14px; flex-wrap: wrap; }
   #status .bad { color: var(--err); }
   main { max-width: 860px; margin: 0 auto; padding: 8px 16px 120px; }
@@ -40,6 +44,7 @@
           color: var(--accent); border-radius: 16px; padding: 6px 14px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
   @media (max-width: 600px) {  /* phones: the app bar already carries a title; keep the status on one scrolling line */
     h1 { display: none; }
+    nav { gap: 12px; font-size: 13px; }
     .bar { padding: 8px 12px; }
     #status { flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; gap: 12px; scrollbar-width: none; }
     main { padding: 4px 12px 110px; }
@@ -50,11 +55,12 @@
 </style>
 </head>
 <body>
-<header><div class="bar"><h1>Record Live</h1><div id="status">连接中…</div></div></header>
+<header><div class="bar"><h1>Record Live</h1><nav><a href="/" class="on">实时字幕</a><a href="/conversations">对话</a></nav><div id="status">连接中…</div></div></header>
 <main><div id="list"></div><div id="empty">今天还没有转写内容</div></main>
 <button id="jump">回到最新</button>
 <details id="syslog"><summary>系统日志 <span id="lastev"></span></summary><div id="events"></div></details>
 <script>
+if (/; wv\)/.test(navigator.userAgent)) document.documentElement.classList.add("in-app");  // Android WebView: the app has its own nav
 const list = document.getElementById("list"), empty = document.getElementById("empty"), jump = document.getElementById("jump");
 let last = null, follow = true;
 const hhmmss = iso => iso.slice(11, 19);
@@ -113,7 +119,10 @@ function finalize(m) {                                     // rows in [from, to)
 
 function conversation(c) {
   const d = document.createElement("div"); d.className = "conv"; d.dataset.start = c.end;
-  d.textContent = `对话 ${hhmmss(c.start)}–${hhmmss(c.end)} 结束 · 参与 ${(c.participants || []).join("、") || "—"} · ${c.sentences.length} 句`;
+  d.textContent = `对话 ${hhmmss(c.start)}–${hhmmss(c.end)} 结束 · 参与 ${(c.participants || []).join("、") || "—"} · ${c.sentences.length} 句 · `;
+  const a = document.createElement("a"); a.href = "/c/" + c.id; a.id = "t" + c.id;
+  a.textContent = c.summary && c.summary.status === "done" ? c.summary.title || "查看" : "摘要生成中…";
+  d.append(a);
   insert(d, c.end);
 }
 
@@ -143,6 +152,7 @@ function connect() {
     if (m.type === "sentence") add(m);
     else if (m.type === "final") finalize(m);
     else if (m.type === "conversation") conversation(m);
+    else if (m.type === "summary") { const a = document.getElementById("t" + m.conversation); if (a) a.textContent = m.status === "done" ? m.title || "查看" : "摘要生成失败"; }
     else if (m.type === "event") event(m);
     else status(m);
   };
