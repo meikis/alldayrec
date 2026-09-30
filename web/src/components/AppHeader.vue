@@ -9,7 +9,12 @@ defineProps<{ inApp?: boolean }>();
       <h1>Record Live</h1>
       <nav>
         <RouterLink to="/" exact-active-class="on">实时字幕</RouterLink>
-        <RouterLink to="/conversations" :class="{ on: $route.path !== '/' }">对话</RouterLink>
+        <RouterLink
+          to="/conversations"
+          :class="{ on: $route.path === '/conversations' || $route.path.startsWith('/c/') }"
+          >对话</RouterLink
+        >
+        <RouterLink to="/speakers" exact-active-class="on">说话人</RouterLink>
       </nav>
       <slot />
     </div>

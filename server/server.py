@@ -24,6 +24,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse, Response
 
+import speakers
 import summary
 from conversations import Grouper
 
@@ -938,6 +939,7 @@ DIST = HERE / "static/dist"  # the web app (web/, built by web/deploy.sh)
 @app.get("/conversations")
 @app.get("/c/{conv_id}")
 @app.get("/record")
+@app.get("/speakers")
 async def page(conv_id: str = ""):
     return FileResponse(DIST / "index.html", headers=NO_CACHE)
 
@@ -1116,10 +1118,16 @@ async def names():
 
 @app.post("/api/conversation/{conv_id}/rename")
 async def rename(conv_id: str, body: dict):
+    frm, to = body.get("from", ""), (body.get("to") or "").strip()
+    res = await apply_rename(conv_id, frm, to)
+    relabel_voices({(conv_id, frm): to})
+    return res
+
+
+async def apply_rename(conv_id: str, frm: str, to: str) -> dict:
     """One label of one conversation becomes a name: its rows are rewritten (a final record over the
     conversation, so nothing is edited in place), the summary is redone, and when the recording is still
     here up to ENROLL sentences of it teach the diarist that voice for later conversations."""
-    frm, to = body.get("from", ""), (body.get("to") or "").strip()
     c = find_conversation(conv_id)
     if not c:
         raise HTTPException(404, "no such conversation")
@@ -1165,6 +1173,183 @@ async def rename(conv_id: str, body: dict):
 
 
 ENROLL = 20
+
+# speakers page: one voiceprint per conversation x label (history ones computed from the old recorder's audio and
+# uploaded with a clip each; live ones computed here), grouped across conversations by speakers.py
+VOICES = DATA / "voices"
+VOICE_FILES = (VOICES / "history.jsonl", VOICES / "live.jsonl")
+APART = VOICES / "apart.jsonl"  # [voice key, group] pairs the user split: never grouped or suggested again
+SPEAKER_LINK = float(os.environ.get("SPEAKER_LINK", "0.5"))  # cosine (device-centred) to join an anonymous group
+SPEAKER_SUGGEST = float(os.environ.get("SPEAKER_SUGGEST", "0.5"))  # cosine to offer an anonymous group to a name
+_speakers = {"at": 0.0, "groups": None}
+
+
+def load_voices() -> list[dict]:
+    return [v for p in VOICE_FILES if p.exists() for v in map(json.loads, open(p)) if v.get("e")]
+
+
+def relabel_voices(renames: dict[tuple[str, str], str]):
+    """Voices and pins follow a rename, so the voice stays the same row under its new label."""
+    for p in (*VOICE_FILES, APART):
+        if not p.exists():
+            continue
+        lines = []
+        for x in map(json.loads, open(p)):
+            if p == APART:
+                conv, label = x[0].split("|", 1)
+                if (conv, label) in renames:
+                    x[0] = f"{conv}|{renames[(conv, label)]}"
+            elif (x["conv"], x.get("label")) in renames:
+                x["label"] = renames[(x["conv"], x["label"])]
+            lines.append(json.dumps(x, ensure_ascii=False) + "\n")
+        p.write_text("".join(lines))
+    _speakers["at"] = 0.0
+
+
+def conv_start(conv_id: str) -> str:
+    x = conv_id[1:]
+    return f"{x[:4]}-{x[4:6]}-{x[6:8]}T{x[8:10]}:{x[10:12]}:{x[12:14]}"
+
+
+def speaker_groups() -> list[dict]:
+    """Recomputed at most every 30 s, and after any rename."""
+    if _speakers["groups"] is not None and time.time() - _speakers["at"] < 30:
+        return _speakers["groups"]
+    apart = {tuple(x) for x in map(json.loads, open(APART))} if APART.exists() else set()
+    convs = {c["id"]: c for c in all_conversations()}
+    out = []
+    for g in speakers.speakers(load_voices(), SPEAKER_LINK, SPEAKER_SUGGEST, apart):
+        out.append({"id": g["id"], "name": g["name"], **describe(g["members"], convs),
+                    "suggested": [{"score": s["score"], **describe(s["members"], convs)} for s in g["suggested"]]})
+    order = lambda g: (g["name"] is not None, g["name"] == "我", -g["count"])  # unnamed and frequent first, 我 last
+    out.sort(key=order)
+    _speakers.update(at=time.time(), groups=out)
+    return out
+
+
+def describe(members: list[dict], convs: dict) -> dict:
+    ms = []
+    for v in members:
+        c = convs.get(v["conv"]) or {}
+        s = (c.get("summary") or {})
+        pts = next((p.get("points") or [] for p in s.get("people") or [] if p.get("who") == v["label"]), [])
+        ms.append({"conv": v["conv"], "label": v["label"], "start": conv_start(v["conv"]), "n": v["n"], "speech_s": v["speech_s"],
+                   "clip": v.get("clip"), "clip_start": v.get("clip_start"), "clip_end": v.get("clip_end"), "clip_text": v.get("clip_text"),
+                   "title": s.get("title"), "points": pts[:2],
+                   "with": [p for p in c.get("participants") or [] if p != v["label"]]})
+    ms.sort(key=lambda m: m["start"], reverse=True)
+    co = {}
+    for m in ms:
+        for p in m["with"]:
+            if not speakers.ANON.fullmatch(p):
+                co[p] = co.get(p, 0) + 1
+    return {"count": len(ms), "speech_s": round(sum(m["speech_s"] for m in ms), 1), "last": ms[0]["start"] if ms else None,
+            "samples": [m for m in sorted(ms, key=lambda m: -m["speech_s"])][:3],
+            "co": sorted(co, key=lambda k: -co[k])[:4], "members": ms}
+
+
+@app.get("/api/speakers")
+async def speaker_list():
+    return await asyncio.to_thread(speaker_groups)
+
+
+def check_name(to: str):
+    if not to or to == "S?" or len(to) > 20 or speakers.ANON.fullmatch(to):
+        raise HTTPException(400, "bad name")
+
+
+@app.post("/api/speakers/name")
+async def speaker_name(body: dict):
+    """Every member voice of a group (or of a suggestion) takes the name, in all of its conversations."""
+    to = (body.get("name") or "").strip()
+    check_name(to)
+    done, renames = 0, {}
+    for m in body.get("members") or []:
+        if m["label"] == to:
+            continue
+        try:
+            await apply_rename(m["conv"], m["label"], to)
+        except HTTPException as e:  # the conversation changed since the page loaded
+            log.warning("speaker name %s %s: %s", m["conv"], m["label"], e.detail)
+            continue
+        renames[(m["conv"], m["label"])] = to
+        done += 1
+    relabel_voices(renames)
+    return {"renamed": done}
+
+
+@app.post("/api/speakers/detach")
+async def speaker_detach(body: dict):
+    """A voice that is not this speaker: a named one goes back to a fresh S<n> of its conversation; either way it is
+    kept apart from the group from now on."""
+    conv, label, group = body["conv"], body["label"], body["group"]
+    key = f"{conv}|{label}"
+    if not speakers.ANON.fullmatch(label):
+        c = find_conversation(conv)
+        if not c:
+            raise HTTPException(404, "no such conversation")
+        used = {int(p[1:]) for p in c["participants"] if re.fullmatch(r"S\d+", p)}
+        new = f"S{max(used, default=0) + 1}"
+        await apply_rename(conv, label, new)
+        relabel_voices({(conv, label): new})
+        key = f"{conv}|{new}"
+    VOICES.mkdir(exist_ok=True)
+    with open(APART, "a") as f:
+        f.write(json.dumps([key, group], ensure_ascii=False) + "\n")
+    _speakers["at"] = 0.0
+    return {"key": key}
+
+
+@app.get("/api/voice-clip/{name}")
+async def voice_clip(name: str):
+    p = VOICES / "clips" / name
+    if not re.fullmatch(r"[\w.-]+\.ogg", name) or not p.is_file():
+        raise HTTPException(404, "no such clip")
+    return FileResponse(p, media_type="audio/ogg", headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+async def voices_loop():
+    """Voiceprints for the labels of closed live conversations (history ones are uploaded): up to 4 sentences of
+    >= 1.5 s per label with >= 3 sentences. A conversation without a recording here is marked and not retried."""
+    live = VOICE_FILES[1]
+    while True:
+        await asyncio.sleep(300)
+        if not state.get("embed"):
+            continue
+        VOICES.mkdir(exist_ok=True)
+        seen = {v["conv"] for p in VOICE_FILES if p.exists() for v in map(json.loads, open(p))}
+        since = (dt.date.today() - dt.timedelta(days=3)).isoformat()
+        for c in all_conversations():
+            if c["start"] < since or c["id"] in seen:
+                continue
+            by = {}
+            for r in conversation_rows(c):
+                if r.get("speaker") and r["speaker"] != "S?":
+                    by.setdefault(r["speaker"], []).append(r)
+            out = []
+            for label, rs in by.items():
+                if len(rs) < 3:
+                    continue
+                dur = lambda r: (dt.datetime.fromisoformat(r["end"]) - dt.datetime.fromisoformat(r["start"])).total_seconds()
+                long = sorted((r for r in rs if dur(r) >= 1.5), key=dur, reverse=True)[:4]
+                es = []
+                for r in long:
+                    try:
+                        x = np.frombuffer(await cut(r["start"], min(r["end"], (dt.datetime.fromisoformat(r["start"]) + dt.timedelta(seconds=15)).isoformat()), "s16le"), np.int16)
+                    except HTTPException:
+                        continue
+                    es.append(await asyncio.to_thread(state["embed"], x))
+                if es:
+                    e = np.mean(es, 0)
+                    best = min(long, key=lambda r: abs(dur(r) - 6))
+                    out.append({"conv": c["id"], "label": label, "device": "live", "n": len(rs), "speech_s": round(sum(map(dur, rs)), 1),
+                                "k": len(es), "e": [round(float(v), 5) for v in e / np.linalg.norm(e)],
+                                "clip_start": best["start"], "clip_end": min(best["end"], (dt.datetime.fromisoformat(best["start"]) + dt.timedelta(seconds=10)).isoformat()),
+                                "clip_text": best.get("text")})
+            with open(live, "a") as f:
+                for v in out or [{"conv": c["id"], "e": None}]:
+                    f.write(json.dumps(v, ensure_ascii=False) + "\n")
+            _speakers["at"] = 0.0
 
 
 @app.get("/api/audio")
@@ -1242,7 +1427,8 @@ def main():
 
     @app.on_event("startup")
     async def start():
-        for name, coro in (("pipeline", pipeline(args.dir, args.from_start, key)), ("status", status_loop()), ("summary", summary_worker())):
+        for name, coro in (("pipeline", pipeline(args.dir, args.from_start, key)), ("status", status_loop()), ("summary", summary_worker()),
+                           ("voices", voices_loop())):
             asyncio.create_task(coro, name=name).add_done_callback(
                 lambda t, n=name: log.error("task %s ended: %r", n, t.exception()) if not t.cancelled() else None)
 

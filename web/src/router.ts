@@ -16,6 +16,11 @@ export const router = createRouter({
       meta: { title: "对话" },
     },
     {
+      path: "/speakers",
+      component: () => import("./pages/Speakers.vue"),
+      meta: { title: "说话人" },
+    },
+    {
       path: "/record",
       component: () => import("./pages/Record.vue"),
       meta: { title: "live-record 录音" },

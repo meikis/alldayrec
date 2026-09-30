@@ -1,0 +1,86 @@
+"""Speakers across conversations, for the speakers page. A "voice" is one label of one conversation (its mean
+voiceprint over a few sentences); labels that are names (and 我) group by name, the anonymous S<n> ones group by
+voice. An anonymous group close to a named one is offered as a suggestion, never merged by itself.
+"""
+import re
+
+import numpy as np
+
+ANON = re.compile(r"S(\d+|\?)")
+
+
+def key(v: dict) -> str:
+    return f"{v['conv']}|{v['label']}"
+
+
+def centered(voices: list[dict]) -> dict[str, np.ndarray]:
+    """Each voiceprint minus its device's mean: without it one microphone's own sound pulls strangers together."""
+    by_dev = {}
+    for v in voices:
+        by_dev.setdefault(v["device"], []).append(np.array(v["e"]))
+    mean = {d: np.mean(es, 0) for d, es in by_dev.items()}
+    out = {}
+    for v in voices:
+        x = np.array(v["e"]) - mean[v["device"]]
+        out[key(v)] = x / (np.linalg.norm(x) or 1)
+    return out
+
+
+def cluster(voices: list[dict], vec: dict[str, np.ndarray], link: float, apart: set[tuple[str, str]]) -> list[list[dict]]:
+    """Leader clustering, biggest voices first: a voice joins the closest group whose centroid is >= link, unless
+    the group already has its conversation (two labels of one conversation are two people) or a pin keeps them
+    apart. apart holds (voice key, group leader key)."""
+    # ponytail: greedy, O(voices x groups); average-linkage when a few thousand voices get slow or too split
+    groups = []  # [leader key, members, summed vector, conversations]
+    for v in sorted(voices, key=lambda v: -v["n"]):
+        x, k = vec[key(v)], key(v)
+        best, best_s = None, link
+        for g in groups:
+            if v["conv"] in g[3] or (k, g[0]) in apart:
+                continue
+            s = float(x @ g[2]) / np.linalg.norm(g[2])
+            if s >= best_s:
+                best, best_s = g, s
+        if best:
+            best[1].append(v); best[2] += x; best[3].add(v["conv"])
+        else:
+            groups.append([k, [v], x.copy(), {v["conv"]}])
+    return [g[1] for g in groups]
+
+
+def speakers(voices: list[dict], link: float, suggest: float, apart: set[tuple[str, str]]) -> list[dict]:
+    """Named groups (with anonymous groups that sound like them as suggestions), then anonymous groups."""
+    vec = centered(voices)
+    named, anon = {}, []
+    for v in voices:
+        (anon.append(v) if ANON.fullmatch(v["label"]) else named.setdefault(v["label"], []).append(v))
+    cent = {n: np.mean([vec[key(v)] for v in vs], 0) for n, vs in named.items()}
+    cent = {n: c / (np.linalg.norm(c) or 1) for n, c in cent.items()}
+    out = {n: {"id": n, "name": n, "members": vs, "suggested": []} for n, vs in named.items()}
+    rest = []
+    for g in cluster(anon, vec, link, apart):
+        c = np.mean([vec[key(v)] for v in g], 0)
+        c /= np.linalg.norm(c) or 1
+        convs = {v["conv"] for v in g}
+        near = sorted(((float(c @ cn), n) for n, cn in cent.items()
+                       if not convs & {v["conv"] for v in named[n]} and not any((key(v), n) in apart for v in g)), reverse=True)
+        if near and near[0][0] >= suggest:
+            out[near[0][1]]["suggested"].append({"score": round(near[0][0], 3), "members": g})
+        else:
+            rest.append({"id": key(g[0]), "name": None, "members": g, "suggested": []})
+    return list(out.values()) + rest
+
+
+if __name__ == "__main__":
+    rng = np.random.default_rng(0)
+    a, b = rng.normal(size=8), rng.normal(size=8)
+    mk = lambda conv, label, base, dev="mic": {"conv": conv, "label": label, "device": dev, "n": 5,
+                                               "e": (base + rng.normal(scale=0.1, size=8)).tolist()}
+    vs = [mk("c1", "我", a), mk("c2", "我", a), mk("c1", "S1", b), mk("c2", "S1", b), mk("c3", "S2", b), mk("c3", "S1", -b)]
+    sp = speakers(vs, link=0.6, suggest=0.99, apart=set())
+    anon = [g for g in sp if g["name"] is None]
+    assert {len(g["members"]) for g in anon} == {3, 1}, anon  # the three b voices together, -b alone
+    assert [g["name"] for g in sp if g["name"]] == ["我"]
+    two = cluster([vs[2], vs[3]], centered(vs), 0.6, {("c2|S1", "c1|S1")})
+    assert len(two) == 2  # a pin keeps them apart
+    print("ok")

@@ -1,0 +1,282 @@
+<script setup lang="ts">
+import { computed, ref } from "vue";
+import AppHeader from "../components/AppHeader.vue";
+import { get, post, type Speaker, type Voice, type VoiceSet } from "../lib/api";
+import { play, player } from "../lib/audio";
+
+const groups = ref<Speaker[]>([]),
+  names = ref<string[]>([]),
+  loaded = ref(false),
+  filter = ref<"unnamed" | "all">("unnamed"),
+  shown = ref(30),
+  open = ref(""),
+  editing = ref(""),
+  newName = ref(""),
+  flash = ref(""),
+  error = ref(""),
+  busy = ref(false);
+
+async function load() {
+  [groups.value, names.value] = await Promise.all([
+    get<Speaker[]>("/api/speakers"),
+    get<string[]>("/api/names"),
+  ]);
+  loaded.value = true;
+}
+void load();
+
+const list = computed(() =>
+  groups.value.filter((g) => filter.value === "all" || !g.name || g.suggested.length),
+);
+const unnamed = computed(() => groups.value.filter((g) => !g.name).length);
+
+const mins = (s: number) => (s < 60 ? `${Math.round(s)} 秒` : `${Math.round(s / 60)} 分钟`);
+const day = (iso: string) => `${iso.slice(5, 10)} ${iso.slice(11, 16)}`;
+const voiceId = (v: Voice) => `${v.conv}|${v.label}`;
+function listen(v: Voice) {
+  const src = v.clip
+    ? `/api/voice-clip/${v.clip}`
+    : `/api/audio?${new URLSearchParams({ start: v.clip_start!, end: v.clip_end! })}`;
+  play(voiceId(v), src);
+}
+const title = (g: Speaker) =>
+  g.name ?? `声音 ${groups.value.filter((x) => !x.name).indexOf(g) + 1}`;
+
+function edit(id: string) {
+  editing.value = id;
+  newName.value = "";
+  error.value = "";
+}
+async function name(set: VoiceSet, to: string, what: string) {
+  to = to.trim();
+  if (!to) return;
+  busy.value = true;
+  error.value = "";
+  try {
+    const r = await post<{ renamed: number }>("/api/speakers/name", {
+      name: to,
+      members: set.members.map((m) => ({ conv: m.conv, label: m.label })),
+    });
+    flash.value = `${what} → ${to}：改了 ${r.renamed} 段对话，摘要重新生成中`;
+    editing.value = "";
+    await load();
+  } catch (e) {
+    error.value = (e as Error).message;
+  } finally {
+    busy.value = false;
+  }
+}
+async function detach(g: Speaker, v: Voice) {
+  busy.value = true;
+  try {
+    await post("/api/speakers/detach", { conv: v.conv, label: v.label, group: g.name ?? g.id });
+    flash.value = `已把 ${day(v.start)} 那段从「${title(g)}」移出`;
+    await load();
+  } finally {
+    busy.value = false;
+  }
+}
+</script>
+
+<template>
+  <AppHeader>
+    <span class="count" v-if="loaded">{{ groups.length }} 个说话人 · {{ unnamed }} 个未命名</span>
+  </AppHeader>
+  <main>
+    <div class="tabs">
+      <button :class="{ on: filter === 'unnamed' }" @click="filter = 'unnamed'">待命名</button>
+      <button :class="{ on: filter === 'all' }" @click="filter = 'all'">全部</button>
+    </div>
+    <p v-if="flash" class="flash">{{ flash }}</p>
+    <p v-if="!loaded" class="empty">加载中…</p>
+
+    <section v-for="g in list.slice(0, shown)" :key="g.id" class="card">
+      <div class="head">
+        <b :class="{ anon: !g.name }">{{ title(g) }}</b>
+        <span class="meta"
+          >{{ g.count }} 段对话 · {{ mins(g.speech_s) }} · 最近 {{ g.last && day(g.last) }}</span
+        >
+      </div>
+      <div class="samples">
+        <button
+          v-for="v in g.samples"
+          :key="voiceId(v)"
+          class="clip"
+          :class="{ playing: player.playing === voiceId(v) }"
+          :disabled="player.failed.has(voiceId(v))"
+          @click="listen(v)"
+        >
+          {{ player.playing === voiceId(v) ? "■" : "▶" }} {{ v.clip_text || day(v.start) }}
+        </button>
+      </div>
+      <p v-if="g.co.length" class="meta">常一起出现：{{ g.co.join("、") }}</p>
+      <ul class="points">
+        <li v-for="v in g.samples.filter((v) => v.points.length).slice(0, 2)" :key="voiceId(v)">
+          {{ v.points[0] }} <span class="meta">— {{ v.title }}</span>
+        </li>
+      </ul>
+
+      <div class="actions">
+        <template v-if="editing === g.id">
+          <input
+            v-model="newName"
+            placeholder="名字"
+            list="names"
+            @keyup.enter="name(g, newName, title(g))"
+          />
+          <button :disabled="busy" @click="name(g, newName, title(g))">保存</button>
+          <button class="ghost" @click="editing = ''">取消</button>
+        </template>
+        <button v-else @click="edit(g.id)">{{ g.name ? "改名" : "起名" }}</button>
+        <button class="ghost" @click="open = open === g.id ? '' : g.id">
+          {{ open === g.id ? "收起" : `对话列表（${g.count}）` }}
+        </button>
+      </div>
+      <p v-if="error && editing === g.id" class="error">{{ error }}</p>
+      <div v-if="editing === g.id && names.length" class="chips">
+        <button v-for="n in names.slice(0, 12)" :key="n" class="chip" @click="name(g, n, title(g))">
+          {{ n }}
+        </button>
+      </div>
+
+      <div v-for="(s, i) in g.suggested" :key="i" class="suggest">
+        <span>可能也是 {{ g.name }}：{{ s.count }} 段对话（相似度 {{ s.score.toFixed(2) }}）</span>
+        <button v-for="v in s.samples" :key="voiceId(v)" class="clip" @click="listen(v)">
+          {{ player.playing === voiceId(v) ? "■" : "▶" }} {{ v.clip_text || day(v.start) }}
+        </button>
+        <button :disabled="busy" @click="name(s, g.name!, `${s.count} 段`)">是 {{ g.name }}</button>
+      </div>
+
+      <table v-if="open === g.id" class="members">
+        <tr v-for="v in g.members" :key="voiceId(v)">
+          <td class="when">
+            <RouterLink :to="`/c/${v.conv}`">{{ day(v.start) }}</RouterLink>
+          </td>
+          <td>
+            <button class="mini" @click="listen(v)">
+              {{ player.playing === voiceId(v) ? "■" : "▶" }}
+            </button>
+            {{ v.title || "（无标题）" }}
+            <span class="meta"
+              >· {{ v.label }} · {{ v.n }} 句 · 同场 {{ v.with.join("、") || "无" }}</span
+            >
+          </td>
+          <td><button class="ghost mini" :disabled="busy" @click="detach(g, v)">不是</button></td>
+        </tr>
+      </table>
+    </section>
+    <button v-if="list.length > shown" class="more" @click="shown += 30">再显示 30 个</button>
+    <datalist id="names"><option v-for="n in names" :key="n" :value="n" /></datalist>
+  </main>
+</template>
+
+<style scoped>
+main {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 12px 16px 48px;
+}
+.count,
+.meta {
+  color: var(--muted);
+  font-size: 13px;
+}
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.tabs button.on {
+  background: var(--accent);
+  color: #fff;
+}
+.card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.head b {
+  font-size: 16px;
+}
+.head b.anon {
+  color: var(--muted);
+}
+.samples,
+.chips,
+.actions,
+.suggest {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  align-items: center;
+}
+.clip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.clip.playing {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.points {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 14px;
+}
+.suggest {
+  background: var(--soft, rgba(0, 0, 0, 0.03));
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 13px;
+}
+.members {
+  width: 100%;
+  margin-top: 10px;
+  font-size: 13px;
+  border-collapse: collapse;
+}
+.members td {
+  padding: 4px 4px;
+  border-top: 1px solid var(--line);
+  vertical-align: top;
+}
+.members .when {
+  white-space: nowrap;
+}
+.mini {
+  font-size: 12px;
+  padding: 1px 6px;
+}
+.ghost {
+  background: none;
+}
+.flash {
+  color: var(--accent);
+  font-size: 14px;
+}
+.error {
+  color: #c33;
+  font-size: 13px;
+}
+.empty {
+  color: var(--muted);
+}
+.more {
+  width: 100%;
+}
+input {
+  font-size: 14px;
+  padding: 4px 8px;
+}
+</style>

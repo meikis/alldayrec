@@ -82,3 +82,31 @@ export const minutes = (c: Conversation) =>
   Math.max(1, Math.round((+new Date(c.end) - +new Date(c.start)) / 60000));
 export const count = (c: Conversation) =>
   typeof c.sentences === "number" ? c.sentences : c.sentences.length;
+
+export interface Voice {
+  conv: string;
+  label: string;
+  start: string;
+  n: number;
+  speech_s: number;
+  clip?: string | null;
+  clip_start?: string | null;
+  clip_end?: string | null;
+  clip_text?: string | null;
+  title?: string | null;
+  points: string[];
+  with: string[];
+}
+export interface VoiceSet {
+  count: number;
+  speech_s: number;
+  last: string | null;
+  samples: Voice[];
+  co: string[];
+  members: Voice[];
+}
+export interface Speaker extends VoiceSet {
+  id: string;
+  name: string | null;
+  suggested: (VoiceSet & { score: number })[];
+}

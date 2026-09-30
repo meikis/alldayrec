@@ -1,22 +1,25 @@
 import { reactive } from "vue";
 import type { Row } from "./api";
 
-// one sentence plays at a time, on every page
+// one clip plays at a time, on every page
 export const player = reactive({ playing: "", failed: new Set<string>() });
 let audio: HTMLAudioElement | null = null;
 
-export function toggle(r: Row) {
+export function play(id: string, src: string) {
   audio?.pause();
-  if (player.playing === r.id) {
+  if (player.playing === id) {
     player.playing = "";
     return;
   }
-  audio = new Audio(`/api/audio?${new URLSearchParams({ start: r.start, end: r.end })}`);
-  player.playing = r.id;
+  audio = new Audio(src);
+  player.playing = id;
   audio.onended = () => (player.playing = "");
   audio.onerror = () => {
-    player.failed.add(r.id);
+    player.failed.add(id);
     player.playing = "";
   };
   void audio.play();
 }
+
+export const toggle = (r: Row) =>
+  play(r.id, `/api/audio?${new URLSearchParams({ start: r.start, end: r.end })}`);
