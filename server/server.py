@@ -931,15 +931,24 @@ async def auth(request: Request, call_next):
 NO_CACHE = {"Cache-Control": "no-cache"}  # pages change with deploys; revalidate by etag instead of heuristic caching
 
 
+DIST = HERE / "static/dist"  # the web app (web/, built by web/deploy.sh)
+
+
 @app.get("/")
-async def index():
-    return FileResponse(HERE / "static/index.html", headers=NO_CACHE)
-
-
 @app.get("/conversations")
 @app.get("/c/{conv_id}")
-async def conversations_page(conv_id: str = ""):
-    return FileResponse(HERE / "static/conversations.html", headers=NO_CACHE)
+@app.get("/record")
+async def page(conv_id: str = ""):
+    return FileResponse(DIST / "index.html", headers=NO_CACHE)
+
+
+@app.get("/assets/{name}")
+async def asset(name: str):
+    """Build output with a content hash in the name: never changes, so cached for good."""
+    p = DIST / "assets" / name
+    if not p.is_file():
+        raise HTTPException(404, "no such asset")
+    return FileResponse(p, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @app.get("/app.apk")
@@ -949,11 +958,6 @@ async def apk():
     if not p.exists():
         raise HTTPException(404, "no apk uploaded")
     return FileResponse(p, media_type="application/vnd.android.package-archive", filename="live-record.apk")
-
-
-@app.get("/record")
-async def record_page():
-    return FileResponse(HERE / "static/record.html", headers=NO_CACHE)
 
 
 def busy(device: str):

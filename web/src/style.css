@@ -1,0 +1,81 @@
+:root {
+  --fg: #1f2330;
+  --muted: #8a8fa3;
+  --line: #eceef3;
+  --accent: #3b3f9e;
+  --bg: #fff;
+  --err: #b3261e;
+  --soft: #f5f6fa;
+  --warm: #9a6b1f;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font:
+    15px/1.6 -apple-system,
+    "PingFang SC",
+    sans-serif;
+}
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+button {
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--accent);
+  border-radius: 8px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+main {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 8px 16px 60px;
+}
+.muted {
+  color: var(--muted);
+}
+.bad {
+  color: var(--err);
+}
+.tag {
+  flex: none;
+  font-size: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1px 10px;
+  color: #4a4f63;
+  background: var(--bg);
+  cursor: pointer;
+}
+.tag.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.dict {
+  font-size: 11px;
+  color: var(--warm);
+  border: 1px solid #ecd9b0;
+  border-radius: 4px;
+  padding: 0 4px;
+  margin-right: 6px;
+  white-space: nowrap;
+}
+.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 60px 0;
+}
+@media (max-width: 600px) {
+  main {
+    padding: 4px 12px 40px;
+  }
+}
