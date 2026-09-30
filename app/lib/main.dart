@@ -137,7 +137,11 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     return PopScope(canPop: false, onPopInvokedWithResult: (didPop, _) => didPop ? null : _back(), child: Scaffold(
       appBar: AppBar(
         title: Text(titles[page]),
-        actions: [if (running) const Padding(padding: EdgeInsets.only(right: 16), child: _Live())],
+        actions: [
+          if (running) const Padding(padding: EdgeInsets.only(right: 4), child: _Live()),
+          if (page < 2 && [web, convWeb][page] != null)
+            IconButton(icon: const Icon(Icons.refresh), tooltip: '刷新', onPressed: () => [web, convWeb][page]!.reload()),
+        ],
       ),
       drawer: NavigationDrawer(
         selectedIndex: page,
