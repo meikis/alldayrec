@@ -5,7 +5,8 @@
 """Read the live-record conversations: lr day | search | show | at | todos | names | days.
 
 Output is compact Markdown for agents; --json gives the raw API answer. The server and token come from
-LIVE_RECORD_URL / LIVE_RECORD_TOKEN, or from ~/.personal-os/secrets/record-live.env.
+LIVE_RECORD_URL / LIVE_RECORD_TOKEN, else from live-record.env next to this script, else from
+~/.personal-os/secrets/record-live.env.
 """
 import argparse
 import datetime as dt
@@ -16,16 +17,17 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-ENV = Path.home() / ".personal-os/secrets/record-live.env"
+ENVS = [Path(__file__).resolve().parent / "live-record.env", Path.home() / ".personal-os/secrets/record-live.env"]
 
 
 def conf(key: str) -> str:
     if os.environ.get(key):
         return os.environ[key]
-    for line in ENV.read_text().splitlines() if ENV.exists() else []:
-        if line.startswith(key + "="):
-            return line.split("=", 1)[1].strip().strip('"')
-    sys.exit(f"{key} is not set (env or {ENV})")
+    for env in ENVS:
+        for line in env.read_text().splitlines() if env.exists() else []:
+            if line.startswith(key + "="):
+                return line.split("=", 1)[1].strip().strip('"')
+    sys.exit(f"{key} is not set (env, {' or '.join(map(str, ENVS))})")
 
 
 def get(path: str, **params):
