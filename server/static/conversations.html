@@ -47,6 +47,9 @@
   ul.items li { padding: 6px 0; border-bottom: 1px solid var(--line); }
   .who { color: var(--accent); font-size: 13px; margin-right: 6px; }
   .due { color: #9a6b1f; font-size: 12px; margin-left: 6px; }
+  .rename { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; font-size: 13px; }
+  .rename input { font: inherit; border: 1px solid var(--accent); border-radius: 8px; padding: 4px 10px; width: 9em; outline: none; }
+  .flash { margin-top: 10px; font-size: 13px; color: var(--accent); }
   .quote { font-size: 12px; color: var(--muted); }
   .at { font-size: 12px; margin-left: 6px; font-variant-numeric: tabular-nums; }
   .topic ul { margin: 2px 0 0; padding-left: 18px; font-size: 14px; }
@@ -154,6 +157,8 @@ async function detail() {
   const s = c.summary || {};
   main.append(el("h2", null, s.status === "done" ? (s.title || "（无标题）") : "对话 " + hhmm(c.start)));
   main.append(el("div", "muted", `${c.start.slice(0, 10)} ${hhmm(c.start)}–${hhmm(c.end)} · ${mins(c)} 分钟 · ${c.rows.length} 句 · ${(c.participants || []).join("、") || "—"}`));
+  speakers(c);
+  if (flash) { main.append(el("div", "flash", flash)); flash = ""; }
   if ((s.tags || []).length) {
     const t = el("div", "tags");
     for (const x of s.tags) { const a = el("a", "tag", x); a.href = "/conversations?tag=" + encodeURIComponent(x); t.append(a); }
@@ -161,6 +166,15 @@ async function detail() {
   }
   if (s.status === "done") {
     if (s.summary) main.append(el("div", "summary", s.summary));
+    if ((s.people || []).length) {
+      main.append(el("h3", null, "各人要点"));
+      const ul = el("ul", "items");
+      for (const p of s.people) {
+        const li = el("li"); li.append(el("span", "who", p.who));
+        const pts = el("ul"); for (const x of p.points || []) pts.append(el("li", null, x)); li.append(pts); ul.append(li);
+      }
+      main.append(ul);
+    }
     section("待办", s.todos, t => [el("span", "who", t.owner || "未知"), t.text, t.due ? el("span", "due", t.due) : "", at(t.at), quote(t.quote)]);
     section("决定", s.decisions, d => [d.text, at(d.at), quote(d.quote)]);
     if ((s.topics || []).length) {
@@ -177,6 +191,34 @@ async function detail() {
   main.append(el("h3", null, "原文"));
   for (const row of c.rows) main.append(line(row));
   if (location.hash) jumpTo(location.hash.slice(1));
+}
+// ---- renaming a speaker of this conversation (a prompt() dialog does not show in the Android WebView)
+let flash = "";
+function speakers(c) {
+  const labels = (c.participants || []).filter(p => p !== "我" && p !== "S?");
+  if (!labels.length) return;
+  const box = el("div", "rename"); box.append(el("span", "muted", "改名："));
+  for (const p of labels) { const b = el("button", "tag", p); b.onclick = () => editName(box, p); box.append(b); }
+  main.append(box);
+}
+async function editName(box, frm) {
+  const names = await (await fetch("/api/names")).json();
+  box.textContent = "";
+  const input = el("input"); input.placeholder = `${frm} 是谁`;
+  const ok = el("button", null, "保存"), cancel = el("button", null, "取消"), msg = el("span", "bad");
+  cancel.onclick = detail;
+  ok.onclick = async () => {
+    ok.disabled = true;
+    const r = await fetch(`/api/conversation/${convId}/rename`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from: frm, to: input.value }) });
+    const j = await r.json();
+    if (!r.ok) { ok.disabled = false; msg.textContent = j.detail; return; }
+    flash = `${frm} → ${input.value.trim()}，改了 ${j.renamed} 句` + (j.voiceprints ? `，记住了 ${j.voiceprints} 句的声音，之后的对话会自动认出` : "（这段没有录音，不记声音）") + "；摘要重新生成中";
+    detail();
+  };
+  input.onkeydown = e => { if (e.key === "Enter") ok.click(); };
+  box.append(input, ok, cancel, msg);
+  for (const n of names.slice(0, 12)) { const b = el("button", "tag", n); b.onclick = () => { input.value = n; }; box.append(b); }
+  input.focus();
 }
 function section(title, items, parts) {
   if (!(items || []).length) return;

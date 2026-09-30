@@ -543,6 +543,13 @@ def conversations_path(day: dt.date) -> Path:
     return DATA / f"{day.isoformat()}.conversations.jsonl"
 
 
+PEOPLE = DATA / "people.json"  # {name: {"n": sentences, "e": mean voiceprint}}, from renames on the conversation page
+
+
+def people_bank() -> dict[str, np.ndarray]:
+    return {k: np.array(v["e"]) for k, v in json.loads(PEOPLE.read_text()).items()} if PEOPLE.exists() else {}
+
+
 def summary_path(conv_id: str) -> Path:
     return DATA / "summaries" / f"{conv_id}.json"
 
@@ -692,7 +699,8 @@ async def pipeline(directory: Path, from_start: bool, key: str):
 
     async def refine_loop():
         from diarist import Diarist, load_embedder
-        embed, dia, grouper = load_embedder(), Diarist(dict(np.load(DATA / "owner-redimnet2.npz"))), Grouper(path=DATA / "grouper.json")
+        embed, dia, grouper = load_embedder(), Diarist(dict(np.load(DATA / "owner-redimnet2.npz")), people=people_bank()), Grouper(path=DATA / "grouper.json")
+        state["embed"], state["dia"] = embed, dia  # a rename on the conversation page teaches the diarist a name
         if grouper.open:
             log.info("continuing the open conversation from %s", grouper.open["start"])
             note(f"服务启动，接着上次打开的对话 {grouper.open['start'][11:19]}", "state")
@@ -1085,9 +1093,80 @@ async def resummarize(conv_id: str):
     return {"status": "pending"}
 
 
+@app.get("/api/names")
+async def names():
+    """Names already in use, most conversations first: suggestions for a rename."""
+    n = {}
+    for c in all_conversations():
+        for p in c.get("participants") or []:
+            if p != "我" and not re.fullmatch(r"S(\d+|\?)", p):
+                n[p] = n.get(p, 0) + 1
+    for p in people_bank():
+        n.setdefault(p, 0)
+    return sorted(n, key=lambda k: -n[k])
+
+
+@app.post("/api/conversation/{conv_id}/rename")
+async def rename(conv_id: str, body: dict):
+    """One label of one conversation becomes a name: its rows are rewritten (a final record over the
+    conversation, so nothing is edited in place), the summary is redone, and when the recording is still
+    here up to ENROLL sentences of it teach the diarist that voice for later conversations."""
+    frm, to = body.get("from", ""), (body.get("to") or "").strip()
+    c = find_conversation(conv_id)
+    if not c:
+        raise HTTPException(404, "no such conversation")
+    if not to or to == "S?" or len(to) > 20 or to == frm:
+        raise HTTPException(400, "bad name")
+    rows = conversation_rows(c)
+    hit = [r for r in rows if r.get("speaker") == frm]
+    if not hit:
+        raise HTTPException(400, f"no sentence of {frm}")
+    for r in hit:
+        r["speaker"] = to
+    end = (dt.datetime.fromisoformat(c["end"]) + dt.timedelta(milliseconds=1)).isoformat(timespec="milliseconds")
+    for day in sorted({r["start"][:10] for r in rows}):
+        with open(final_path(dt.date.fromisoformat(day)), "a") as f:
+            f.write(json.dumps({"from": max(c["start"], day + "T00:00:00.000"), "to": min(end, (dt.date.fromisoformat(day) + dt.timedelta(days=1)).isoformat() + "T00:00:00.000"),
+                                "rows": [r for r in rows if r["start"][:10] == day], "renamed": {frm: to}}, ensure_ascii=False) + "\n")
+    c["participants"] = list(dict.fromkeys(to if p == frm else p for p in c["participants"]))
+    p = conversations_path(dt.date.fromisoformat(c["start"][:10]))
+    p.write_text("".join(json.dumps(c if x["id"] == conv_id else x, ensure_ascii=False) + "\n" for x in map(json.loads, open(p))))
+    queue_summary(c, keep=True)
+    learnt = 0
+    if to != "我" and state.get("embed"):
+        long = sorted((r for r in hit if (dt.datetime.fromisoformat(r["end"]) - dt.datetime.fromisoformat(r["start"])).total_seconds() >= 1.5),
+                      key=lambda r: r["start"])[:ENROLL]
+        es = []
+        for r in long:
+            try:
+                x = np.frombuffer(await cut(r["start"], min(r["end"], (dt.datetime.fromisoformat(r["start"]) + dt.timedelta(seconds=15)).isoformat()), "s16le"), np.int16)
+            except HTTPException:  # history conversations have no recording here
+                continue
+            es.append(await asyncio.to_thread(state["embed"], x))
+        if es:
+            bank = json.loads(PEOPLE.read_text()) if PEOPLE.exists() else {}
+            old = bank.get(to, {"n": 0, "e": np.zeros(len(es[0])).tolist()})
+            n = old["n"] + len(es)
+            mean = (np.array(old["e"]) * old["n"] + np.sum(es, 0)) / n
+            bank[to] = {"n": n, "e": [round(float(v), 6) for v in mean]}
+            PEOPLE.write_text(json.dumps(bank, ensure_ascii=False))
+            state["dia"].people[to] = mean / np.linalg.norm(mean)
+            learnt = len(es)
+    note(f"对话 {c['start'][11:19]}：{frm} 改名为 {to}" + (f"，记住了 {learnt} 句的声纹" if learnt else ""), "state")
+    return {"participants": c["participants"], "renamed": len(hit), "voiceprints": learnt}
+
+
+ENROLL = 20
+
+
 @app.get("/api/audio")
 async def audio(start: str, end: str):
     """WAV of [start, end] (+0.2 s each side) cut from the uploaded pieces, or the recorder's file, covering it."""
+    wav = await cut(start, end, "wav")
+    return Response(wav, media_type="audio/wav")
+
+
+async def cut(start: str, end: str, fmt: str) -> bytes:
     a, b = dt.datetime.fromisoformat(start), dt.datetime.fromisoformat(end)
     if b <= a or (b - a).total_seconds() > 120:
         raise HTTPException(404, "no recording covers this time")
@@ -1099,7 +1178,7 @@ async def audio(start: str, end: str):
         ins = [x for p in pieces for x in ("-i", str(p))]
         cmd = ["ffmpeg", "-v", "error", *ins, "-filter_complex", "".join(f"[{i}:a]" for i in range(len(pieces))) +
                f"concat=n={len(pieces)}:v=0:a=1[a]", "-map", "[a]", "-ss", f"{off:.3f}", "-t", f"{(b - a).total_seconds() + 0.4:.3f}",
-               "-ac", "1", "-ar", str(SR), "-f", "wav", "pipe:1"]
+               "-ac", "1", "-ar", str(SR), "-f", fmt, "pipe:1"]
     else:
         files = [p for p in recordings(state["dir"]) if file_start(p) <= a]
         if not files:
@@ -1107,11 +1186,11 @@ async def audio(start: str, end: str):
         path = max(files, key=file_start)
         off = max(0.0, (a - file_start(path)).total_seconds() - 0.2)
         cmd = ["ffmpeg", "-v", "error", "-ss", f"{off:.3f}", "-t", f"{(b - a).total_seconds() + 0.4:.3f}", "-i", str(path),
-               "-ac", "1", "-ar", str(SR), "-f", "wav", "pipe:1"]
-    wav = await asyncio.to_thread(subprocess.run, cmd, capture_output=True)
-    if wav.returncode or len(wav.stdout) <= 44:
-        raise HTTPException(404, f"could not cut {path.name}: {wav.stderr.decode()[-200:]}")
-    return Response(wav.stdout, media_type="audio/wav")
+               "-ac", "1", "-ar", str(SR), "-f", fmt, "pipe:1"]
+    out = await asyncio.to_thread(subprocess.run, cmd, capture_output=True)
+    if out.returncode or len(out.stdout) <= 44:
+        raise HTTPException(404, f"could not cut {path.name}: {out.stderr.decode()[-200:]}")
+    return out.stdout
 
 
 @app.websocket("/ws")

@@ -1,6 +1,7 @@
 """Conversation-level speaker labels. Every new sentence re-clusters the open conversation's voiceprints
 (ReDimNet2, average-link cosine) and takes its cluster's label: 我 when that cluster's mean voiceprint is
-close to the owner bank (>= OWNER_MIN; a split owner stays 我 in every piece), else the S<n> most of the cluster's earlier sentences
+close to the owner bank (>= OWNER_MIN; a split owner stays 我 in every piece), else a person's name when that
+close to a voiceprint named by hand on the conversation page (>= PEOPLE_MIN), else the S<n> most of the cluster's earlier sentences
 carry, so ids follow membership as clusters grow and merge. Only the new sentence is labelled; earlier
 rows are never rewritten. Case replays 09-29: see artifacts/record/voiceprint.
 
@@ -14,7 +15,8 @@ TH = float(os.environ.get("DIAR_TH", "0.5"))  # cosine distance; lower splits on
 OWNER_MIN = 0.7   # ReDimNet2 cluster vs owner bank: my clusters 0.79-0.99, others <= 0.63 (incl. unseen channels)
 MIN_DUR = 1.0     # shorter sentences are not clustered: they join the nearest labelled centroid
 JOIN = float(os.environ.get("DIAR_JOIN", "0.35"))  # ... when at least this close, else S?; also for a lone long sentence
-MIN_ME = 3        # a cluster needs this many sentences before it can be 我
+MIN_ME = 3        # a cluster needs this many sentences before it can be 我 or a name
+PEOPLE_MIN = float(os.environ.get("PEOPLE_MIN", "0.7"))  # same evidence as OWNER_MIN: other people score <= 0.63 against one person's voiceprint
 KEEP = 1500       # clustering is O(n^2): a four-hour conversation keeps its latest sentences
 SR = 16000
 
@@ -37,8 +39,9 @@ def _unit(v):
 
 
 class Diarist:
-    def __init__(self, bank: dict[str, np.ndarray], th: float = TH):
+    def __init__(self, bank: dict[str, np.ndarray], th: float = TH, people: dict[str, np.ndarray] | None = None):
         self.bank, self.th = [_unit(v) for v in bank.values()], th
+        self.people = {k: _unit(v) for k, v in (people or {}).items()}  # the server adds names as they are given
         self.reset()
 
     def reset(self):
@@ -71,6 +74,12 @@ class Diarist:
         if c in me:
             self.ids[i] = "我"
             return "我", round(owner[c], 3)
+        if self.people and (lab == c).sum() >= MIN_ME:
+            m = _unit(E[big][lab == c].mean(0))
+            score, name = max((float(m @ v), k) for k, v in self.people.items())
+            if score >= PEOPLE_MIN:
+                self.ids[i] = name
+                return name, round(score, 3)
         clusters = sorted(set(lab) - me)
         known = sorted({v for v in self.ids if v not in (None, "S?", "我")})
         cmap = {}
@@ -114,4 +123,8 @@ if __name__ == "__main__":
     m = d.mark(); d.add(noisy(a), 2.0); d.rollback(m)
     assert d.mark() == m
     assert d.add(noisy(a), 0.4)[0] == tail[1], "a short sentence joins its speaker"
-    print("ok", out)
+    d = Diarist({"dji-mac": noisy(me)}, people={"李某": noisy(a)})
+    named = [d.add(noisy(v), 2.0)[0] for v in seq]
+    assert set(l for l, v in zip(named[11:], seq[11:]) if v is a) == {"李某"}, named
+    assert "李某" not in {l for l, v in zip(named, seq) if v is b}, named
+    print("ok", out, named)

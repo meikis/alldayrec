@@ -10,15 +10,17 @@ import os
 import urllib.request
 
 MIN_SPEECH_S = 60
-PROMPT_VERSION = 2  # 2: tags
+PROMPT_VERSION = 3  # 2: tags, 3: people
 SYSTEM = """你在整理一段现场录音转写出来的对话。每行是「[时间] 说话人: 文本」。说话人标签来自声纹聚类：「我」是录音者本人，S1、S2… 是其他人，同一个人可能被拆成多个标签，S? 是太短没认出来的句子。转写有错别字和同音误识别，按意图理解。标「我(口述→某应用)」的行是我在对电脑语音输入（多数是给 AI 下指令），不是说给在场的人听的：写成我让 AI 做了什么，不要当成和别人的对话。
 只输出一个 JSON 对象：
 {"title": "不超过 20 字的标题",
  "summary": "3~6 句话的摘要，第一人称写「我」",
+ "people": [{"who": "说话人标签，原样照抄", "points": ["这个人在这段里说了什么：观点、提供的信息、提出的问题、表的态，2~5 条"]}],
  "tags": ["2~5 个标签：这段对话和什么相关（项目、领域、活动、人际场合），优先沿用已有标签"],
  "topics": [{"title": "议题", "points": ["要点"], "at": "议题开始那一行的时间 HH:MM:SS"}],
  "todos": [{"owner": "我 | S1 | 未知", "text": "要做的事", "due": "原话里的时间，没有写 null", "quote": "依据的原句", "at": "原句那一行的时间 HH:MM:SS"}],
  "decisions": [{"text": "定下来的事", "quote": "依据的原句", "at": "原句那一行的时间 HH:MM:SS"}]}
+people 每个说了实质内容的标签一项（「我」在最前，S? 和只有附和的不列），按这个人自己的话写，不要写成别人对他的评价。
 没有就给空数组，不编造原文里没有的内容。"""
 
 
@@ -58,11 +60,11 @@ def summarize(conv: dict, rows: list[dict], known_tags: list[str] = ()) -> dict:
             "created_at": dt.datetime.now().isoformat(timespec="seconds"), "error": None}
     if conv.get("speech_s", 0) < MIN_SPEECH_S or not rows:
         first = next((r["text"] for r in rows if r.get("text")), "")
-        return {**base, "status": "done", "model": None, "title": first[:20], "summary": "", "tags": [], "topics": [], "todos": [], "decisions": []}
+        return {**base, "status": "done", "model": None, "title": first[:20], "summary": "", "people": [], "tags": [], "topics": [], "todos": [], "decisions": []}
     res, raw = chat(transcript(rows), list(known_tags), conv.get("kind", "对话"))
     res = anchor(res, rows)
     return {**base, "status": "done", "model": raw.get("model"), "usage": raw.get("usage"),
-            **{k: res.get(k) or ("" if k in ("title", "summary") else []) for k in ("title", "summary", "tags", "topics", "todos", "decisions")}}
+            **{k: res.get(k) or ("" if k in ("title", "summary") else []) for k in ("title", "summary", "people", "tags", "topics", "todos", "decisions")}}
 
 
 if __name__ == "__main__":
