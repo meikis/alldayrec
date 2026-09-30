@@ -51,11 +51,11 @@ nav a.on {
   color: var(--accent);
   font-weight: 600;
 }
-:global(.in-app) nav,
-:global(.in-app) h1 {
+:global(.in-app nav),
+:global(.in-app h1) {
   display: none;
 }
-:global(.in-app) header.bare {
+:global(.in-app header.bare) {
   display: none;
 }
 @media (max-width: 600px) {

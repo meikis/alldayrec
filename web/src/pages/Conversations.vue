@@ -20,7 +20,16 @@ const loading = ref(false),
 const more = useTemplateRef<HTMLElement>("more");
 let seq = 0;
 
+const search = (before: string) =>
+  get<Conversation[]>("/api/search", {
+    q: q.value,
+    tag: tag.value,
+    kind: kind.value,
+    before,
+    limit: String(PAGE),
+  });
 async function restart() {
+  // the old list stays on screen until the new first page is in: no blank flash
   router.replace({
     query: {
       ...(q.value && { q: q.value }),
@@ -28,29 +37,22 @@ async function restart() {
       ...(kind.value !== "对话" && { kind: kind.value }),
     },
   });
-  const my = ++seq;
-  items.value = [];
-  done.value = false;
+  const my = ++seq,
+    plain = !q.value && !tag.value && kind.value === "对话";
+  loading.value = true;
+  const [st, cs] = await Promise.all([plain ? get<Status>("/api/status") : null, search("")]);
+  if (my !== seq) return; // a newer search started meanwhile
+  open.value = st?.conversation ?? null;
+  items.value = cs;
+  done.value = cs.length < PAGE;
   loading.value = false;
-  open.value =
-    !q.value && !tag.value && kind.value === "对话"
-      ? ((await get<Status>("/api/status")).conversation ?? null)
-      : null;
-  if (my === seq) await page();
 }
 async function page() {
   if (loading.value || done.value) return;
-  const my = seq,
-    before = items.value.at(-1)?.start ?? "";
+  const my = seq;
   loading.value = true;
-  const cs = await get<Conversation[]>("/api/search", {
-    q: q.value,
-    tag: tag.value,
-    kind: kind.value,
-    before,
-    limit: String(PAGE),
-  });
-  if (my !== seq) return; // a newer search started meanwhile
+  const cs = await search(items.value.at(-1)?.start ?? "");
+  if (my !== seq) return;
   items.value.push(...cs);
   done.value = cs.length < PAGE;
   loading.value = false;
@@ -78,13 +80,11 @@ onMounted(async () => {
 });
 onUnmounted(() => io?.disconnect());
 useSocket((m) => {
-  if (
-    (m.type === "summary" || m.type === "conversation") &&
-    !q.value &&
-    !tag.value &&
-    window.scrollY < 200
-  )
-    restart();
+  // summaries arrive every few seconds while old ones are redone: patch the card, never reload the list
+  if (m.type === "summary") {
+    const c = items.value.find((x) => x.id === m.conversation);
+    if (c) c.summary = { ...m };
+  } else if (m.type === "conversation" && !q.value && !tag.value && window.scrollY < 200) restart();
 }, restart);
 </script>
 
@@ -170,9 +170,6 @@ useSocket((m) => {
   background: var(--bg);
   padding: 10px 0 6px;
   z-index: 1;
-}
-:global(.in-app) .find {
-  top: 0;
 }
 .find input {
   width: 100%;
@@ -261,5 +258,9 @@ a.card:hover {
   .find {
     top: 41px;
   }
+}
+/* after the phone rule: inside the app there is no header to stay under */
+:global(.in-app .find) {
+  top: 0;
 }
 </style>
