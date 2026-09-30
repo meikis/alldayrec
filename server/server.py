@@ -1046,7 +1046,8 @@ async def conversations(date: str | None = None):
     day = dt.date.fromisoformat(date) if date else dt.date.today()
     p = conversations_path(day)
     closed = [{**c, "summary": load_summary(c["id"])} for c in map(json.loads, open(p))] if p.exists() else []
-    return closed + ([{**state["conversation"], "state": "open"}] if state["conversation"] else [])
+    o = state["conversation"]
+    return closed + ([{**o, "state": "open"}] if o and o["start"][:10] == day.isoformat() else [])
 
 
 @app.get("/api/days")
@@ -1056,14 +1057,17 @@ async def days():
 
 
 @app.get("/api/search")
-async def search(q: str = "", tag: str = "", kind: str = "", before: str = "", limit: int = 30):
+async def search(q: str = "", tag: str = "", kind: str = "", who: str = "", after: str = "", before: str = "",
+                 limit: int = 30):
     """Closed conversations newest first, filtered by a tag and by words in the title, summary, tags or
-    todos (and in the transcript when the summary does not match); `before` is the start of the last one
-    already shown."""
+    todos (and in the transcript when the summary does not match), by a participant, and by start time;
+    `before` is the start of the last one already shown."""
     out, cache = [], {}
     for c in all_conversations():
         s = c["summary"] or {}
-        if before and c["start"] >= before or tag and tag not in (s.get("tags") or []) or kind and c.get("kind", "对话") != kind:
+        if after and c["start"] < after:
+            break
+        if before and c["start"] >= before or who and who not in (c.get("participants") or []) or tag and tag not in (s.get("tags") or []) or kind and c.get("kind", "对话") != kind:
             continue
         if q:
             meta = json.dumps([s.get(k) for k in ("title", "summary", "tags", "todos", "decisions")], ensure_ascii=False)
