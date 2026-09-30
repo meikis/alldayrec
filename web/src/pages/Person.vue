@@ -67,7 +67,7 @@ const link = (id: string, at: string | null) =>
         </ul>
       </template>
       <template v-if="p.mine.length">
-        <h3>我在和 {{ p.name }} 的对话里的待办</h3>
+        <h3>我答应 {{ p.name }} 的</h3>
         <ul class="items">
           <li v-for="(t, i) in allMine ? p.mine : p.mine.slice(0, 8)" :key="i">
             {{ t.text }}<span v-if="t.due" class="muted">（{{ t.due }}）</span>

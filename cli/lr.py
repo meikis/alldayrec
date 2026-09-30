@@ -102,8 +102,10 @@ def cmd_show(a):
     for t in s.get("topics") or []:
         out.append(f"\n## 话题：{t['title']}（{hm(t['at'])}）\n" + "\n".join(f"- {x}" for x in t.get("points") or []))
     if s.get("todos"):
-        out.append("\n## 待办\n" + "\n".join(f"- [{t.get('owner')}] {t['text']}" + (f"（{t['due']}）" if t.get("due") else "")
+        out.append("\n## 待办\n" + "\n".join(f"- [{t.get('owner')}" + (f" → {t['to']}" if t.get("to") else "") + f"] {t['text']}" + (f"（{t['due']}）" if t.get("due") else "")
                                            + f"  原话 {hm(t['at'])}：{t.get('quote', '')}" for t in s["todos"]))
+    if s.get("ai_requests"):
+        out.append("\n## 让 AI 做的事\n" + "\n".join(f"- {hm(t.get('at'))} {t['text']}" for t in s["ai_requests"]))
     if s.get("decisions"):
         out.append("\n## 决定\n" + "\n".join(f"- {d['text']}  原话 {hm(d['at'])}：{d.get('quote', '')}" for d in s["decisions"]))
     if a.text:
@@ -135,7 +137,7 @@ def cmd_todos(a):
         elif items:
             n += len(items)
             out.append(f"\n## {d}\n" + "\n".join(
-                f"- {hm(t['at'])} [{t.get('owner')}] {t['text']}" + (f"（{t['due']}）" if t.get("due") else "")
+                f"- {hm(t['at'])} [{t.get('owner')}" + (f" → {t['to']}" if t.get("to") else "") + f"] {t['text']}" + (f"（{t['due']}）" if t.get("due") else "")
                 + f"  ← {summary_of(c).get('title')} `{c['id']}`" for c, t in items))
     return out if a.json else f"# {start} ~ {end} 待办 {n} 条" + "".join(out)
 

@@ -152,12 +152,23 @@ async function save() {
           <h3>待办</h3>
           <ul class="items">
             <li v-for="(t, i) in s.todos" :key="i">
-              <span class="who">{{ t.owner || "未知" }}</span
+              <span class="who">{{ t.owner || "未知" }}{{ t.to ? ` → ${t.to}` : "" }}</span
               >{{ t.text }}<span v-if="t.due" class="due">{{ t.due }}</span>
               <a v-if="t.at" class="at" :href="'#' + t.at" @click.prevent="jumpTo(t.at)">{{
                 hhmmss(t.at)
               }}</a>
               <div v-if="t.quote" class="quote">「{{ t.quote }}」</div>
+            </li>
+          </ul>
+        </template>
+        <template v-if="s.ai_requests?.length">
+          <h3>让 AI 做的事</h3>
+          <ul class="items ai">
+            <li v-for="(t, i) in s.ai_requests" :key="i">
+              {{ t.text }}
+              <a v-if="t.at" class="at" :href="'#' + t.at" @click.prevent="jumpTo(t.at)">{{
+                hhmmss(t.at)
+              }}</a>
             </li>
           </ul>
         </template>
@@ -293,5 +304,8 @@ ul.items > li {
   margin-top: 10px;
   font-size: 13px;
   color: var(--accent);
+}
+.items.ai li {
+  color: var(--muted);
 }
 </style>

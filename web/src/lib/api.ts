@@ -22,7 +22,15 @@ export interface Summary {
   people?: { who: string; points: string[] }[];
   tags?: string[];
   topics?: (At & { title: string; points?: string[] })[];
-  todos?: (At & { owner?: string; text: string; due?: string | null; quote?: string })[];
+  todos?: (At & {
+    owner?: string;
+    to?: string | null;
+    text: string;
+    due?: string | null;
+    quote?: string;
+  })[];
+  ai_requests?: (At & { text: string })[];
+  ai_spans?: { from: string; to: string }[];
   decisions?: (At & { text: string; quote?: string })[];
   model?: string | null;
   created_at?: string;
@@ -113,6 +121,7 @@ export interface Speaker extends VoiceSet {
 
 export interface Todo {
   owner?: string;
+  to?: string | null;
   text: string;
   due?: string | null;
   quote?: string;

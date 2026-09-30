@@ -605,7 +605,7 @@ def tag_counts() -> dict[str, int]:
     return _tags["counts"]
 
 
-SUMMARY_WORKERS = int(os.environ.get("SUMMARY_WORKERS", "6"))  # the gateway answered 8 parallel calls without 429; 10 got 429s
+SUMMARY_WORKERS = int(os.environ.get("SUMMARY_WORKERS", "4"))  # 6 drew ~100 429s in a full re-run (09-30); 10 got 429s at once
 
 
 async def summary_worker():
@@ -1321,7 +1321,7 @@ async def speaker_detach(body: dict):
 @app.get("/api/person/{name}")
 async def person(name: str):
     """Everything about one named speaker: their conversations newest first with what they said there, the todos they
-    own, and my todos from conversations with them."""
+    own, and what I promised them."""
     convs = [c for c in all_conversations() if name in (c.get("participants") or [])]
     out, co, tags, theirs, mine = [], {}, {}, [], []
     for c in convs:
@@ -1338,7 +1338,7 @@ async def person(name: str):
             t = {**t, "conversation": c["id"], "title": s.get("title")}
             if t.get("owner") == name:
                 theirs.append(t)
-            elif t.get("owner") == "我":
+            elif t.get("owner") == "我" and t.get("to") == name:  # to: prompt v4 on; older summaries have none
                 mine.append(t)
     if not convs:
         raise HTTPException(404, "no conversation with this name")
