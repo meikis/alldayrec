@@ -103,10 +103,40 @@ export interface VoiceSet {
   last: string | null;
   samples: Voice[];
   co: string[];
-  members: Voice[];
+  members?: Voice[]; // only from /api/speakers/{id}
 }
 export interface Speaker extends VoiceSet {
   id: string;
   name: string | null;
-  suggested: (VoiceSet & { score: number })[];
+  suggested: (VoiceSet & { id: string; score: number })[];
+}
+
+export interface Todo {
+  owner?: string;
+  text: string;
+  due?: string | null;
+  quote?: string;
+  at: string | null;
+  conversation: string;
+  title?: string | null;
+}
+export interface Person {
+  name: string;
+  count: number;
+  first: string;
+  last: string;
+  with: string[];
+  tags: string[];
+  theirs: Todo[];
+  mine: Todo[];
+  conversations: {
+    id: string;
+    start: string;
+    end: string;
+    title?: string | null;
+    summary?: string | null;
+    points: string[];
+    participants: string[];
+    speech_s?: number;
+  }[];
 }

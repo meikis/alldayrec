@@ -63,11 +63,13 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   Map status = {};
   String note = '';
   bool stopping = false;
-  int page = 0;  // 0 字幕, 1 对话, 2 设置
-  WebViewController? web, convWeb;  // the live page keeps its scroll while the history is browsed
+  int page = 0;  // 0 字幕, 1 对话, 2 说话人, 3 设置
+  final webs = <WebViewController?>[null, null, null];  // one per web page: each keeps its scroll while another is shown
   Timer? ticker;
 
-  static const titles = ['字幕', '对话', '设置'];
+  static const titles = ['字幕', '对话', '说话人', '设置'];
+  static const paths = ['/', '/conversations', '/speakers'];
+  static const settingsPage = 3;
 
   @override
   void initState() {
@@ -94,10 +96,10 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     WebViewController make() => WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..clearCache();  // the page changes with server deploys
-    web ??= make();
-    convWeb ??= make();
-    web!.loadRequest(Uri.parse('${s.server}/?token=${s.token}'));  // sets the cookie, then the page follows itself
-    convWeb!.loadRequest(Uri.parse('${s.server}/conversations?token=${s.token}'));
+    for (var i = 0; i < webs.length; i++) {  // ?token= sets the cookie, then the page follows itself
+      webs[i] ??= make();
+      webs[i]!.loadRequest(Uri.parse('${s.server}${paths[i]}?token=${s.token}'));
+    }
   }
 
   Future<void> _saved() async {
@@ -110,7 +112,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   }
 
   Future<void> _back() async {  // back key: history inside the page's WebView first, then to 字幕, then leave
-    final w = [web, convWeb, null][page];
+    final w = page < webs.length ? webs[page] : null;
     if (w != null && await w.canGoBack()) return w.goBack();
     if (page != 0) return setState(() => page = 0);
     SystemNavigator.pop();
@@ -139,8 +141,8 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
         title: Text(titles[page]),
         actions: [
           if (running) const Padding(padding: EdgeInsets.only(right: 4), child: _Live()),
-          if (page < 2 && [web, convWeb][page] != null)
-            IconButton(icon: const Icon(Icons.refresh), tooltip: '刷新', onPressed: () => [web, convWeb][page]!.reload()),
+          if (page < webs.length && webs[page] != null)
+            IconButton(icon: const Icon(Icons.refresh), tooltip: '刷新', onPressed: () => webs[page]!.reload()),
         ],
       ),
       drawer: NavigationDrawer(
@@ -164,18 +166,16 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           const NavigationDrawerDestination(
               icon: Icon(Icons.forum_outlined), selectedIcon: Icon(Icons.forum), label: Text('对话')),
           const NavigationDrawerDestination(
+              icon: Icon(Icons.people_outline), selectedIcon: Icon(Icons.people), label: Text('说话人')),
+          const NavigationDrawerDestination(
               icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: Text('设置')),
         ],
       ),
       body: settings == null
           ? const Center(child: CircularProgressIndicator())
           : IndexedStack(index: page, children: [  // keeps the WebView alive across pages
-              web == null
-                  ? _Empty(onSetup: () => setState(() => page = 2))
-                  : WebViewWidget(controller: web!),
-              convWeb == null
-                  ? _Empty(onSetup: () => setState(() => page = 2))
-                  : WebViewWidget(controller: convWeb!),
+              for (final w in webs)
+                w == null ? _Empty(onSetup: () => setState(() => page = settingsPage)) : WebViewWidget(controller: w),
               SettingsPage(settings: settings!, onSaved: _saved),
             ]),
       bottomNavigationBar: page == 0 && settings != null ? _controlBar(cs) : null,

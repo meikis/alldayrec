@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import AppHeader from "../components/AppHeader.vue";
-import { get, post, type Speaker, type Voice, type VoiceSet } from "../lib/api";
+import { get, post, type Speaker, type Voice } from "../lib/api";
 import { play, player } from "../lib/audio";
 
 const groups = ref<Speaker[]>([]),
@@ -10,6 +10,7 @@ const groups = ref<Speaker[]>([]),
   filter = ref<"unnamed" | "all">("unnamed"),
   shown = ref(30),
   open = ref(""),
+  members = ref<Voice[]>([]),
   editing = ref(""),
   newName = ref(""),
   flash = ref(""),
@@ -47,7 +48,13 @@ function edit(id: string) {
   newName.value = "";
   error.value = "";
 }
-async function name(set: VoiceSet, to: string, what: string) {
+async function expand(g: Speaker) {
+  if (open.value === g.id) return (open.value = "");
+  open.value = g.id;
+  members.value = [];
+  members.value = (await get<Speaker>(`/api/speakers/${encodeURIComponent(g.id)}`)).members ?? [];
+}
+async function name(g: Speaker, to: string, what: string, suggestion?: string) {
   to = to.trim();
   if (!to) return;
   busy.value = true;
@@ -55,7 +62,8 @@ async function name(set: VoiceSet, to: string, what: string) {
   try {
     const r = await post<{ renamed: number }>("/api/speakers/name", {
       name: to,
-      members: set.members.map((m) => ({ conv: m.conv, label: m.label })),
+      group: g.id,
+      suggestion,
     });
     flash.value = `${what} → ${to}：改了 ${r.renamed} 段对话，摘要重新生成中`;
     editing.value = "";
@@ -71,6 +79,7 @@ async function detach(g: Speaker, v: Voice) {
   try {
     await post("/api/speakers/detach", { conv: v.conv, label: v.label, group: g.name ?? g.id });
     flash.value = `已把 ${day(v.start)} 那段从「${title(g)}」移出`;
+    members.value = members.value.filter((m) => m !== v);
     await load();
   } finally {
     busy.value = false;
@@ -92,7 +101,10 @@ async function detach(g: Speaker, v: Voice) {
 
     <section v-for="g in list.slice(0, shown)" :key="g.id" class="card">
       <div class="head">
-        <b :class="{ anon: !g.name }">{{ title(g) }}</b>
+        <RouterLink v-if="g.name && g.name !== '我'" :to="`/p/${encodeURIComponent(g.name)}`"
+          ><b>{{ g.name }}</b></RouterLink
+        >
+        <b v-else :class="{ anon: !g.name }">{{ title(g) }}</b>
         <span class="meta"
           >{{ g.count }} 段对话 · {{ mins(g.speech_s) }} · 最近 {{ g.last && day(g.last) }}</span
         >
@@ -128,7 +140,7 @@ async function detach(g: Speaker, v: Voice) {
           <button class="ghost" @click="editing = ''">取消</button>
         </template>
         <button v-else @click="edit(g.id)">{{ g.name ? "改名" : "起名" }}</button>
-        <button class="ghost" @click="open = open === g.id ? '' : g.id">
+        <button class="ghost" @click="expand(g)">
           {{ open === g.id ? "收起" : `对话列表（${g.count}）` }}
         </button>
       </div>
@@ -144,11 +156,16 @@ async function detach(g: Speaker, v: Voice) {
         <button v-for="v in s.samples" :key="voiceId(v)" class="clip" @click="listen(v)">
           {{ player.playing === voiceId(v) ? "■" : "▶" }} {{ v.clip_text || day(v.start) }}
         </button>
-        <button :disabled="busy" @click="name(s, g.name!, `${s.count} 段`)">是 {{ g.name }}</button>
+        <button :disabled="busy" @click="name(g, g.name!, `${s.count} 段`, s.id)">
+          是 {{ g.name }}
+        </button>
       </div>
 
       <table v-if="open === g.id" class="members">
-        <tr v-for="v in g.members" :key="voiceId(v)">
+        <tr v-if="!members.length">
+          <td class="meta">加载中…</td>
+        </tr>
+        <tr v-for="v in members" :key="voiceId(v)">
           <td class="when">
             <RouterLink :to="`/c/${v.conv}`">{{ day(v.start) }}</RouterLink>
           </td>

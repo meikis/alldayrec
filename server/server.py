@@ -940,7 +940,8 @@ DIST = HERE / "static/dist"  # the web app (web/, built by web/deploy.sh)
 @app.get("/c/{conv_id}")
 @app.get("/record")
 @app.get("/speakers")
-async def page(conv_id: str = ""):
+@app.get("/p/{name}")
+async def page(conv_id: str = "", name: str = ""):
     return FileResponse(DIST / "index.html", headers=NO_CACHE)
 
 
@@ -1180,7 +1181,7 @@ VOICES = DATA / "voices"
 VOICE_FILES = (VOICES / "history.jsonl", VOICES / "live.jsonl")
 APART = VOICES / "apart.jsonl"  # [voice key, group] pairs the user split: never grouped or suggested again
 SPEAKER_LINK = float(os.environ.get("SPEAKER_LINK", "0.5"))  # cosine (device-centred) to join an anonymous group
-SPEAKER_SUGGEST = float(os.environ.get("SPEAKER_SUGGEST", "0.5"))  # cosine to offer an anonymous group to a name
+SPEAKER_SUGGEST = float(os.environ.get("SPEAKER_SUGGEST", "0.6"))  # cosine to offer an anonymous group to a name
 _speakers = {"at": 0.0, "groups": None}
 
 
@@ -1212,15 +1213,16 @@ def conv_start(conv_id: str) -> str:
 
 
 def speaker_groups() -> list[dict]:
-    """Recomputed at most every 30 s, and after any rename."""
-    if _speakers["groups"] is not None and time.time() - _speakers["at"] < 30:
+    """Takes seconds (every conversation and voice): kept 10 min, redone after a rename or new voices."""
+    if _speakers["groups"] is not None and time.time() - _speakers["at"] < 600:
         return _speakers["groups"]
     apart = {tuple(x) for x in map(json.loads, open(APART))} if APART.exists() else set()
     convs = {c["id"]: c for c in all_conversations()}
     out = []
     for g in speakers.speakers(load_voices(), SPEAKER_LINK, SPEAKER_SUGGEST, apart):
         out.append({"id": g["id"], "name": g["name"], **describe(g["members"], convs),
-                    "suggested": [{"score": s["score"], **describe(s["members"], convs)} for s in g["suggested"]]})
+                    "suggested": [{"id": speakers.key(s["members"][0]), "score": s["score"], **describe(s["members"], convs)}
+                                  for s in g["suggested"]]})
     order = lambda g: (g["name"] is not None, g["name"] == "我", -g["count"])  # unnamed and frequent first, 我 last
     out.sort(key=order)
     _speakers.update(at=time.time(), groups=out)
@@ -1244,13 +1246,29 @@ def describe(members: list[dict], convs: dict) -> dict:
             if not speakers.ANON.fullmatch(p):
                 co[p] = co.get(p, 0) + 1
     return {"count": len(ms), "speech_s": round(sum(m["speech_s"] for m in ms), 1), "last": ms[0]["start"] if ms else None,
-            "samples": [m for m in sorted(ms, key=lambda m: -m["speech_s"])][:3],
+            "samples": ms[:: max(1, len(ms) // 4)][:4],  # spread over time: a group that mixes people sounds mixed
             "co": sorted(co, key=lambda k: -co[k])[:4], "members": ms}
 
 
 @app.get("/api/speakers")
 async def speaker_list():
-    return await asyncio.to_thread(speaker_groups)
+    """Without the member lists (most of the size; the home uplink is slow): GET /api/speakers/{id} has them."""
+    bare = lambda g: {k: v for k, v in g.items() if k != "members"}
+    return [{**bare(g), "suggested": [bare(x) for x in g["suggested"]]} for g in await asyncio.to_thread(speaker_groups)]
+
+
+def find_group(gid: str, sid: str | None = None) -> dict:
+    g = next((g for g in speaker_groups() if g["id"] == gid), None)
+    if g and sid:
+        g = next((x for x in g["suggested"] if x["id"] == sid), None)
+    if not g:
+        raise HTTPException(409, "说话人分组已经变了，刷新页面再试")
+    return g
+
+
+@app.get("/api/speakers/{gid}")
+async def speaker_one(gid: str):
+    return await asyncio.to_thread(find_group, gid)
 
 
 def check_name(to: str):
@@ -1260,11 +1278,11 @@ def check_name(to: str):
 
 @app.post("/api/speakers/name")
 async def speaker_name(body: dict):
-    """Every member voice of a group (or of a suggestion) takes the name, in all of its conversations."""
+    """Every member voice of a group (or of one of its suggestions) takes the name, in all of its conversations."""
     to = (body.get("name") or "").strip()
     check_name(to)
     done, renames = 0, {}
-    for m in body.get("members") or []:
+    for m in (await asyncio.to_thread(find_group, body["group"], body.get("suggestion")))["members"]:
         if m["label"] == to:
             continue
         try:
@@ -1300,6 +1318,35 @@ async def speaker_detach(body: dict):
     return {"key": key}
 
 
+@app.get("/api/person/{name}")
+async def person(name: str):
+    """Everything about one named speaker: their conversations newest first with what they said there, the todos they
+    own, and my todos from conversations with them."""
+    convs = [c for c in all_conversations() if name in (c.get("participants") or [])]
+    out, co, tags, theirs, mine = [], {}, {}, [], []
+    for c in convs:
+        s = c["summary"] if (c["summary"] or {}).get("status") == "done" else {}
+        pts = next((p.get("points") or [] for p in s.get("people") or [] if p.get("who") == name), [])
+        out.append({"id": c["id"], "start": c["start"], "end": c["end"], "title": s.get("title"), "summary": s.get("summary"),
+                    "points": pts, "participants": c["participants"], "speech_s": c.get("speech_s")})
+        for p in c["participants"]:
+            if p != name and not speakers.ANON.fullmatch(p):
+                co[p] = co.get(p, 0) + 1
+        for t in s.get("tags") or []:
+            tags[t] = tags.get(t, 0) + 1
+        for t in s.get("todos") or []:
+            t = {**t, "conversation": c["id"], "title": s.get("title")}
+            if t.get("owner") == name:
+                theirs.append(t)
+            elif t.get("owner") == "我":
+                mine.append(t)
+    if not convs:
+        raise HTTPException(404, "no conversation with this name")
+    top = lambda d, n: sorted(d, key=lambda k: -d[k])[:n]
+    return {"name": name, "count": len(convs), "first": convs[-1]["start"], "last": convs[0]["start"],
+            "with": top(co, 6), "tags": top(tags, 8), "theirs": theirs, "mine": mine, "conversations": out}
+
+
 @app.get("/api/voice-clip/{name}")
 async def voice_clip(name: str):
     p = VOICES / "clips" / name
@@ -1313,6 +1360,7 @@ async def voices_loop():
     >= 1.5 s per label with >= 3 sentences. A conversation without a recording here is marked and not retried."""
     live = VOICE_FILES[1]
     while True:
+        await asyncio.to_thread(speaker_groups)  # warm: the page's first load would otherwise wait seconds
         await asyncio.sleep(300)
         if not state.get("embed"):
             continue

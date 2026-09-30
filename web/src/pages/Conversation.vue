@@ -51,6 +51,7 @@ const editing = ref(""),
   error = ref(""),
   flash = ref(""),
   saving = ref(false);
+const named = (p: string) => p !== "我" && !/^S(\d+|\?)$/.test(p);
 const labels = computed(() =>
   (c.value?.participants ?? []).filter((p) => p !== "我" && p !== "S?"),
 );
@@ -94,7 +95,11 @@ async function save() {
       <div class="muted">
         {{ c.start.slice(0, 10) }} {{ hhmm(c.start) }}–{{ hhmm(c.end) }} · {{ minutes(c) }} 分钟 ·
         {{ c.rows.length }} 句 ·
-        {{ c.participants.join("、") || "—" }}
+        <template v-for="(p, i) in c.participants" :key="p"
+          >{{ i ? "、" : ""
+          }}<RouterLink v-if="named(p)" :to="`/p/${encodeURIComponent(p)}`">{{ p }}</RouterLink
+          ><template v-else>{{ p }}</template></template
+        ><template v-if="!c.participants.length">—</template>
       </div>
 
       <div v-if="labels.length" class="rename">
@@ -133,7 +138,10 @@ async function save() {
           <h3>各人要点</h3>
           <ul class="items">
             <li v-for="p in s.people" :key="p.who">
-              <span class="who">{{ p.who }}</span>
+              <RouterLink v-if="named(p.who)" class="who" :to="`/p/${encodeURIComponent(p.who)}`">{{
+                p.who
+              }}</RouterLink>
+              <span v-else class="who">{{ p.who }}</span>
               <ul class="points">
                 <li v-for="x in p.points" :key="x">{{ x }}</li>
               </ul>
