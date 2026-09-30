@@ -1133,7 +1133,7 @@ async def rename(conv_id: str, body: dict):
     p.write_text("".join(json.dumps(c if x["id"] == conv_id else x, ensure_ascii=False) + "\n" for x in map(json.loads, open(p))))
     queue_summary(c, keep=True)
     learnt = 0
-    if to != "我" and state.get("embed"):
+    if to != "我" and not re.fullmatch(r"S\d+", to) and state.get("embed"):  # S<n> means "not known": nothing to learn
         long = sorted((r for r in hit if (dt.datetime.fromisoformat(r["end"]) - dt.datetime.fromisoformat(r["start"])).total_seconds() >= 1.5),
                       key=lambda r: r["start"])[:ENROLL]
         es = []
