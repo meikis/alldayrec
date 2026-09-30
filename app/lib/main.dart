@@ -109,8 +109,9 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     setState(() => page = 0);
   }
 
-  Future<void> _back() async {  // back key: history inside 对话 first, then to 字幕, then leave
-    if (page == 1 && await convWeb!.canGoBack()) return convWeb!.goBack();
+  Future<void> _back() async {  // back key: history inside the page's WebView first, then to 字幕, then leave
+    final w = [web, convWeb, null][page];
+    if (w != null && await w.canGoBack()) return w.goBack();
     if (page != 0) return setState(() => page = 0);
     SystemNavigator.pop();
   }
