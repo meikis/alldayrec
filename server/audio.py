@@ -37,7 +37,7 @@ def save(device: str, start_ms: int, body: bytes, content_type: str) -> float | 
     x = decode(body)
     if x is None:
         return None
-    ext = {"audio/ogg": "ogg", "audio/webm": "webm"}.get(content_type.split(";")[0], "bin")
+    ext = {"audio/ogg": "ogg", "audio/webm": "webm", "audio/aac": "aac"}.get(content_type.split(";")[0], "bin")
     path = Path("chunks") / re.sub(r"[^\w.-]", "_", device) / f"{start_ms}.{ext}"
     (DIR / path).parent.mkdir(parents=True, exist_ok=True)
     (DIR / path).write_bytes(body)

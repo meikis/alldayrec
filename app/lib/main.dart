@@ -1,7 +1,8 @@
-// live-record Android client. RecorderService.kt (native, START_STICKY) keeps the microphone open,
-// cuts the Opus stream into Ogg pieces whose length follows the app state, uploads them in order and
-// survives the process being killed. This side is settings, status and the transcript page in a WebView.
+// live-record client. Native code keeps the microphone open, cuts the stream into pieces whose length follows
+// the app state and uploads them in order: on Android RecorderService.kt (Opus/Ogg, START_STICKY, survives a kill),
+// on iOS Recorder.swift (ADTS AAC, `audio` background mode). This side is settings, status and the pages in a WebView.
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -121,7 +122,11 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   Future<void> _start() async {
     if (!await AudioRecorder().hasPermission()) return setState(() => note = '没有麦克风权限');
     note = '';
-    await Recorder.start(settings!);
+    try {
+      await Recorder.start(settings!);
+    } on PlatformException catch (e) {
+      setState(() => note = '无法开始录音 ${e.message}');
+    }
   }
 
   Future<void> _stop() async {
@@ -197,7 +202,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     }
     final warn = [
       if (s['error'] != null) '录音错误 ${s['error']}',
-      if (running && s['note'] != null) '${s['note']}',
+      if (s['note'] != null) '${s['note']}',  // also when stopped: iOS reports leftovers sent after a kill
       if (running && s['interruptedAt'] != null)
         '${TimeOfDay.fromDateTime(DateTime.fromMillisecondsSinceEpoch(s['interruptedAt'])).format(context)} 被系统中断过，已恢复',
     ];
@@ -311,14 +316,18 @@ class _SettingsPageState extends State<SettingsPage> {
         child: Column(children: [
           SwitchListTile(
             title: const Text('本地保留录音'),
-            subtitle: const Text('上传后存到 Android/data/com.suyiiyii.live_record/files/recordings/日期/'),
+            subtitle: Text(Platform.isIOS
+                ? '上传后存到「文件」App › 我的 iPhone › live-record › recordings › 日期'
+                : '上传后存到 Android/data/com.suyiiyii.live_record/files/recordings/日期/'),
             value: archive,
             onChanged: (v) => setState(() => archive = v),
           ),
           const Divider(height: 1),
-          const ListTile(
-            title: Text('切片长度'),
-            subtitle: Text('前台 $sliceForegroundS 秒 · 后台 $sliceBackgroundS 秒 · 熄屏 $sliceScreenOffS 秒'),
+          ListTile(
+            title: const Text('切片长度'),
+            subtitle: Text(Platform.isIOS  // iOS has no reliable screen-off signal; background stands for it
+                ? '前台 $sliceForegroundS 秒 · 后台 $sliceBackgroundS 秒'
+                : '前台 $sliceForegroundS 秒 · 后台 $sliceBackgroundS 秒 · 熄屏 $sliceScreenOffS 秒'),
           ),
         ]),
       ),

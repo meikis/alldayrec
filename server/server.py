@@ -610,7 +610,7 @@ def busy(device: str):
 
 @app.post("/api/chunks")
 async def chunk(request: Request, device: str, start: int):
-    """One self-contained audio file (the app's Opus pieces), `start` its device time in unix ms. Kept on disk (also
+    """One self-contained audio file (the apps' Opus or AAC pieces), `start` its device time in unix ms. Kept on disk (also
     for playback) and queued; the feeder takes the pieces in time order at the pace finalization keeps up with, so a
     client back from an outage sends its whole backlog at once."""
     busy(device)
