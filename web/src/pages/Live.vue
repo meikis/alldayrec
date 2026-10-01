@@ -3,7 +3,6 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import AppHeader from "../components/AppHeader.vue";
 import TranscriptRow from "../components/TranscriptRow.vue";
 import {
-  count,
   get,
   hhmm,
   hhmmss,
@@ -62,11 +61,6 @@ const lastEvent = computed(() => {
   return e ? `· ${hhmmss(e.at)} ${e.text}`.slice(0, 90) : "";
 });
 
-function upsert(r: Row) {
-  const i = rows.value.findIndex((x) => x.id === r.id);
-  if (i >= 0) rows.value[i] = r;
-  else rows.value.push(r);
-}
 function finalize(m: { from: string; to: string; rows: Row[] }) {
   rows.value = rows.value.filter((r) => !(m.from <= r.start && r.start < m.to)).concat(m.rows);
 }
@@ -133,8 +127,7 @@ onMounted(async () => {
 onUnmounted(() => window.removeEventListener("scroll", onScroll));
 
 const { connected } = useSocket((m) => {
-  if (m.type === "sentence") upsert(m);
-  else if (m.type === "final") finalize(m);
+  if (m.type === "final") finalize(m);
   else if (m.type === "conversation") addConv(m);
   else if (m.type === "summary") {
     const c = convs.value.find((x) => x.id === m.conversation);
@@ -156,16 +149,14 @@ const convLink = (c: Conversation) =>
     <div class="status">
       <template v-if="!connected">连接断开，重连中…</template>
       <template v-else-if="status">
-        <span>{{ status.file || "等待录音" }}</span>
+        <span>{{ status.device || "等待录音" }}</span>
         <span :class="{ bad: (status.behind_s ?? 0) > 30 }"
           >落后 {{ status.behind_s == null ? "—" : status.behind_s + " 秒" }}</span
         >
+        <span :class="{ bad: status.queued }">排队 {{ status.queued ?? 0 }} 块</span>
         <span :class="{ bad: (status.latency_s ?? 0) > 60 }"
           >上屏 {{ status.latency_s ?? "—" }} 秒</span
         >
-        <span>ASR {{ status.asr_ms ?? "—" }} ms</span>
-        <span :class="{ bad: status.errors }">失败 {{ status.errors }}</span>
-        <span>无人声 {{ status.no_speech }}</span>
         <span :class="{ bad: status.refine?.error }">
           分离
           {{
@@ -188,7 +179,7 @@ const convLink = (c: Conversation) =>
               : "空闲，无打开的对话"
           }}</span
         >
-        <span>{{ status.diarizer }} {{ status.commit }}</span>
+        <span>{{ status.engine }} {{ status.commit }}</span>
       </template>
       <template v-else>连接中…</template>
     </div>
@@ -201,7 +192,7 @@ const convLink = (c: Conversation) =>
       <TranscriptRow v-if="it.k === 'row'" :row="it.r" />
       <div v-else-if="it.k === 'conv'" class="conv">
         对话 {{ hhmmss(it.c.start) }}–{{ hhmmss(it.c.end) }} 结束 · 参与
-        {{ it.c.participants.join("、") || "—" }} · {{ count(it.c) }} 句 ·
+        {{ it.c.participants.join("、") || "—" }} · {{ it.c.sentences }} 句 ·
         <RouterLink :to="'/c/' + it.c.id">{{ convLink(it.c) }}</RouterLink>
       </div>
       <div v-else-if="it.k === 'gap'" class="gap">— {{ hhmm(it.at) }} —</div>

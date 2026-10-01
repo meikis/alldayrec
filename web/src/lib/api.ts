@@ -42,21 +42,19 @@ export interface Conversation {
   end: string;
   state?: "open" | "closed";
   participants: string[];
-  sentences: string[] | number; // ids, or a count (search results, the open conversation)
+  sentences: number;
   kind?: string;
   summary?: Summary | null;
 }
 
 export interface Status {
-  file?: string | null;
+  device?: string | null;
   behind_s?: number | null;
+  queued?: number; // uploaded pieces the server has not fed yet
   latency_s?: number | null;
-  asr_ms?: number | null;
-  errors?: number;
-  no_speech?: number;
   refine?: { at: string; ms: number; error?: string } | null;
   conversation?: { start: string; sentences: number } | null;
-  diarizer?: string;
+  engine?: string;
   commit?: string;
 }
 
@@ -88,8 +86,6 @@ export const hhmm = (iso: string) => iso.slice(11, 16);
 export const hhmmss = (iso: string) => iso.slice(11, 19);
 export const minutes = (c: Conversation) =>
   Math.max(1, Math.round((+new Date(c.end) - +new Date(c.start)) / 60000));
-export const count = (c: Conversation) =>
-  typeof c.sentences === "number" ? c.sentences : c.sentences.length;
 
 export interface Voice {
   conv: string;
