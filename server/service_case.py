@@ -18,8 +18,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from replay_case import EPOCH, Case  # noqa: E402
-from server import DEVICE_PARAMS, LINK_MIN, MIN_SPEAKER_S, SR, Registry, Speakers, _http, final_rows  # noqa: E402
+from replay_case import DEVICE_PARAMS, EPOCH, LINK_MIN, MIN_SPEAKER_S, Case, Registry, Speakers  # noqa: E402
+from server import SR, _http, final_rows  # noqa: E402
 
 BRIDGE, SERVICE = os.environ["ASR_UPLOAD_BRIDGE_URL"], os.environ["ASR_SERVICE_URL"]
 

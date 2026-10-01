@@ -7,12 +7,10 @@
 
 Every decision but tick uses the times carried by the events, so a network outage between the recorder
 and the server does not split a conversation: the late sentences arrive with their original times.
-The state is one open conversation, kept in a json file so a restart continues it.
+The state is one open conversation; the caller stores `open` so a restart continues it.
 """
 import datetime as dt
-import json
 import time
-from pathlib import Path
 
 # GAP_S: gpt-6-luna judged 180 pauses from 112 days of history: 2-5 min apart 62 % were still the same
 # conversation, 5-10 min 45 %, 10-20 min 43 % (artifacts/record/history/gap_judge-*.jsonl)
@@ -22,12 +20,11 @@ P = dt.datetime.fromisoformat
 
 
 class Grouper:
-    def __init__(self, gap_s=GAP_S, min_s=MIN_S, max_s=MAX_S, idle_s=IDLE_S, path: Path | None = None):
-        self.gap, self.min, self.max, self.idle, self.path = gap_s, min_s, max_s, idle_s, path
-        self.open = None
+    def __init__(self, gap_s=GAP_S, min_s=MIN_S, max_s=MAX_S, idle_s=IDLE_S, open_: dict | None = None):
+        """open_: the conversation a restart continues."""
+        self.gap, self.min, self.max, self.idle = gap_s, min_s, max_s, idle_s
+        self.open = open_
         self.last_event = time.time()
-        if path and path.exists():
-            self.open = json.loads(path.read_text()).get("open")
 
     def sentence(self, s: dict) -> list[dict]:
         a, b = P(s["start"]), P(s["end"])
@@ -70,8 +67,6 @@ class Grouper:
 
     def _touch(self, out: list[dict]) -> list[dict]:
         self.last_event = time.time()
-        if self.path:
-            self.path.write_text(json.dumps({"open": self.open}, ensure_ascii=False))
         return out
 
 

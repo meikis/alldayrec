@@ -1,4 +1,5 @@
-"""Segmenter must give the same utterances however the audio is chunked, on the recorder's clock."""
+"""Segmenter must give the same utterances however the audio is chunked, on the recorder's clock, and must say
+an utterance is still open when the audio stops inside it (a burst of queued audio can stop anywhere)."""
 import datetime as dt
 import os
 import subprocess
@@ -10,10 +11,17 @@ from server import SR, Segmenter, clip_turns, final_rows
 CLIP = os.environ.get("TEST_CLIP", "")  # any recorder file with speech; the test skips the audio part without it
 
 
+T0 = dt.datetime(2026, 9, 9, 11, 7)
+
+
+def clip():
+    return np.frombuffer(subprocess.run(["ffmpeg", "-v", "error", "-ss", "420", "-t", "60", "-i", CLIP, "-f", "s16le",
+                                         "-ac", "1", "-ar", str(SR), "-"], capture_output=True, check=True).stdout, np.int16)
+
+
 def run(sizes):
-    x = np.frombuffer(subprocess.run(["ffmpeg", "-v", "error", "-ss", "420", "-t", "60", "-i", CLIP, "-f", "s16le",
-                                      "-ac", "1", "-ar", str(SR), "-"], capture_output=True, check=True).stdout, np.int16)
-    seg, t0, i, out, k = Segmenter(), dt.datetime(2026, 9, 9, 11, 7), 0, [], 0
+    x = clip()
+    seg, t0, i, out, k = Segmenter(), T0, 0, [], 0
     while i < len(x):
         n = sizes[k % len(sizes)]; k += 1
         out += [(a, b, len(u)) for a, b, u in seg.push(t0 + dt.timedelta(seconds=i / SR), x[i:i + n])]
@@ -47,6 +55,11 @@ if __name__ == "__main__":
     a, b, n = whole[0]
     assert dt.datetime(2026, 9, 9, 11, 7) <= a < b and n == round((b - a).total_seconds() * SR), whole[0]
     print(f"ok: {len(whole)} utterances, first {a.time()}-{b.time()}")
+    a, b, _ = max(whole, key=lambda u: u[1] - u[0])
+    seg = Segmenter()
+    seg.push(T0, clip()[:int(((a - T0) + (b - a) / 2).total_seconds() * SR)])
+    assert seg.speaking(), "audio ending mid-utterance must leave it open"
+    print("ok: an utterance cut by the end of the audio stays open")
 
 
 def test_clip_turns():
