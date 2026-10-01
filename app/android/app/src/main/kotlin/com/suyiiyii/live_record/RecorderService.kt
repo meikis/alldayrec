@@ -145,7 +145,6 @@ class Uploader(private val dir: File, private val server: String, private val to
                 val code = post("$server/api/chunks?device=${enc(device)}&start=${f.nameWithoutExtension}", f.readBytes(), "audio/ogg")
                 when {
                     code == 200 -> { keep(f); sent++; fails = 0; note = null }
-                    code == 429 -> { note = "服务端积压中，20 秒后继续"; sleep(20_000) }
                     code == 400 -> { f.delete(); note = "服务端无法解码一块，已丢弃" }
                     else -> throw Exception("HTTP $code")
                 }
