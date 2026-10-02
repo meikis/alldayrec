@@ -2,13 +2,13 @@
 import { hhmmss, type Row } from "../lib/api";
 import { player, toggle } from "../lib/audio";
 
-defineProps<{ row: Row; hit?: boolean }>();
+defineProps<{ row: Row; hit?: boolean; media?: boolean }>(); // media: played aloud, not said in the room
 </script>
 
 <template>
   <div
     class="row"
-    :class="{ pending: row.state && row.state !== 'final', hit }"
+    :class="{ pending: row.state && row.state !== 'final', hit, media }"
     :data-start="row.start"
   >
     <div class="t">
@@ -63,6 +63,9 @@ defineProps<{ row: Row; hit?: boolean }>();
 }
 .spk.other {
   color: var(--warm);
+}
+.row.media {
+  opacity: 0.45;
 }
 .row.pending .text,
 .row.pending .spk {

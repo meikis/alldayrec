@@ -11,6 +11,42 @@ export interface Row {
   source?: string; // the device that recorded it
 }
 
+export interface Span {
+  from: string; // starts of the first and the last row, both included
+  to: string;
+}
+export const inSpans = (r: Row, spans?: Span[]) =>
+  !!spans?.some((x) => x.from <= r.start && r.start <= x.to);
+export const MOSTLY_MEDIA = 0.8; // a conversation this much media is greyed as a whole
+
+// Rows in order, a run of FOLD or more media rows folded into one line; a shorter run stays, greyed
+export type Seg = { k: "row"; r: Row; media: boolean } | { k: "fold"; key: string; rows: Row[] };
+const FOLD = 3;
+export function fold(rows: Row[], media: (r: Row) => boolean): Seg[] {
+  const out: Seg[] = [];
+  let run: Row[] = [];
+  const flush = () => {
+    if (run.length >= FOLD) out.push({ k: "fold", key: "m" + run[0].id, rows: run });
+    else out.push(...run.map((r) => ({ k: "row" as const, r, media: true })));
+    run = [];
+  };
+  for (const r of rows) {
+    if (media(r)) run.push(r);
+    else {
+      flush();
+      out.push({ k: "row", r, media: false });
+    }
+  }
+  flush();
+  return out;
+}
+
+export interface Feedback {
+  conv: string;
+  at: string;
+  text: string;
+}
+
 export interface At {
   at: string | null;
 }
@@ -31,7 +67,9 @@ export interface Summary {
     quote?: string;
   })[];
   ai_requests?: (At & { text: string })[];
-  ai_spans?: { from: string; to: string }[];
+  ai_spans?: Span[];
+  media_spans?: Span[]; // media played aloud (video, TV, music): greyed and folded
+  media_share?: number; // of the speech, the part in media_spans
   decisions?: (At & { text: string; quote?: string })[];
   model?: string | null;
   created_at?: string;
@@ -45,6 +83,7 @@ export interface Conversation {
   participants: string[];
   sentences: number;
   kind?: string;
+  device?: string | null; // its rows' source; none: from before per-device pipelines
   summary?: Summary | null;
 }
 

@@ -3,7 +3,7 @@ import { onMounted, onUnmounted, ref, useTemplateRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppHeader from "../components/AppHeader.vue";
 import DayPicker from "../components/DayPicker.vue";
-import { get, hhmm, minutes, type Conversation, type Status } from "../lib/api";
+import { get, hhmm, minutes, MOSTLY_MEDIA, type Conversation, type Status } from "../lib/api";
 import { shiftDay, today } from "../lib/calendar";
 import { useSocket } from "../lib/socket";
 
@@ -159,9 +159,14 @@ useSocket((m) => {
     </div>
     <template v-for="(c, i) in items" :key="c.id">
       <div v-if="dayOf(i)" class="day" :data-day="dayOf(i)">{{ dayOf(i) }}</div>
-      <RouterLink class="card" :to="'/c/' + c.id">
+      <RouterLink
+        class="card"
+        :class="{ media: (c.summary?.media_share ?? 0) >= MOSTLY_MEDIA }"
+        :to="'/c/' + c.id"
+      >
         <div class="meta">
-          {{ c.kind === "口述" ? "口述 · " : "" }}{{ hhmm(c.start) }}–{{ hhmm(c.end) }} ·
+          {{ (c.summary?.media_share ?? 0) >= MOSTLY_MEDIA ? "媒体 · " : ""
+          }}{{ c.kind === "口述" ? "口述 · " : "" }}{{ hhmm(c.start) }}–{{ hhmm(c.end) }} ·
           {{ minutes(c) }} 分钟 · {{ (c.participants || []).join("、") || "—" }}
           <template v-if="c.summary?.todos?.length">
             · {{ c.summary.todos.length }} 条待办</template
@@ -182,10 +187,12 @@ useSocket((m) => {
                 : "摘要生成中…"
           }}
         </div>
-        <div v-if="c.summary?.summary" class="gist">{{ c.summary.summary }}</div>
-        <div v-if="c.summary?.tags?.length" class="tagline">
-          <span v-for="t in c.summary.tags" :key="t" class="tag">{{ t }}</span>
-        </div>
+        <template v-if="(c.summary?.media_share ?? 0) < MOSTLY_MEDIA">
+          <div v-if="c.summary?.summary" class="gist">{{ c.summary.summary }}</div>
+          <div v-if="c.summary?.tags?.length" class="tagline">
+            <span v-for="t in c.summary.tags" :key="t" class="tag">{{ t }}</span>
+          </div>
+        </template>
       </RouterLink>
     </template>
     <div v-if="done && !items.length && !open" class="empty">
@@ -249,6 +256,9 @@ useSocket((m) => {
   font-size: 13px;
   color: var(--muted);
   margin: 20px 0 8px;
+}
+.card.media {
+  opacity: 0.5;
 }
 .card {
   display: block;

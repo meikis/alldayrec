@@ -2,15 +2,19 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import AppHeader from "../components/AppHeader.vue";
+import MediaFold from "../components/MediaFold.vue";
 import Timeline from "../components/Timeline.vue";
 import TranscriptRow from "../components/TranscriptRow.vue";
 import {
+  fold,
   get,
+  inSpans,
   hhmm,
   hhmmss,
   minutes,
   post,
   type Conversation,
+  type Feedback,
   type LiveState,
   type Row,
 } from "../lib/api";
@@ -18,10 +22,13 @@ import { useSocket } from "../lib/socket";
 
 const props = defineProps<{ id: string }>();
 const route = useRoute();
-const c = ref<(Conversation & { rows: Row[]; timeline?: LiveState | null }) | null>(null),
+const c = ref<
+    (Conversation & { rows: Row[]; timeline?: LiveState | null; feedback: Feedback[] }) | null
+  >(null),
   missing = ref(false),
   hit = ref("");
 const s = computed(() => c.value?.summary ?? null);
+const segs = computed(() => fold(c.value?.rows ?? [], (r) => inSpans(r, s.value?.media_spans)));
 
 async function load() {
   try {
@@ -52,6 +59,21 @@ useSocket((m) => {
 async function regen() {
   await post(`/api/conversation/${props.id}/summarize`);
   await load();
+}
+
+// a correction in the owner's words, kept for a later read-back across many of them
+const note = ref(""),
+  sending = ref(false);
+async function sendNote() {
+  sending.value = true;
+  try {
+    c.value!.feedback = await post<Feedback[]>(`/api/conversation/${props.id}/feedback`, {
+      text: note.value.trim(),
+    });
+    note.value = "";
+  } finally {
+    sending.value = false;
+  }
 }
 
 // renaming one speaker of this conversation
@@ -220,13 +242,28 @@ async function save() {
       </div>
       <div v-else class="summary muted">摘要生成中…</div>
 
+      <div class="note">
+        <textarea
+          v-model="note"
+          rows="2"
+          placeholder="哪里判断错了？比如：这段不是视频、S2 其实是我、摘要漏了某件事"
+        ></textarea>
+        <button :disabled="sending || !note.trim()" @click="sendNote">提交纠正</button>
+        <div v-for="(f, i) in c.feedback" :key="i" class="muted">
+          {{ f.at.slice(5, 16).replace("T", " ") }} {{ f.text }}
+        </div>
+      </div>
+
       <template v-if="c.timeline?.topics.length">
         <h3>会中实时议题</h3>
         <Timeline :topics="c.timeline.topics" @jump="jumpTo" />
       </template>
 
       <h3>原文</h3>
-      <TranscriptRow v-for="r in c.rows" :key="r.id" :row="r" :hit="hit === r.start" />
+      <template v-for="g in segs" :key="g.k === 'row' ? g.r.id : g.key">
+        <TranscriptRow v-if="g.k === 'row'" :row="g.r" :media="g.media" :hit="hit === g.r.start" />
+        <MediaFold v-else :rows="g.rows" :hit="hit" />
+      </template>
     </template>
   </main>
 </template>
@@ -319,6 +356,22 @@ ul.items > li {
   margin-top: 10px;
   font-size: 13px;
   color: var(--accent);
+}
+.note {
+  margin-top: 12px;
+  font-size: 13px;
+}
+.note textarea {
+  font: inherit;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  resize: vertical;
+}
+.note button {
+  margin: 4px 0;
 }
 .items.ai li {
   color: var(--muted);

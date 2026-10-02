@@ -3,10 +3,13 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppHeader from "../components/AppHeader.vue";
 import DayPicker from "../components/DayPicker.vue";
+import MediaFold from "../components/MediaFold.vue";
 import Timeline from "../components/Timeline.vue";
 import TranscriptRow from "../components/TranscriptRow.vue";
 import {
+  fold,
   get,
+  inSpans,
   hhmm,
   hhmmss,
   type Conversation,
@@ -37,7 +40,8 @@ const follow = ref(true),
   logBox = ref<HTMLElement | null>(null);
 
 type Item =
-  | { k: "row"; key: string; r: Row }
+  | { k: "row"; key: string; r: Row; media?: boolean }
+  | { k: "fold"; key: string; rows: Row[] }
   | { k: "conv"; key: string; c: Conversation }
   | { k: "gap"; key: string; at: string };
 const timeline = computed(() => {
@@ -54,8 +58,32 @@ const timeline = computed(() => {
     }
     out.push(it);
   }
-  return out;
+  // media rows, known once their conversation is summarized, fold run by run between dividers
+  const res: Item[] = [];
+  let rs: Row[] = [];
+  const flush = () => {
+    for (const g of fold(rs, mediaOf))
+      res.push(g.k === "row" ? { k: "row", key: "s" + g.r.id, r: g.r, media: g.media } : g);
+    rs = [];
+  };
+  for (const it of out) {
+    if (it.k === "row") rs.push(it.r);
+    else {
+      flush();
+      res.push(it);
+    }
+  }
+  flush();
+  return res;
 });
+const mediaOf = (r: Row) =>
+  convs.value.some(
+    (c) =>
+      (!c.device || c.device === r.source) &&
+      c.start <= r.start &&
+      r.start <= c.end &&
+      inSpans(r, c.summary?.media_spans),
+  );
 const lastEvent = computed(() => {
   const e = events.value.at(-1);
   return e ? `· ${hhmmss(e.at)} ${e.text}`.slice(0, 90) : "";
@@ -286,7 +314,13 @@ const convLink = (c: Conversation) =>
   </AppHeader>
   <main class="live">
     <template v-for="it in timeline" :key="it.key">
-      <TranscriptRow v-if="it.k === 'row'" :row="it.r" :hit="hit === it.r.start" />
+      <TranscriptRow
+        v-if="it.k === 'row'"
+        :row="it.r"
+        :media="it.media"
+        :hit="hit === it.r.start"
+      />
+      <MediaFold v-else-if="it.k === 'fold'" :rows="it.rows" :hit="hit" />
       <div v-else-if="it.k === 'conv'" class="conv">
         对话 {{ hhmmss(it.c.start) }}–{{ hhmmss(it.c.end) }} 结束 · 参与
         {{ it.c.participants.join("、") || "—" }} · {{ it.c.sentences }} 句 ·

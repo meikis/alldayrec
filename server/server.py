@@ -302,7 +302,7 @@ summary_q: asyncio.Queue = asyncio.Queue()
 
 
 def queue_summary(c: dict, keep: bool = False):
-    """keep: the current summary stays on the page until the new one is written (an upgrade to a newer prompt)."""
+    """keep: the current summary stays on the page until the new one is written (a rename redoes it)."""
     if not keep:
         db.put_summary({"conversation": c["id"], "status": "pending", "error": None})
     summary_q.put_nowait(c)
@@ -332,14 +332,12 @@ SUMMARY_WORKERS = int(os.environ.get("SUMMARY_WORKERS", "4"))  # 6 drew ~100 429
 
 
 async def summary_worker():
-    """Queued first: conversations closed while the service was down, summaries that never finished,
-    and summaries from an older prompt (a new field such as tags reaches the old ones too)."""
+    """Queued first: conversations closed while the service was down and summaries that never finished. A newer
+    prompt does not redo old summaries: the owner redoes one from its page (POST /api/conversation/{id}/summarize)."""
     for c in reversed(all_conversations()):
         s = c["summary"]
         if not s or s["status"] == "pending":
             queue_summary(c)
-        elif s["status"] == "done" and s.get("prompt_version", 0) < summary.PROMPT_VERSION:
-            queue_summary(c, keep=True)
     await asyncio.gather(*(summarize_loop() for _ in range(SUMMARY_WORKERS)))
 
 
@@ -358,7 +356,13 @@ async def summarize_loop():
         old = db.summary(c["id"])
         if res["status"] == "failed" and old and old["status"] == "done":  # a failed upgrade keeps the old summary
             continue
-        db.put_summary(res)
+        media = summary.media_labels(conversation_rows(c), res.get("media_spans") or [])
+        with db.tx() as t:
+            db.put_summary(res, t)
+            if media:  # a redone summary found media: its voices leave the voiceprint bank
+                t.executemany("DELETE FROM voices WHERE conv = ? AND label = ?", [(c["id"], m) for m in media])
+        if media:
+            _speakers["at"] = 0.0
         note(f"对话 {c['start'][11:19]} 的摘要" + (f"：{res['title']}" if res["status"] == "done" else f"生成失败：{res['error']}"),
              "state" if res["status"] == "done" else "error")
         await broadcast({"type": "summary", **res})
@@ -827,7 +831,28 @@ async def conversation(conv_id: str):
     c = find_conversation(conv_id)
     if not c:
         raise HTTPException(404, "no such conversation")
-    return {**c, "summary": db.summary(conv_id), "timeline": db.timeline(conv_id), "rows": conversation_rows(c)}
+    return {**c, "summary": db.summary(conv_id), "timeline": db.timeline(conv_id), "feedback": db.feedback(conv_id),
+            "rows": conversation_rows(c)}
+
+
+@app.post("/api/conversation/{conv_id}/feedback")
+async def add_feedback(conv_id: str, body: dict):
+    """A correction in the owner's words (wrongly greyed as media, a wrong speaker, a bad summary); collected
+    and read back in batches to fix the prompt, never acted on one by one."""
+    text = (body.get("text") or "").strip()
+    if not find_conversation(conv_id):
+        raise HTTPException(404, "no such conversation")
+    if not text or len(text) > 2000:
+        raise HTTPException(400, "empty or too long")
+    db.add_feedback(conv_id, text)
+    return db.feedback(conv_id)
+
+
+@app.get("/api/feedback")
+async def feedback():
+    """Every correction, newest first, with the conversation's time and title for the read-back."""
+    return [{**f, "start": (c := find_conversation(f["conv"]) or {}).get("start"), "title": (db.summary(f["conv"]) or {}).get("title")}
+            for f in db.feedback()]
 
 
 @app.post("/api/conversation/{conv_id}/summarize")
@@ -1064,11 +1089,14 @@ async def voices_loop():
         seen = db.voiced_conversations()
         since = (dt.date.today() - dt.timedelta(days=3)).isoformat()
         for c in all_conversations():
-            if c["start"] < since or c["id"] in seen:
+            s = c["summary"]
+            if c["start"] < since or c["id"] in seen or not s or s["status"] == "pending":  # the summary tells media apart
                 continue
+            rows = conversation_rows(c)
+            media = summary.media_labels(rows, s.get("media_spans") or [])
             by = {}
-            for r in conversation_rows(c):
-                if r.get("speaker") and r["speaker"] != "S?":
+            for r in rows:
+                if r.get("speaker") and r["speaker"] != "S?" and r["speaker"] not in media:
                     by.setdefault(r["speaker"], []).append(r)
             out = []
             for label, rs in by.items():

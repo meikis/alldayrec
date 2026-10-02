@@ -1,0 +1,36 @@
+<script setup lang="ts">
+import { ref } from "vue";
+import { hhmmss, type Row } from "../lib/api";
+import TranscriptRow from "./TranscriptRow.vue";
+
+// A run of media rows as one grey line; opens to the rows, still greyed
+defineProps<{ rows: Row[]; hit?: string }>();
+const open = ref(false);
+</script>
+
+<template>
+  <button class="fold" @click="open = !open">
+    {{ open ? "▾" : "▸" }} 媒体 {{ hhmmss(rows[0].start) }}–{{ hhmmss(rows.at(-1)!.end) }} ·
+    {{ rows.length }} 句
+  </button>
+  <template v-if="open">
+    <TranscriptRow v-for="r in rows" :key="r.id" :row="r" media :hit="hit === r.start" />
+  </template>
+</template>
+
+<style scoped>
+.fold {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 0;
+  cursor: pointer;
+}
+</style>

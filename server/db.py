@@ -2,6 +2,7 @@
 trace stays a jsonl log. One connection per thread (the summary and speaker work runs in threads), WAL so reads
 never wait for a write; every multi-step change is one `tx()`.
 """
+import datetime as dt
 import json
 import sqlite3
 import threading
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS pieces (           -- uploaded audio pieces, the inge
     device TEXT NOT NULL, start_ms INTEGER NOT NULL, seconds REAL NOT NULL, path TEXT NOT NULL, PRIMARY KEY (start_ms, device));
 CREATE INDEX IF NOT EXISTS pieces_device ON pieces(device, start_ms);  -- each device's stream and backlog
 CREATE TABLE IF NOT EXISTS timelines (conversation TEXT PRIMARY KEY, body TEXT NOT NULL);  -- the live analysis as it stood at the close
+CREATE TABLE IF NOT EXISTS feedback (conv TEXT NOT NULL, at TEXT NOT NULL, text TEXT NOT NULL);  -- what the owner says a summary got wrong, read back in batches
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);  -- per device: finalized_to:<d>, open_conversation:<d>, end_at:<d>, live:<d>
 """
 
@@ -154,6 +156,16 @@ def timeline(conv_id: str) -> dict | None:
 
 def put_timeline(conv_id: str, body: dict, c: sqlite3.Connection | None = None):
     (c or conn()).execute("INSERT OR REPLACE INTO timelines VALUES (?, ?)", (conv_id, json.dumps(body, ensure_ascii=False)))
+
+
+def feedback(conv_id: str | None = None) -> list[dict]:
+    """Newest first; every conversation's when none is given."""
+    q = "SELECT * FROM feedback" + (" WHERE conv = ?" if conv_id else "") + " ORDER BY at DESC"
+    return [dict(r) for r in conn().execute(q, (conv_id,) if conv_id else ())]
+
+
+def add_feedback(conv_id: str, text: str):
+    conn().execute("INSERT INTO feedback VALUES (?, ?, ?)", (conv_id, dt.datetime.now().isoformat(timespec="seconds"), text))
 
 
 # voices, apart pins, people bank
