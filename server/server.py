@@ -603,6 +603,7 @@ DIST = HERE / "static/dist"  # the web app (web/, built by web/deploy.sh)
 @app.get("/c/{conv_id}")
 @app.get("/record")
 @app.get("/speakers")
+@app.get("/calendar")
 @app.get("/p/{name}")
 async def page(conv_id: str = "", name: str = ""):
     return FileResponse(DIST / "index.html", headers=NO_CACHE)
@@ -678,6 +679,20 @@ async def conversations(date: str | None = None):
 async def days():
     """Days that have sentences, newest first."""
     return [r[0] for r in db.conn().execute("SELECT DISTINCT substr(start, 1, 10) d FROM sentences ORDER BY d DESC")]
+
+
+@app.get("/api/calendar")
+async def calendar():
+    """Per day with sentences: closed conversations (dictations apart), their speech minutes and the sentence count,
+    for the day picker and the calendar page."""
+    out = {d: {"conversations": 0, "dictations": 0, "speech_min": 0.0, "sentences": n}
+           for d, n in db.conn().execute("SELECT substr(start, 1, 10), count(*) FROM sentences GROUP BY 1")}
+    for d, kind, n, s in db.conn().execute("SELECT substr(start, 1, 10), coalesce(kind, '对话'), count(*), coalesce(sum(speech_s), 0) "
+                                           "FROM conversations GROUP BY 1, 2"):
+        x = out.setdefault(d, {"conversations": 0, "dictations": 0, "speech_min": 0.0, "sentences": 0})
+        x["dictations" if kind == "口述" else "conversations"] += n
+        x["speech_min"] = round(x["speech_min"] + s / 60, 1)
+    return dict(sorted(out.items(), reverse=True))
 
 
 @app.get("/api/search")

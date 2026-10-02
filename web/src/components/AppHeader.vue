@@ -14,6 +14,7 @@ defineProps<{ inApp?: boolean }>();
           :class="{ on: $route.path === '/conversations' || $route.path.startsWith('/c/') }"
           >对话</RouterLink
         >
+        <RouterLink to="/calendar" exact-active-class="on">日历</RouterLink>
         <RouterLink to="/speakers" exact-active-class="on">说话人</RouterLink>
       </nav>
       <slot />
@@ -34,8 +35,9 @@ header {
   margin: 0 auto;
   padding: 12px 16px;
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 16px;
+  gap: 4px 16px;
 }
 h1 {
   font-size: 17px;

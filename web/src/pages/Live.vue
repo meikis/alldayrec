@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import AppHeader from "../components/AppHeader.vue";
+import DayPicker from "../components/DayPicker.vue";
 import TranscriptRow from "../components/TranscriptRow.vue";
 import {
   get,
@@ -11,18 +13,21 @@ import {
   type Row,
   type Status,
 } from "../lib/api";
+import { loadCalendar, today as todayOf } from "../lib/calendar";
 import { useSocket } from "../lib/socket";
 
+// One day at a time (?day=YYYY-MM-DD; none: today, which follows the live stream)
 const GAP_MS = 5 * 60 * 1000; // a quiet stretch this long gets a mark, so conversations separate
-const today = new Date().toLocaleDateString("sv");
+const route = useRoute(),
+  router = useRouter();
+const today = todayOf();
+const day = computed(() => (route.query.day as string | undefined) || today),
+  live = computed(() => day.value === today);
 const rows = ref<Row[]>([]),
   convs = ref<Conversation[]>([]),
   events = ref<LogEvent[]>([]),
   status = ref<Status | null>(null);
-const days = ref<string[]>([]),
-  loaded = ref<string[]>([]),
-  loadingEarlier = ref(false),
-  ready = ref(false);
+const ready = ref(false);
 const follow = ref(true),
   logOpen = ref(false),
   logBox = ref<HTMLElement | null>(null);
@@ -30,23 +35,15 @@ const follow = ref(true),
 type Item =
   | { k: "row"; key: string; r: Row }
   | { k: "conv"; key: string; c: Conversation }
-  | { k: "gap"; key: string; at: string }
-  | { k: "day"; key: string; label: string };
+  | { k: "gap"; key: string; at: string };
 const timeline = computed(() => {
   const ev = [
     ...rows.value.map((r) => ({ s: r.start, it: { k: "row", key: "s" + r.id, r } as Item })),
     ...convs.value.map((c) => ({ s: c.end, it: { k: "conv", key: "c" + c.id, c } as Item })),
   ].sort((a, b) => (a.s < b.s ? -1 : a.s > b.s ? 1 : 0)); // stable: a divider stays after rows starting at its end
   const out: Item[] = [];
-  let lastEnd = 0,
-    lastDay = "";
+  let lastEnd = 0;
   for (const { s, it } of ev) {
-    const d = s.slice(0, 10);
-    if (loaded.value.length && d !== lastDay) {
-      out.push({ k: "day", key: "d" + d, label: d === today ? "今天" : d });
-      lastDay = d;
-      lastEnd = 0;
-    }
     if (it.k === "row") {
       if (lastEnd && +new Date(s) - lastEnd > GAP_MS) out.push({ k: "gap", key: "g" + s, at: s });
       lastEnd = +new Date(it.r.end);
@@ -55,7 +52,6 @@ const timeline = computed(() => {
   }
   return out;
 });
-const earlierDay = computed(() => days.value.find((d) => d < (loaded.value.at(-1) ?? today)));
 const lastEvent = computed(() => {
   const e = events.value.at(-1);
   return e ? `· ${hhmmss(e.at)} ${e.text}`.slice(0, 90) : "";
@@ -75,37 +71,33 @@ function addEvent(e: LogEvent) {
   if (events.value.length > 300) events.value.splice(0, events.value.length - 300);
 }
 
-async function loadToday() {
+async function loadDay() {
+  const d = day.value;
   const [rs, cs] = await Promise.all([
-    get<Row[]>("/api/sentences"),
-    get<Conversation[]>("/api/conversations"),
+    get<Row[]>("/api/sentences", { date: d }),
+    get<Conversation[]>("/api/conversations", { date: d }),
   ]);
-  rows.value = rows.value.filter((r) => r.start < today).concat(rs);
-  convs.value = convs.value.filter((c) => c.end < today);
+  if (d !== day.value) return; // another day was picked meanwhile
+  rows.value = rs;
+  convs.value = [];
   cs.forEach(addConv);
-}
-async function loadEarlier() {
-  const day = earlierDay.value;
-  if (!day) return;
-  loadingEarlier.value = true;
-  const [rs, cs] = await Promise.all([
-    get<Row[]>("/api/sentences", { date: day }),
-    get<Conversation[]>("/api/conversations", { date: day }),
-  ]);
-  const h = document.body.scrollHeight;
-  rows.value = rs.concat(rows.value);
-  cs.forEach(addConv);
-  loaded.value.push(day);
-  loadingEarlier.value = false;
+  ready.value = true;
   await nextTick();
-  window.scrollBy(0, document.body.scrollHeight - h); // stay on what the reader was looking at
+  if (live.value) toBottom();
+  else window.scrollTo(0, 0);
 }
+const go = (d: string) => router.push({ query: d === today ? {} : { day: d } });
+watch(day, () => {
+  ready.value = false;
+  follow.value = live.value;
+  loadDay();
+});
 
 const atBottom = () => window.innerHeight + window.scrollY >= document.body.scrollHeight - 40;
 const onScroll = () => (follow.value = atBottom());
 const toBottom = () => window.scrollTo(0, document.body.scrollHeight);
 watch(timeline, async () => {
-  if (!follow.value) return;
+  if (!follow.value || !live.value) return;
   await nextTick();
   toBottom();
 });
@@ -119,22 +111,25 @@ watch(
 
 onMounted(async () => {
   window.addEventListener("scroll", onScroll);
-  get<string[]>("/api/days").then((d) => (days.value = d));
-  await loadToday();
+  loadCalendar();
+  follow.value = live.value;
+  await loadDay();
   (await get<LogEvent[]>("/api/events")).forEach(addEvent);
-  ready.value = true;
 });
 onUnmounted(() => window.removeEventListener("scroll", onScroll));
 
 const { connected } = useSocket((m) => {
-  if (m.type === "final") finalize(m);
-  else if (m.type === "conversation") addConv(m);
-  else if (m.type === "summary") {
+  // rows and conversations of another day than the one shown are not for this page
+  if (m.type === "final") {
+    if (live.value) finalize(m);
+  } else if (m.type === "conversation") {
+    if (m.start.slice(0, 10) === day.value) addConv(m);
+  } else if (m.type === "summary") {
     const c = convs.value.find((x) => x.id === m.conversation);
     if (c) c.summary = { ...m };
   } else if (m.type === "event") addEvent(m);
   else status.value = m;
-}, loadToday);
+}, loadDay);
 
 const convLink = (c: Conversation) =>
   c.summary?.status === "done"
@@ -146,48 +141,50 @@ const convLink = (c: Conversation) =>
 
 <template>
   <AppHeader in-app>
-    <div class="status">
-      <template v-if="!connected">连接断开，重连中…</template>
-      <template v-else-if="status">
-        <span>{{ status.device || "等待录音" }}</span>
-        <span :class="{ bad: (status.behind_s ?? 0) > 30 }"
-          >落后 {{ status.behind_s == null ? "—" : status.behind_s + " 秒" }}</span
-        >
-        <span :class="{ bad: status.queued }">排队 {{ status.queued ?? 0 }} 块</span>
-        <span :class="{ bad: (status.latency_s ?? 0) > 60 }"
-          >上屏 {{ status.latency_s ?? "—" }} 秒</span
-        >
-        <span :class="{ bad: status.refine?.error }">
-          分离
-          {{
-            status.refine
-              ? status.refine.error
-                ? "失败"
-                : status.refine.at.slice(11) + " " + (status.refine.ms / 1000).toFixed(0) + "s"
-              : "等待"
-          }}
-        </span>
-        <span
-          >状态机
-          {{
-            status.conversation
-              ? "对话打开 " +
-                hhmmss(status.conversation.start) +
-                " · " +
-                status.conversation.sentences +
-                " 句"
-              : "空闲，无打开的对话"
-          }}</span
-        >
-        <span>{{ status.engine }} {{ status.commit }}</span>
-      </template>
-      <template v-else>连接中…</template>
+    <div class="head">
+      <DayPicker :day="day" @pick="go">
+        <button v-if="!live" class="back" @click="go(today)">回到今天</button>
+      </DayPicker>
+      <div class="status">
+        <template v-if="!connected">连接断开，重连中…</template>
+        <template v-else-if="status">
+          <span>{{ status.device || "等待录音" }}</span>
+          <span :class="{ bad: (status.behind_s ?? 0) > 30 }"
+            >落后 {{ status.behind_s == null ? "—" : status.behind_s + " 秒" }}</span
+          >
+          <span :class="{ bad: status.queued }">排队 {{ status.queued ?? 0 }} 块</span>
+          <span :class="{ bad: (status.latency_s ?? 0) > 60 }"
+            >上屏 {{ status.latency_s ?? "—" }} 秒</span
+          >
+          <span :class="{ bad: status.refine?.error }">
+            分离
+            {{
+              status.refine
+                ? status.refine.error
+                  ? "失败"
+                  : status.refine.at.slice(11) + " " + (status.refine.ms / 1000).toFixed(0) + "s"
+                : "等待"
+            }}
+          </span>
+          <span
+            >状态机
+            {{
+              status.conversation
+                ? "对话打开 " +
+                  hhmmss(status.conversation.start) +
+                  " · " +
+                  status.conversation.sentences +
+                  " 句"
+                : "空闲，无打开的对话"
+            }}</span
+          >
+          <span>{{ status.engine }} {{ status.commit }}</span>
+        </template>
+        <template v-else>连接中…</template>
+      </div>
     </div>
   </AppHeader>
   <main class="live">
-    <button v-if="earlierDay" class="earlier" :disabled="loadingEarlier" @click="loadEarlier">
-      {{ loadingEarlier ? "加载中…" : `加载 ${earlierDay} 的字幕` }}
-    </button>
     <template v-for="it in timeline" :key="it.key">
       <TranscriptRow v-if="it.k === 'row'" :row="it.r" />
       <div v-else-if="it.k === 'conv'" class="conv">
@@ -195,12 +192,13 @@ const convLink = (c: Conversation) =>
         {{ it.c.participants.join("、") || "—" }} · {{ it.c.sentences }} 句 ·
         <RouterLink :to="'/c/' + it.c.id">{{ convLink(it.c) }}</RouterLink>
       </div>
-      <div v-else-if="it.k === 'gap'" class="gap">— {{ hhmm(it.at) }} —</div>
-      <div v-else class="day">{{ it.label }}</div>
+      <div v-else class="gap">— {{ hhmm(it.at) }} —</div>
     </template>
-    <div v-if="ready && !rows.length" class="empty">今天还没有转写内容</div>
+    <div v-if="ready && !rows.length" class="empty">
+      {{ live ? "今天还没有转写内容" : "这一天没有转写内容" }}
+    </div>
   </main>
-  <button v-show="!follow" class="jump" @click="toBottom">回到最新</button>
+  <button v-show="live && !follow" class="jump" @click="toBottom">回到最新</button>
   <details
     class="syslog"
     :open="logOpen"
@@ -239,17 +237,15 @@ const convLink = (c: Conversation) =>
   text-align: center;
   padding: 10px 0 4px;
 }
-.day {
-  color: var(--accent);
-  font-size: 13px;
-  font-weight: 600;
-  text-align: center;
-  padding: 16px 0 4px;
+.head {
+  flex: 1;
+  min-width: 260px; /* below the nav on a phone outside the app */
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
-.earlier {
-  display: block;
-  margin: 12px auto 4px;
-  padding: 4px 14px;
+.back {
+  margin-left: auto;
 }
 .jump {
   position: fixed;

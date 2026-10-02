@@ -16,6 +16,11 @@ export const router = createRouter({
       meta: { title: "对话" },
     },
     {
+      path: "/calendar",
+      component: () => import("./pages/Calendar.vue"),
+      meta: { title: "日历" },
+    },
+    {
       path: "/speakers",
       component: () => import("./pages/Speakers.vue"),
       meta: { title: "说话人" },

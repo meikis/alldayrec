@@ -2,16 +2,23 @@
 import { onMounted, onUnmounted, ref, useTemplateRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppHeader from "../components/AppHeader.vue";
+import DayPicker from "../components/DayPicker.vue";
 import { get, hhmm, minutes, type Conversation, type Status } from "../lib/api";
+import { shiftDay, today } from "../lib/calendar";
 import { useSocket } from "../lib/socket";
 
-// newest first, PAGE at a time as the end scrolls into view; words, one tag and the kind filter it
+// newest first, PAGE at a time as the end scrolls into view; words, one tag and the kind filter it; ?day= starts
+// the list at the end of that day (older ones keep coming as it scrolls)
 const PAGE = 30;
 const route = useRoute(),
   router = useRouter();
 const q = ref(String(route.query.q ?? "")),
   tag = ref(String(route.query.tag ?? "")),
-  kind = ref(String(route.query.kind ?? "对话"));
+  kind = ref(String(route.query.kind ?? "对话")),
+  day = ref(String(route.query.day ?? ""));
+// the day of the topmost card on screen, shown by the picker
+const seen = ref(""),
+  find = useTemplateRef<HTMLElement>("find");
 const tags = ref<[string, number][]>([]),
   items = ref<Conversation[]>([]),
   open = ref<Status["conversation"]>(null);
@@ -25,7 +32,7 @@ const search = (before: string) =>
     q: q.value,
     tag: tag.value,
     kind: kind.value,
-    before,
+    before: before || (day.value ? shiftDay(day.value, 1) + "T00:00:00" : ""),
     limit: String(PAGE),
   });
 async function restart() {
@@ -35,10 +42,11 @@ async function restart() {
       ...(q.value && { q: q.value }),
       ...(tag.value && { tag: tag.value }),
       ...(kind.value !== "对话" && { kind: kind.value }),
+      ...(day.value && { day: day.value }),
     },
   });
   const my = ++seq,
-    plain = !q.value && !tag.value && kind.value === "对话";
+    plain = !q.value && !tag.value && kind.value === "对话" && !day.value;
   loading.value = true;
   const [st, cs] = await Promise.all([plain ? get<Status>("/api/status") : null, search("")]);
   if (my !== seq) return; // a newer search started meanwhile
@@ -46,6 +54,7 @@ async function restart() {
   items.value = cs;
   done.value = cs.length < PAGE;
   loading.value = false;
+  spy();
 }
 async function page() {
   if (loading.value || done.value) return;
@@ -67,10 +76,22 @@ watch(q, () => {
   clearTimeout(timer);
   timer = window.setTimeout(restart, 300);
 });
-watch([tag, kind], restart);
+watch([tag, kind, day], restart);
+watch(day, () => window.scrollTo(0, 0));
+const pick = (d: string) => (day.value = d === today() ? "" : d);
+
+function spy() {
+  // the last day header above the bottom of the sticky search bar is the day being read
+  const edge = (find.value?.getBoundingClientRect().bottom ?? 0) + 8;
+  let d = items.value[0]?.start.slice(0, 10) ?? day.value;
+  for (const el of document.querySelectorAll<HTMLElement>("[data-day]"))
+    if (el.getBoundingClientRect().top < edge) d = el.dataset.day!;
+  seen.value = d;
+}
 
 let io: IntersectionObserver;
 onMounted(async () => {
+  window.addEventListener("scroll", spy, { passive: true });
   io = new IntersectionObserver((es) => es[0].isIntersecting && page());
   if (more.value) io.observe(more.value);
   get<Record<string, number>>("/api/tags").then(
@@ -78,20 +99,33 @@ onMounted(async () => {
   );
   await restart();
 });
-onUnmounted(() => io?.disconnect());
+onUnmounted(() => {
+  io?.disconnect();
+  window.removeEventListener("scroll", spy);
+});
 useSocket((m) => {
   // summaries arrive every few seconds while old ones are redone: patch the card, never reload the list
   if (m.type === "summary") {
     const c = items.value.find((x) => x.id === m.conversation);
     if (c) c.summary = { ...m };
-  } else if (m.type === "conversation" && !q.value && !tag.value && window.scrollY < 200) restart();
+  } else if (
+    m.type === "conversation" &&
+    !q.value &&
+    !tag.value &&
+    !day.value &&
+    window.scrollY < 200
+  )
+    restart();
 }, restart);
 </script>
 
 <template>
   <AppHeader />
   <main>
-    <div class="find">
+    <div ref="find" class="find">
+      <DayPicker :day="seen || day || today()" @pick="pick">
+        <RouterLink class="cal" to="/calendar">日历</RouterLink>
+      </DayPicker>
       <input v-model.trim="q" type="search" placeholder="搜索标题、摘要、待办、原文" />
       <div class="kinds">
         <button
@@ -124,7 +158,7 @@ useSocket((m) => {
       <div class="title muted">对话进行中，结束后生成摘要</div>
     </div>
     <template v-for="(c, i) in items" :key="c.id">
-      <div v-if="dayOf(i)" class="day">{{ dayOf(i) }}</div>
+      <div v-if="dayOf(i)" class="day" :data-day="dayOf(i)">{{ dayOf(i) }}</div>
       <RouterLink class="card" :to="'/c/' + c.id">
         <div class="meta">
           {{ c.kind === "口述" ? "口述 · " : "" }}{{ hhmm(c.start) }}–{{ hhmm(c.end) }} ·
@@ -171,7 +205,12 @@ useSocket((m) => {
   padding: 10px 0 6px;
   z-index: 1;
 }
+.cal {
+  margin-left: auto;
+  font-size: 13px;
+}
 .find input {
+  margin-top: 8px;
   width: 100%;
   font: inherit;
   border: 1px solid var(--line);
