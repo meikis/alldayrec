@@ -33,7 +33,8 @@ defineProps<{ row: Row; hit?: boolean; media?: boolean }>(); // media: played al
     </div>
     <div v-if="row.error" class="text err">识别失败：{{ row.error }}</div>
     <div v-else class="text">
-      <span v-if="row.dictation" class="dict">口述→{{ row.dictation }}</span
+      <span v-if="row.state === 'draft'" class="draft" title="页面开着时的快速转写，几分钟后由定稿替换">初稿</span
+      ><span v-if="row.dictation" class="dict">口述→{{ row.dictation }}</span
       >{{ row.text || "（空）" }}
     </div>
   </div>
@@ -90,6 +91,15 @@ defineProps<{ row: Row; hit?: boolean; media?: boolean }>(); // media: played al
 .err {
   color: var(--err);
   font-size: 13px;
+}
+.draft {
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  padding: 0 4px;
+  margin-right: 6px;
+  white-space: nowrap;
 }
 @media (max-width: 600px) {
   .row {
