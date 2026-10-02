@@ -385,7 +385,8 @@ async def pipeline(device: str):
     seg = Segmenter()
     resume = db.kv(f"finalized_to:{device}")
     st = state["devices"][device] = {"seg": seg, "done_to": dt.datetime.fromisoformat(resume) if resume else None, "audio_end": None,
-                                     "last_speech": None, "refine": None, "conversation": None, "latency": []}
+                                     "last_speech": None, "refine": None, "conversation": None, "latency": [],
+                                     "progress": []}  # (wall time, finalized time) per commit, the last 10 min: the rate
     if resume:
         log.info("%s resuming after the last finalized row at %s", device, resume)
 
@@ -441,6 +442,8 @@ async def pipeline(device: str):
                 db.put_kv(f"open_conversation:{device}", grouper.open, t)
             if hi:
                 st["done_to"] = hi
+                now = time.time()
+                st["progress"] = [p for p in st["progress"] if now - p[0] < 600] + [(now, hi)]
             if rows is not None:
                 await broadcast({"type": "final", "from": lo, "to": iso(hi), "rows": rows})
             for rec in recs:
@@ -546,10 +549,15 @@ async def pipeline(device: str):
 
 
 def device_status(device: str, st: dict) -> dict:
-    end, done, lat = st["audio_end"], st["done_to"], st["latency"]
+    end, done, lat, pr = st["audio_end"], st["done_to"], st["latency"], st["progress"]
+    left, received_to = audio.backlog(device, done)
+    # seconds of audio finalized per second, over the commits of the last 10 min (silence goes fast, speech ~8x)
+    rate = (pr[-1][1] - pr[0][1]).total_seconds() / (pr[-1][0] - pr[0][0]) if len(pr) > 1 and pr[-1][0] > pr[0][0] else None
     return {"device": device, "audio_end": end.isoformat(timespec="seconds") if end else None,
             "behind_s": round((dt.datetime.now() - end).total_seconds(), 1) if end else None,
             "queued": audio.queued(device), "done_to": done.isoformat(timespec="seconds") if done else None,
+            "received_to": received_to.isoformat(timespec="seconds") if received_to else None, "left_s": left,
+            "rate": round(rate, 1) if rate else None, "eta_s": round(left / rate) if rate and rate > 0.1 and left > 30 else None,
             "last_speech": st["last_speech"].isoformat(timespec="seconds") if st["last_speech"] else None,
             "refine": st["refine"], "conversation": st["conversation"],
             "latency_s": sorted(lat)[len(lat) // 2] if lat else None}
@@ -561,7 +569,9 @@ def status() -> dict:
     ds = [device_status(d, st) for d, st in state["devices"].items()]
     top = max(ds, key=lambda d: d["audio_end"] or "", default={"device": None, "audio_end": None, "behind_s": None, "done_to": None,
                                                                  "last_speech": None, "refine": None, "conversation": None, "latency_s": None})
-    return {**top, "queued": sum(d["queued"] for d in ds), "devices": ds, "commit": state["commit"], "chunks": state["chunks"], "engine": ENGINE}
+    summaries = db.conn().execute("SELECT count(*) FROM summaries WHERE status = 'pending'").fetchone()[0]
+    return {**top, "queued": sum(d["queued"] for d in ds), "devices": ds, "summaries_pending": summaries, "summary_queue": summary_q.qsize(),
+            "commit": state["commit"], "chunks": state["chunks"], "engine": ENGINE}
 
 
 async def status_loop():
@@ -604,6 +614,7 @@ DIST = HERE / "static/dist"  # the web app (web/, built by web/deploy.sh)
 @app.get("/record")
 @app.get("/speakers")
 @app.get("/calendar")
+@app.get("/progress")
 @app.get("/p/{name}")
 async def page(conv_id: str = "", name: str = ""):
     return FileResponse(DIST / "index.html", headers=NO_CACHE)

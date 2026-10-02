@@ -51,6 +51,15 @@ def queued(device: str) -> int:
     return db.conn().execute("SELECT count(*) FROM pieces WHERE device = ? AND start_ms > ?", (device, read_to.get(device, -1))).fetchone()[0]
 
 
+def backlog(device: str, after: dt.datetime | None) -> tuple[float, dt.datetime | None]:
+    """Seconds of a device's stored audio after `after` (its finalized time), and where its stored audio ends."""
+    ms = int(after.timestamp() * 1000) if after else 0
+    s, end = db.conn().execute("SELECT sum(min(seconds, (start_ms + seconds * 1000 - ?) / 1000.0)), max(start_ms + seconds * 1000) "
+                               "FROM pieces WHERE device = ? AND start_ms + seconds * 1000 > ?", (ms, device, ms)).fetchone()
+    last = db.conn().execute("SELECT max(start_ms + seconds * 1000) FROM pieces WHERE device = ?", (device,)).fetchone()[0]
+    return round(s or 0.0, 1), dt.datetime.fromtimestamp(last / 1000) if last else None
+
+
 def pending(after: dict[str, dt.datetime | None]) -> list[str]:
     """Devices with audio after their finalized time (`after`, by device; a device not in it has none yet)."""
     return [r[0] for r in db.conn().execute("SELECT device, max(start_ms + seconds * 1000) FROM pieces GROUP BY device")
@@ -121,5 +130,7 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     assert asyncio.run(take(None, 1, "iphone")) == [2], "each device streams on its own"
     assert set(pending({"phone": dt.datetime(2026, 10, 2, 10, 6)})) == {"iphone"}, "phone done, iphone has none finalized"
     assert cut(dt.datetime(2026, 10, 2, 10, 2, 5), dt.datetime(2026, 10, 2, 10, 2, 6), "s16le", "phone") is None
+    left, end = backlog("phone", dt.datetime(2026, 10, 2, 10, 1, 30))
+    assert 89 < left < 91 and end == dt.datetime(2026, 10, 2, 10, 6), (left, end)  # 30 s of 10:01 + all of 10:05
     assert len(cut(dt.datetime(2026, 10, 2, 10, 0, 59), dt.datetime(2026, 10, 2, 10, 1, 1), "s16le")) > 2 * SR * 2
     print("ok")

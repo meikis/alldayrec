@@ -48,6 +48,20 @@ export interface Conversation {
   summary?: Summary | null;
 }
 
+export interface DeviceStatus {
+  device: string;
+  audio_end: string | null;
+  received_to: string | null;
+  done_to: string | null;
+  left_s: number;
+  rate: number | null;
+  eta_s: number | null;
+  queued: number;
+  latency_s: number | null;
+  refine?: { at: string; ms: number; error?: string; backlog_s?: number } | null;
+  conversation?: { start: string; sentences: number } | null;
+}
+
 export interface Status {
   device?: string | null;
   behind_s?: number | null;
@@ -57,6 +71,8 @@ export interface Status {
   conversation?: { start: string; sentences: number } | null;
   engine?: string;
   commit?: string;
+  devices?: DeviceStatus[];
+  summaries_pending?: number;
 }
 
 export interface LogEvent {

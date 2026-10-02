@@ -21,6 +21,11 @@ export const router = createRouter({
       meta: { title: "日历" },
     },
     {
+      path: "/progress",
+      component: () => import("./pages/Progress.vue"),
+      meta: { title: "处理进度" },
+    },
+    {
       path: "/speakers",
       component: () => import("./pages/Speakers.vue"),
       meta: { title: "说话人" },

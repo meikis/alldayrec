@@ -145,7 +145,7 @@ const convLink = (c: Conversation) =>
       <DayPicker :day="day" @pick="go">
         <button v-if="!live" class="back" @click="go(today)">回到今天</button>
       </DayPicker>
-      <div class="status">
+      <RouterLink class="status" to="/progress" title="处理进度">
         <template v-if="!connected">连接断开，重连中…</template>
         <template v-else-if="status">
           <span>{{ status.device || "等待录音" }}</span>
@@ -181,7 +181,7 @@ const convLink = (c: Conversation) =>
           <span>{{ status.engine }} {{ status.commit }}</span>
         </template>
         <template v-else>连接中…</template>
-      </div>
+      </RouterLink>
     </div>
   </AppHeader>
   <main class="live">
