@@ -6,7 +6,7 @@ import subprocess
 
 import numpy as np
 
-from server import SR, Segmenter, clip_turns, final_rows
+from server import CHUNK_S, QUIET_S, SR, Segmenter, clip_turns, final_rows, merge_drafts, next_cut, overlaps
 
 CLIP = os.environ.get("TEST_CLIP", "")  # any recorder file with speech; the test skips the audio part without it
 
@@ -46,8 +46,39 @@ def test_final_rows():
     assert rows[-1]["text"] == "可能被窗口尾截断" and hi == t0 + dt.timedelta(seconds=60), (hi, rows[-1])
 
 
+def test_next_cut():
+    """Final pieces end in known silence: QUIET_S / 2 into a long pause, else at a full piece in its widest late pause."""
+    assert next_cut([(1, 10), (12, 20)], 25, speaking=False) is None, "a short pause and little audio: wait"
+    assert next_cut([(1, 10)], 50, speaking=False) == 10 + QUIET_S / 2, "a long trailing silence ends the piece"
+    assert next_cut([(1, 10)], 50, speaking=True) is None, "speech runs on after the pause: its start is unknown"
+    assert next_cut([(1, 10), (60, 70)], 80, speaking=True) == 10 + QUIET_S / 2, "a long pause inside"
+    assert next_cut([], 40, speaking=False) == QUIET_S / 2, "silence alone: a piece the clock skips"
+    busy = [(i * 10.0, i * 10.0 + 9.4) for i in range(40)]  # 0.6 s pauses only
+    busy[27] = (270.0, 278.0)                                # a 2 s pause at 278-280, inside the last minute
+    assert next_cut(busy, CHUNK_S + 5, speaking=True) == 279.0, "a full piece ends in the widest late pause"
+    assert next_cut([(0, CHUNK_S + 10)], CHUNK_S + 10, speaking=True) == CHUNK_S, "no pause at all: at CHUNK_S"
+    assert next_cut([(1, 10)], 20, speaking=False, force=True) == 20, "the recorder stopped: everything left"
+    assert next_cut([(1, 10)], 20, speaking=True, force=True) == 20, "even mid-speech: the recording ended there"
+
+
+def test_drafts_and_live():
+    """Pages show final rows, and drafts only after their device's finalized time; a live analysis follows its
+    conversation by time overlap, since drafts and final rows start it at slightly different times."""
+    f = [dict(start="10:00:01", source="phone", state="final")]
+    d = [dict(start="10:00:00", source="phone", state="draft"), dict(start="10:05:00", source="phone", state="draft"),
+         dict(start="10:01:00", source="iphone", state="draft")]
+    shown = merge_drafts(f, d, {"phone": "10:04:00", "iphone": None})
+    assert [(r["start"], r["state"]) for r in shown] == [("10:00:01", "final"), ("10:01:00", "draft"), ("10:05:00", "draft")], shown
+    lv = {"start": "10:00:00.5", "upto": "10:20:00"}
+    assert overlaps(lv, {"start": "10:00:01", "end": "10:30:00"}), "the final conversation starts a little later"
+    assert not overlaps(lv, {"start": "10:40:00", "end": "10:50:00"}) and not overlaps(lv, {"start": "09:00", "end": "09:59"})
+
+
 if __name__ == "__main__":
     test_final_rows()
+    test_next_cut()
+    test_drafts_and_live()
+    print("ok: next_cut, drafts, live overlap")
     if not CLIP:
         print("ok: final_rows (set TEST_CLIP for the segmenter check)")
         raise SystemExit

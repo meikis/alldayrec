@@ -3,8 +3,9 @@
     set -a; . .env; set +a; uv run python server.py [--dir <recordings>] [--port 8770]   (variables: .env.example)
 
 Takes the audio pieces the app and the /record page upload, keeps them on disk as a queue and feeds them in time
-order (only as fast as finalization keeps up), finds speech with FireRed Stream-VAD, finalizes sentences with
-speakers every REFINE_EVERY_S, groups them into conversations and summarizes those; all state is in data/live.db.
+order (only as fast as finalization keeps up), finds speech with FireRed Stream-VAD and transcribes in two layers:
+final pieces of up to CHUNK_S cut in pauses (sentences, conversations, summaries), and while a page watches, drafts at
+each pause for the minutes not final yet; all state is in data/live.db.
 """
 import argparse
 import asyncio
@@ -28,7 +29,7 @@ import db
 import live
 import speakers
 import summary
-from conversations import Grouper
+from conversations import IGNORE, Grouper
 
 HERE = Path(__file__).resolve().parent
 def env(name: str) -> str:
@@ -45,9 +46,14 @@ FRAME_LEN, FRAME_SHIFT = 400, 160          # FireRed fbank: 25 ms window, 10 ms 
 MERGE_GAP_S = 0.6                          # VAD utterances closer than this are one
 MAX_UTTERANCE_S = 15.0
 VAD_CUT_S = 0.5                            # a VAD-driven pass ends this far into the pause (< MERGE_GAP_S: still silence)
-REFINE_EVERY_S = int(os.environ.get("REFINE_EVERY_S", "30"))  # finalization cadence
-REFINE_WINDOW_S = int(os.environ.get("REFINE_WINDOW_S", "240"))    # most audio one pass takes (catching up a backlog)
-REFINE_MARGIN_S = 1.0                      # audio re-read before the last finalized time: the engine's sentence starts come a little late
+CHUNK_S = 300.0                            # final layer: most audio in one piece (one engine call; 15 min in one call timed out)
+QUIET_S = 30.0                             # a pause this long ends a final piece early, 15 s into it
+CUT_SEARCH_S = 60.0                        # a full piece ends in the widest pause of its last CUT_SEARCH_S
+REFINE_EVERY_S = int(os.environ.get("REFINE_EVERY_S", "30"))  # draft layer: a pass after this long without a pause
+REFINE_WINDOW_S = int(os.environ.get("REFINE_WINDOW_S", "240"))    # draft layer: most audio one pass takes
+REFINE_MARGIN_S = 1.0                      # audio re-read before the last drafted time: the engine's sentence starts come a little late
+DRAFT_BACK_S = 300                         # a page that opens gets drafts this far back at most (the minutes not final yet)
+LIVE_AUDIO_S = 120                         # a device whose audio came this recently is recording now: drafts and live analysis
 ENGINE = os.environ.get("ENGINE", "volc")  # second-layer engine: volc (seed-asr-2.0 streaming API) | stepfun (file-mode service)
 BUFFER_S = 900                             # audio kept for refinement; pieces are fed only while finalization is within BUFFER_S - 300
 LIVE_EVERY_S = int(os.environ.get("LIVE_EVERY_S", "120"))  # new speech in the open conversation before the live analysis is redone
@@ -267,6 +273,45 @@ def final_rows(segs: list[dict], names: dict, t0: dt.datetime, win_s: float, con
     return at(lo), at(to), out
 
 
+def next_cut(utts: list[tuple[float, float]], end: float, speaking: bool, force: bool = False) -> float | None:
+    """Where the next final piece ends, in seconds after the finalized time, or None to wait for more audio.
+
+    utts: VAD utterances (start, end) after the finalized time, in time order; end: the audio fed so far; speaking:
+    speech runs on at `end` (its start may be unknown). The piece ends QUIET_S / 2 into the first pause of QUIET_S
+    (leading and trailing silence count), else, once CHUNK_S of audio is there, in the middle of the widest pause of its
+    last CUT_SEARCH_S (CHUNK_S itself when there is none). force (the recorder stopped, all audio in): at `end`, even
+    in speech: no more audio comes, and the VAD may never see the end of an utterance the recording cut off.
+    Otherwise every cut lies in known silence or at CHUNK_S, so the engine always has the audio after a sentence.
+    """
+    bounds = [(0.0, 0.0)] + utts
+    gaps = [(b1, a2) for (_, b1), (a2, _) in zip(bounds, bounds[1:])]
+    if not speaking:
+        gaps.append((bounds[-1][1], end))
+    for lo, hi in gaps:
+        if lo + QUIET_S / 2 > CHUNK_S:
+            break
+        if hi - lo >= QUIET_S:
+            return lo + QUIET_S / 2
+    if end >= CHUNK_S:
+        near = [(hi - lo, (lo + hi) / 2) for lo, hi in gaps if CHUNK_S - CUT_SEARCH_S <= (lo + hi) / 2 <= CHUNK_S and hi > lo]
+        return max(near)[1] if near else CHUNK_S
+    if force and end > 0.05:
+        return end
+    return None
+
+
+def overlaps(lv: dict, c: dict) -> bool:
+    """A live analysis (start to its last analyzed row, upto) and a conversation (start to end) share time: drafts and
+    final rows give the same conversation slightly different starts."""
+    return lv["start"] <= c["end"] and lv.get("upto", lv["start"]) >= c["start"]
+
+
+def merge_drafts(finals: list[dict], drafts: list[dict], final_to: dict[str, str | None]) -> list[dict]:
+    """What a page shows: final rows, and per device the drafts after its finalized time (before it, final rows
+    cover the time; the drafts stay in the table for comparing the layers)."""
+    return sorted(finals + [r for r in drafts if r["start"] >= (final_to.get(r.get("source")) or "")], key=lambda r: r["start"])
+
+
 app = FastAPI()
 clients: set[WebSocket] = set()
 state = {"chunks": None, "events": [], "commit": "", "devices": {}, "embed": None, "dias": [],
@@ -403,12 +448,22 @@ async def pipelines():
 
 
 async def pipeline(device: str):
+    """Two layers over one audio stream. The final layer always runs: pieces of up to CHUNK_S cut in pauses go whole
+    to the engine once, become the device's sentences, conversations and summaries. The draft layer runs only while
+    a page watches and the device is recording now: each pause the VAD sees sends the stretch before it at once;
+    its rows go to the drafts table and the page until the final layer covers their time (issue #9)."""
     seg = Segmenter()
     resume = db.kv(f"finalized_to:{device}")
-    st = state["devices"][device] = {"seg": seg, "done_to": dt.datetime.fromisoformat(resume) if resume else None, "audio_end": None,
-                                     "last_speech": None, "refine": None, "conversation": None, "latency": [], "live": None,
+    done0 = dt.datetime.fromisoformat(resume) if resume else None
+    draft0 = db.kv(f"draft_to:{device}")
+    st = state["devices"][device] = {"seg": seg, "done_to": done0, "audio_end": None, "last_speech": None, "refine": None,
+                                     "conversation": None, "latency": [], "final_latency": [], "live": None,
                                      "progress": [],  # (wall time, finalized time) per commit, the last 10 min: the rate
-                                     "utts": [], "vad_to": None, "wake": asyncio.Event()}  # VAD utterances not yet final, the last pause
+                                     "utts": [],  # VAD utterances after the finalized time: where the final layer cuts
+                                     # the draft layer: its own progress, VAD utterances, last pause, wake-up, and its rows not yet covered
+                                     "draft_to": dt.datetime.fromisoformat(draft0) if draft0 else None, "draft_utts": [],
+                                     "vad_to": None, "wake": asyncio.Event(), "draft": None, "drafting": False,
+                                     "drafts": db.drafts(iso(done0) if done0 else "", None, device)}
     if resume:
         log.info("%s resuming after the last finalized row at %s", device, resume)
 
@@ -429,203 +484,213 @@ async def pipeline(device: str):
                 log.exception("%s: segmenter failed on %.1f s at %s", device, len(x) / SR, t.time())
                 continue
             for i, u in enumerate(utts):
-                st["last_speech"] = u[1]  # the refiner skips diarizing stretches with no VAD speech
+                st["last_speech"] = u[1]  # a piece with no VAD speech is not sent to the engine
                 st["utts"].append((u[0], u[1]))
+                st["draft_utts"].append((u[0], u[1]))
                 nxt = utts[i + 1][0] if i + 1 < len(utts) else seg.time_at(seg.pending[0]) if seg.pending else None
                 if nxt is None or (nxt - u[1]).total_seconds() >= MERGE_GAP_S:  # a pause, not a split of a long utterance
                     st["vad_to"] = u[1] + dt.timedelta(seconds=VAD_CUT_S)
                     st["wake"].set()
+            del st["draft_utts"][:-200]
 
-    async def refine_loop():
-        from diarist import Diarist
-        bank = {k: e for k, (_, e) in db.people().items()}
-        embed, dia, grouper = state["embed"], Diarist(dict(np.load(DATA / "owner-redimnet2.npz")), people=bank), Grouper(open_=db.kv(f"open_conversation:{device}"))
-        state["dias"].append(dia)  # a rename on the conversation page teaches every diarist a name
-        if grouper.open:
-            log.info("%s continuing the open conversation from %s", device, grouper.open["start"])
-            note(f"{device}：接着上次打开的对话 {grouper.open['start'][11:19]}", "state")
-        else:
-            note(f"{device}：开始处理", "state")
-        if (lv := db.kv(f"live:{device}")) and "messages" in lv and grouper.open and lv["start"] == grouper.open["start"]:
-            st["live"] = lv
-        live_task, live_failed = None, 0.0
-        done_to = st["done_to"]  # wall time up to which rows are final
+    from diarist import Diarist
+    bank = {k: e for k, (_, e) in db.people().items()}
+    owner = dict(np.load(DATA / "owner-redimnet2.npz"))
+    embed, dia, grouper = state["embed"], Diarist(owner, people=bank), Grouper(open_=db.kv(f"open_conversation:{device}"))
+    ddia = Diarist(owner, people=bank)  # the drafts' own clustering: it never touches the final labels
+    state["dias"] += [dia, ddia]  # a rename on the conversation page teaches every diarist a name
+    live_task, live_failed = None, 0.0
 
-        def record(c: dict) -> dict:
-            cid = "c" + c["start"].replace("-", "").replace(":", "").replace("T", "")[:14]
-            if (other := db.conversation(cid)) and other.get("device") != device:  # two devices starting the same second
-                cid += "-" + re.sub(r"[^\w]", "_", device)
-            return {"id": cid, "start": c["start"], "end": c["end"], "participants": c["participants"],
-                    "sentences": len(c["sentences"]), "speech_s": round(c["speech_s"], 1), "device": device}
+    def open_view() -> dict | None:
+        """The conversation going on now as the pages and the live analysis see it: the open conversation's final rows
+        and the drafts after the finalized time; drafts alone start one before any final row has come."""
+        o, done = grouper.open, st["done_to"]
+        ds = [r for r in st["drafts"] if not done or r["start"] >= iso(done)]
+        if o and ds and (dt.datetime.fromisoformat(ds[0]["start"]) - dt.datetime.fromisoformat(o["end"])).total_seconds() >= grouper.gap:
+            o = None  # the drafts begin after the open conversation's gap: a new one
+        if not o and not ds:
+            return None
+        speech = sum((dt.datetime.fromisoformat(r["end"]) - dt.datetime.fromisoformat(r["start"])).total_seconds()
+                     for r in ds if r.get("speaker") not in IGNORE)
+        rows = (o["sentences"] if o else []) + ds
+        return {"start": o["start"] if o else ds[0]["start"], "end": max(r["end"] for r in rows),
+                "sentences": rows, "speech_s": (o["speech_s"] if o else 0.0) + speech}
 
-        async def commit(closed: list[dict], rows: list[dict] | None = None, lo: str = "", hi: dt.datetime | None = None):
-            """One transaction: the pass's rows replace [lo, hi), closed conversations, the finalized time, the open conversation."""
-            recs = [record(c) for c in closed]
-            with db.tx() as t:
-                if rows is not None:
-                    db.replace_sentences(t, lo, iso(hi), rows, device)
-                for rec in recs:
-                    db.insert_conversation(t, rec)
-                    db.put_summary({"conversation": rec["id"], "status": "pending", "error": None}, t)
-                    if st["live"] and st["live"]["start"] == rec["start"]:
-                        db.put_timeline(rec["id"], st["live"], t)
-                        rec["via_live"] = True  # its agent writes the final summary
-                live_ends = st["live"] and (not grouper.open or grouper.open["start"] != st["live"]["start"])
-                if live_ends:
-                    db.put_kv(f"live:{device}", None, t)
-                if hi:
-                    db.put_kv(f"finalized_to:{device}", iso(hi), t)
-                db.put_kv(f"open_conversation:{device}", grouper.open, t)
-            if hi:
-                st["done_to"] = hi
-                now = time.time()
-                st["progress"] = [p for p in st["progress"] if now - p[0] < 600] + [(now, hi)]
+    def show_open():
+        v = open_view()
+        st["conversation"] = {"start": v["start"], "end": v["end"], "sentences": len(v["sentences"]), "device": device} if v else None
+
+    if (lv := db.kv(f"live:{device}")) and "messages" in lv and (v := open_view()) and overlaps(lv, v):
+        st["live"] = lv
+    show_open()
+    if grouper.open:
+        log.info("%s continuing the open conversation from %s", device, grouper.open["start"])
+        note(f"{device}：接着上次打开的对话 {grouper.open['start'][11:19]}", "state")
+    else:
+        note(f"{device}：开始处理", "state")
+
+    def record(c: dict) -> dict:
+        cid = "c" + c["start"].replace("-", "").replace(":", "").replace("T", "")[:14]
+        if (other := db.conversation(cid)) and other.get("device") != device:  # two devices starting the same second
+            cid += "-" + re.sub(r"[^\w]", "_", device)
+        return {"id": cid, "start": c["start"], "end": c["end"], "participants": c["participants"],
+                "sentences": len(c["sentences"]), "speech_s": round(c["speech_s"], 1), "device": device}
+
+    async def commit(closed: list[dict], rows: list[dict] | None = None, lo: str = "", hi: dt.datetime | None = None):
+        """One transaction: the piece's rows replace [lo, hi), closed conversations (with the live analysis that
+        overlaps one), the finalized time, the open conversation."""
+        recs = [record(c) for c in closed]
+        lv = st["live"]
+        with db.tx() as t:
             if rows is not None:
-                await broadcast({"type": "final", "from": lo, "to": iso(hi), "rows": rows})
+                db.replace_sentences(t, lo, iso(hi), rows, device)
+            attached = False
             for rec in recs:
-                dia.reset()
-                summary_q.put_nowait(rec)
-                log.info("%s conversation closed %s", device, rec)
-                note(f"对话结束：{rec['start'][11:19]} 到 {rec['end'][11:19]}，{rec['sentences']} 句，参与 {'、'.join(rec['participants']) or '—'}", "state")
-                await broadcast({"type": "conversation", **db.conversation(rec["id"])})
-            if not grouper.open:
-                st["conversation"] = None
+                db.insert_conversation(t, rec)
+                db.put_summary({"conversation": rec["id"], "status": "pending", "error": None}, t)
+                if lv and overlaps(lv, rec):
+                    db.put_timeline(rec["id"], lv, t)
+                    rec["via_live"] = True  # its agent writes the final summary
+                    attached = True
+            if hi:
+                db.put_kv(f"finalized_to:{device}", iso(hi), t)
+            db.put_kv(f"open_conversation:{device}", grouper.open, t)
+            if hi:
+                st["drafts"] = [r for r in st["drafts"] if r["start"] >= iso(hi)]  # covered by final rows now
+            # the analysis ends with its conversation, or when nothing is going on any more (a too short one is dropped)
+            live_ends = bool(lv) and (attached or open_view() is None)
             if live_ends:
-                st["live"] = None
-                await broadcast({"type": "live", "device": device, "live": None})
+                db.put_kv(f"live:{device}", None, t)
+        if hi:
+            st["done_to"] = hi
+            now = time.time()
+            st["progress"] = [p for p in st["progress"] if now - p[0] < 600] + [(now, hi)]
+        if rows is not None:
+            await broadcast({"type": "final", "device": device, "from": lo, "to": iso(hi), "rows": rows})
+        for rec in recs:
+            dia.reset()
+            ddia.reset()
+            summary_q.put_nowait(rec)
+            log.info("%s conversation closed %s", device, rec)
+            note(f"对话结束：{rec['start'][11:19]} 到 {rec['end'][11:19]}，{rec['sentences']} 句，参与 {'、'.join(rec['participants']) or '—'}", "state")
+            await broadcast({"type": "conversation", **db.conversation(rec["id"])})
+        show_open()
+        if live_ends:
+            st["live"] = None
+            await broadcast({"type": "live", "device": device, "live": None})
 
-        def live_due() -> bool:
-            """A page is in front, the open conversation has a minute of speech, this is the present and not a backlog,
-            and LIVE_EVERY_S of new speech came (or any, when a page just came to the front)."""
-            o, lv, now = grouper.open, st["live"], time.time()
-            if not o or o["speech_s"] < summary.MIN_SPEECH_S or now > state["watch_until"] or now - live_failed < 120:
-                return False
-            if not st["done_to"] or (dt.datetime.now() - st["done_to"]).total_seconds() > 300:
-                return False
-            if not lv:
-                return True
-            grown = o["speech_s"] - lv["speech_s"]
-            return grown >= LIVE_EVERY_S or (grown > 0 and state["wake_at"] > lv["wall"])
+    def live_due() -> bool:
+        """A page is in front, the conversation going on has a minute of speech, this is the present and not a backlog,
+        and LIVE_EVERY_S of new speech came (or any, when a page just came to the front)."""
+        o, lv, now = open_view(), st["live"], time.time()
+        if not o or o["speech_s"] < summary.MIN_SPEECH_S or now > state["watch_until"] or now - live_failed < 120:
+            return False
+        if not st["audio_end"] or (dt.datetime.now() - st["audio_end"]).total_seconds() > LIVE_AUDIO_S:
+            return False
+        if not lv or not overlaps(lv, o):
+            return True
+        grown = o["speech_s"] - lv["speech_s"]
+        return grown >= LIVE_EVERY_S or (grown > 0 and state["wake_at"] > lv["wall"])
 
-        async def live_update():
-            nonlocal live_failed
-            o = grouper.open
-            lv = st["live"] or live.new(o["start"], device, db.conversations(o["start"][:10], o["start"]))
-            rows, speech = [r for r in o["sentences"] if r.get("text")], o["speech_s"]
-            try:
-                res = await asyncio.to_thread(live.analyze, lv, rows)
-            except Exception as e:
-                live_failed = time.time()
-                log.warning("%s live analysis failed: %r", device, e)
-                note(f"{device}：实时分析失败：{str(e)[:120]}，2 分钟后再试", "error")
-                return
-            res.update(speech_s=speech, wall=time.time(), at=dt.datetime.now().isoformat(timespec="seconds"),
-                       upto=rows[-1]["start"], sentences=len(rows))
-            if grouper.open and grouper.open["start"] == res["start"]:
-                st["live"] = res
-                db.put_kv(f"live:{device}", res)
-                await broadcast({"type": "live", "device": device, "live": live.public(res)})
-            elif r := db.conn().execute("SELECT id FROM conversations WHERE start = ? AND device = ?", (res["start"], device)).fetchone():
-                db.put_timeline(r[0], res)  # it closed while the call ran
+    async def live_update():
+        nonlocal live_failed
+        o = open_view()
+        lv = st["live"] if st["live"] and overlaps(st["live"], o) else live.new(o["start"], device, db.conversations(o["start"][:10], o["start"]))
+        rows, speech = [r for r in o["sentences"] if r.get("text")], o["speech_s"]
+        try:
+            res = await asyncio.to_thread(live.analyze, lv, rows)
+        except Exception as e:
+            live_failed = time.time()
+            log.warning("%s live analysis failed: %r", device, e)
+            note(f"{device}：实时分析失败：{str(e)[:120]}，2 分钟后再试", "error")
+            return
+        res.update(speech_s=speech, wall=time.time(), at=dt.datetime.now().isoformat(timespec="seconds"),
+                   upto=rows[-1]["start"], sentences=len(rows))
+        if (v := open_view()) and overlaps(res, v):
+            st["live"] = res
+            db.put_kv(f"live:{device}", res)
+            await broadcast({"type": "live", "device": device, "live": live.public(res)})
+        elif r := db.conn().execute("SELECT id FROM conversations WHERE device = ? AND start <= ? AND end >= ? ORDER BY start DESC",
+                                    (device, res["upto"], res["start"])).fetchone():
+            db.put_timeline(r[0], res)  # it closed while the call ran
 
-        async def refine_pass(end: dt.datetime | None = None) -> bool:
-            """One pass; True when a backlog remains. Timer-driven (end None): [done_to - margin, + window], rows near its
-            end left open. VAD-driven: from 1 s before the first unfinished utterance to `end`, a point in the pause after
-            an utterance, every row final."""
-            nonlocal done_to
-            if not seg.anchors:
-                return False  # no audio yet
-            t_run = time.perf_counter()
-            if end is None:
-                # from where the last pass stopped, or from the oldest buffered audio
-                t0, x = seg.window(REFINE_WINDOW_S, done_to - dt.timedelta(seconds=REFINE_MARGIN_S) if done_to else seg.time_at(seg.audio_base))
-            else:
-                st["utts"] = [u for u in st["utts"] if done_to is None or u[1] > done_to]
-                if not st["utts"]:
-                    return False
-                start = st["utts"][0][0] - dt.timedelta(seconds=1)
-                if done_to:
-                    start = max(start, done_to - dt.timedelta(seconds=REFINE_MARGIN_S))
-                t0, x = seg.window(min(REFINE_WINDOW_S, (seg.sample_at(end) - seg.sample_at(start)) / SR), start)
-            a0 = seg.sample_at(t0)
-            at = lambda s: seg.time_at(a0 + int(s * SR))  # the window may span a session boundary, where the clock jumps
-            # a first timer pass may start mid-sentence: skip its edge; later passes start at a sentence the last one left open
-            since = (EDGE_S if end is None else 0.0) if done_to is None else max(0.0, (seg.sample_at(done_to) - a0) / SR)
-            # a VAD window cut short of its pause (catching up a backlog) may end mid-sentence like a timer one
-            edge = 0.0 if end is not None and len(x) / SR < REFINE_WINDOW_S else EDGE_S
-            if len(x) / SR - since < (0.3 if end is not None else EDGE_S + 10):
-                return False
-            hi = at(len(x) / SR - EDGE_S)
-            if end is None and not seg.speaking() and (st["last_speech"] is None or st["last_speech"] <= (done_to or t0)):
-                # silence: nothing to diarize, but the clock must advance so a conversation can close on time
-                # (speech still going on at the end of the fed audio is not silence: a replayed 10-01 14:43 lost 90 s that way)
-                done_to = hi
-                await commit(grouper.advance(hi), hi=hi)
-                return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
-            was_open = bool(grouper.open)
-            m0 = dia.mark()
-            try:
-                segs = clip_turns(await asyncio.to_thread(engine_segs, x), since)
-                engine = segs[0]["engine"] if segs else None
-                marks = await asyncio.to_thread(label_sentences, dia, embed, segs, x)
-            except Exception as e:
-                dia.rollback(m0)
-                log.warning("%s refine failed: %r", device, e)
-                note(f"{device}：这一轮引擎调用失败：{str(e)[:120]}，下一轮重试", "error")
-                st["refine"] = {"error": str(e)[:200]}
-                return False
-            labels = {g["speaker"]: g["speaker"] for g in segs}
-            by_label = {}
-            for g in segs:  # final_rows keys confidence by label
-                by_label[g["speaker"]] = max(by_label.get(g["speaker"], 0.0), g["confidence"])
-            lo, hi, rows = final_rows(segs, labels, t0, len(x) / SR, by_label, since, at, edge)
-            kept = [m for g, m in zip(segs, marks) if m and at(g["start_ms"] / 1000) < hi]  # sentences left open come back next pass
-            dia.rollback(kept[-1] if kept else m0)
-            with open(DATA / f"{lo.date()}.passes.jsonl", "a") as f:  # every pass's raw engine output, for tracing lost rows
-                f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"), "t0": iso(t0), "since": since, "from": iso(lo),
-                                    "to": iso(hi), "segs": segs},  # each sentence carries engine_speaker and its cluster's owner score (confidence)
-                                   ensure_ascii=False) + "\n")
-            shown = dt.datetime.now()
-            for r in rows:  # end of speech -> on the page: the latency the person sees
-                r["source"], r["engine"], r["shown_at"] = device, engine, iso(shown)
-                st["latency"].append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
-            del st["latency"][:-50]
-            done_to = hi
-            closed = [c for r in rows for c in grouper.sentence(r)]
-            closed += grouper.advance(hi)
-            await commit(closed, rows, iso(lo), hi)
-            if grouper.open:
-                o = grouper.open
-                st["conversation"] = {"start": o["start"], "end": o["end"], "sentences": len(o["sentences"]), "device": device}
-            st["refine"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
-                               "speakers": by_label, "changed": len(rows),
-                               "backlog_s": round((seg.time_at(seg.samples) - hi).total_seconds()), "by": "timer" if end is None else "vad"}
-            log.info("refine %s: %s", device, st["refine"])
-            note(f"定稿一轮：{device} 送 {len(x) / SR:.0f} s（含 {since:.0f} s 上下文）给 {engine or ENGINE}，"
-                 f"{st['refine']['ms'] / 1000:.1f} s，{len(rows)} 句，定稿到 {hi.strftime('%H:%M:%S')}，积压 {st['refine']['backlog_s']} s")
-            if grouper.open and not was_open:
-                note(f"{device}：对话开始 {grouper.open['start'][11:19]}", "state")
-            if end is not None:  # pauses that came during the pass have set wake again
-                return len(x) / SR >= REFINE_WINDOW_S
-            return st["refine"]["backlog_s"] > REFINE_WINDOW_S - REFINE_MARGIN_S
+    def maybe_live():
+        nonlocal live_task
+        if (live_task is None or live_task.done()) and live_due():
+            live_task = asyncio.create_task(live_update(), name=f"live:{device}")
 
+    async def final_piece() -> bool:
+        """Cut and finalize the next piece when there is one; True when a piece was done (look for the next at once)."""
+        if not seg.anchors:
+            return False
+        done = st["done_to"]
+        base = done or seg.time_at(seg.audio_base)
+        st["utts"] = [u for u in st["utts"] if u[1] > base]
+        rel = lambda t: (t - base).total_seconds()
+        end_at = db.kv(f"end_at:{device}")
+        force = bool(end_at) and not audio.queued(device)  # the recorder stopped and all its audio is in: no more is coming
+        known = st["utts"] + ([(seg.time_at(seg.pending[0]), seg.time_at(seg.pending[1]))] if seg.pending else [])  # one waiting for a merge
+        cut = next_cut([(max(0.0, rel(a)), rel(b)) for a, b in known], rel(seg.time_at(seg.samples)), seg.speaking(), force)
+        if cut is None:
+            return False
+        a0 = max(seg.audio_base, seg.sample_at(base))
+        b0 = min(seg.samples, seg.sample_at(base + dt.timedelta(seconds=cut)))
+        if b0 <= a0:
+            return False
+        x = seg.audio[a0 - seg.audio_base:b0 - seg.audio_base]
+        at = lambda s: seg.time_at(a0 + int(s * SR))  # the piece may span a session boundary, where the clock jumps
+        hi = at(len(x) / SR)
+        if not any(rel(u[0]) < cut for u in known) and not seg.speaking():  # no speech: nothing to send, the clock still advances
+            await commit(grouper.advance(hi), [], iso(base), hi)  # no rows: pages still drop their drafts of this time
+            return True
+        t_run = time.perf_counter()
+        was_open = bool(grouper.open)
+        m0 = dia.mark()
+        try:
+            segs = await asyncio.to_thread(engine_segs, x)
+            engine = segs[0]["engine"] if segs else None
+            await asyncio.to_thread(label_sentences, dia, embed, segs, x)
+        except Exception as e:
+            dia.rollback(m0)
+            log.warning("%s final piece failed: %r", device, e)
+            note(f"{device}：定稿引擎调用失败：{str(e)[:120]}，稍后重试这一块", "error")
+            st["refine"] = {"error": str(e)[:200]}
+            await asyncio.sleep(10)
+            return False
+        by_label = {}
+        for g in segs:  # final_rows keys confidence by label
+            by_label[g["speaker"]] = max(by_label.get(g["speaker"], 0.0), g["confidence"])
+        lo, hi, rows = final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, base, len(x) / SR, by_label, 0.0, at, 0.0)
+        with open(DATA / f"{lo.date()}.passes.jsonl", "a") as f:  # every piece's raw engine output, for tracing lost rows
+            f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"), "layer": "final", "t0": iso(base), "since": 0.0,
+                                "from": iso(lo), "to": iso(hi), "segs": segs}, ensure_ascii=False) + "\n")
+        shown = dt.datetime.now()
+        for r in rows:
+            r["source"], r["engine"], r["shown_at"] = device, engine, iso(shown)
+            st["final_latency"].append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
+        del st["final_latency"][:-50]
+        closed = [c for r in rows for c in grouper.sentence(r)]
+        closed += grouper.advance(hi)
+        await commit(closed, rows, iso(lo), hi)
+        st["refine"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
+                        "speakers": by_label, "changed": len(rows), "piece_s": round(len(x) / SR),
+                        "backlog_s": round((seg.time_at(seg.samples) - hi).total_seconds())}
+        log.info("final %s: %s", device, st["refine"])
+        note(f"定稿一块：{device} {lo.strftime('%H:%M:%S')}–{hi.strftime('%H:%M:%S')}（{len(x) / SR:.0f} s）给 {engine or ENGINE}，"
+             f"{st['refine']['ms'] / 1000:.1f} s，{len(rows)} 句，积压 {st['refine']['backlog_s']} s")
+        if grouper.open and not was_open:
+            note(f"{device}：对话开始 {grouper.open['start'][11:19]}", "state")
+        return True
+
+    async def final_loop():
         while True:
-            try:  # a pause after speech finalizes at once; the timer still runs for silence and pause-less speech
-                await asyncio.wait_for(st["wake"].wait(), REFINE_EVERY_S)
-                by_vad = True
-            except asyncio.TimeoutError:
-                by_vad = False
-            st["wake"].clear()
-            if by_vad:
-                while st["vad_to"] and (done_to is None or st["vad_to"] > done_to) and await refine_pass(st["vad_to"]):
-                    pass
-            else:
-                while await refine_pass():  # silence also advances, so conversations close on time
-                    pass
+            while await final_piece():
+                maybe_live()
             closed = []
             end_at = db.kv(f"end_at:{device}")
-            if end_at and not audio.queued(device):  # the recorder stopped and its last audio is processed
-                closed += grouper.end(dt.datetime.fromisoformat(end_at))
+            final_all = not seg.anchors or (st["done_to"] and (seg.time_at(seg.samples) - st["done_to"]).total_seconds() < 0.5)
+            if end_at and not audio.queued(device) and final_all:
+                closed += grouper.end(dt.datetime.fromisoformat(end_at))  # the recorder stopped and its last audio is final
                 db.put_kv(f"end_at:{device}", None)
             idle = grouper.tick()  # the safety net: nothing at all for IDLE_S (the recorder died without an end)
             if idle:
@@ -633,8 +698,106 @@ async def pipeline(device: str):
             closed += idle
             if closed:
                 await commit(closed)
-            if (live_task is None or live_task.done()) and live_due():
-                live_task = asyncio.create_task(live_update(), name=f"live:{device}")
+            maybe_live()
+            await asyncio.sleep(2)
+
+    def drafting() -> bool:
+        """A page watches and this device is recording now (not catching up a backlog)."""
+        return (time.time() < state["watch_until"] and bool(seg.anchors) and st["audio_end"] is not None
+                and (dt.datetime.now() - st["audio_end"]).total_seconds() < LIVE_AUDIO_S)
+
+    async def draft_pass(end: dt.datetime | None = None) -> bool:
+        """One draft pass; True when more remains. Timer (end None): [draft_to - margin, + window], rows near its end
+        left open; VAD: from 1 s before the first undrafted utterance to `end`, a point in the pause after one."""
+        dto = st["draft_to"]
+        t_run = time.perf_counter()
+        if end is None:
+            t0, x = seg.window(REFINE_WINDOW_S, dto - dt.timedelta(seconds=REFINE_MARGIN_S))
+        else:
+            us = st["draft_utts"] = [u for u in st["draft_utts"] if u[1] > dto]
+            if not us:
+                return False
+            start = max(us[0][0] - dt.timedelta(seconds=1), dto - dt.timedelta(seconds=REFINE_MARGIN_S))
+            t0, x = seg.window(min(REFINE_WINDOW_S, (seg.sample_at(end) - seg.sample_at(start)) / SR), start)
+        a0 = seg.sample_at(t0)
+        at = lambda s: seg.time_at(a0 + int(s * SR))
+        since = max(0.0, (seg.sample_at(dto) - a0) / SR)
+        edge = 0.0 if end is not None and len(x) / SR < REFINE_WINDOW_S else EDGE_S  # a window cut short of its pause may end mid-sentence
+        if len(x) / SR - since < (0.3 if end is not None else EDGE_S + 10):
+            return False
+        hi = at(len(x) / SR - EDGE_S)
+        if end is None and not seg.speaking() and (st["last_speech"] is None or st["last_speech"] <= dto):
+            st["draft_to"] = hi  # silence: nothing to send
+            db.put_kv(f"draft_to:{device}", iso(hi))
+            return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
+        m0 = ddia.mark()
+        try:
+            segs = clip_turns(await asyncio.to_thread(engine_segs, x), since)
+            engine = segs[0]["engine"] if segs else None
+            marks = await asyncio.to_thread(label_sentences, ddia, embed, segs, x)
+        except Exception as e:
+            ddia.rollback(m0)
+            log.warning("%s draft pass failed: %r", device, e)
+            st["draft"] = {"error": str(e)[:200]}
+            return False
+        by_label = {}
+        for g in segs:
+            by_label[g["speaker"]] = max(by_label.get(g["speaker"], 0.0), g["confidence"])
+        lo, hi, rows = final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, t0, len(x) / SR, by_label, since, at, edge)
+        kept = [m for g, m in zip(segs, marks) if m and at(g["start_ms"] / 1000) < hi]  # sentences left open come back next pass
+        ddia.rollback(kept[-1] if kept else m0)
+        with open(DATA / f"{lo.date()}.passes.jsonl", "a") as f:
+            f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"), "layer": "draft", "t0": iso(t0), "since": since,
+                                "from": iso(lo), "to": iso(hi), "segs": segs}, ensure_ascii=False) + "\n")
+        shown = dt.datetime.now()
+        for r in rows:
+            r["id"], r["state"] = "d" + r["id"][1:], "draft"
+            r["source"], r["engine"], r["shown_at"] = device, engine, iso(shown)
+            st["latency"].append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
+        del st["latency"][:-50]
+        with db.tx() as t:
+            db.insert_drafts(t, rows)
+            db.put_kv(f"draft_to:{device}", iso(hi), t)
+        st["draft_to"] = hi
+        done = st["done_to"]
+        st["drafts"] += [r for r in rows if not done or r["start"] >= iso(done)]
+        if rows:
+            await broadcast({"type": "draft", "device": device, "rows": rows})
+        show_open()
+        st["draft"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
+                       "changed": len(rows), "to": iso(hi)}
+        log.info("draft %s: %s", device, st["draft"])
+        maybe_live()
+        if end is not None:  # pauses that came during the pass have set wake again
+            return len(x) / SR >= REFINE_WINDOW_S
+        return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
+
+    async def draft_loop():
+        while True:
+            try:  # a pause after speech drafts at once; the timer covers pause-less speech
+                await asyncio.wait_for(st["wake"].wait(), REFINE_EVERY_S)
+                by_vad = True
+            except asyncio.TimeoutError:
+                by_vad = False
+            st["wake"].clear()
+            if not drafting():
+                st["drafting"] = False
+                continue
+            # from where drafts or final rows stop, but no further back than DRAFT_BACK_S: a page that opens sees the
+            # minutes not final yet, not a backlog
+            floor = seg.time_at(seg.samples) - dt.timedelta(seconds=DRAFT_BACK_S)
+            st["draft_to"] = max(t for t in (st["draft_to"], st["done_to"], floor, seg.time_at(seg.audio_base)) if t)
+            if not st["drafting"]:
+                st["drafting"] = True
+                note(f"{device}：页面在看，开始出初稿（从 {st['draft_to'].strftime('%H:%M:%S')} 起）", "state")
+                while await draft_pass():  # what came before the page opened, in windows
+                    pass
+            if by_vad:
+                while st["vad_to"] and st["vad_to"] > st["draft_to"] and await draft_pass(st["vad_to"]):
+                    pass
+            else:
+                while await draft_pass():
+                    pass
 
     def watched(coro, name):
         """A task whose death is logged: an unhandled exception would otherwise stop the pipeline silently."""
@@ -644,11 +807,13 @@ async def pipeline(device: str):
         return t
 
     watched(feed(), f"feed:{device}")
-    await refine_loop()
+    watched(draft_loop(), f"draft:{device}")
+    await final_loop()
 
 
 def device_status(device: str, st: dict) -> dict:
-    end, done, lat, pr = st["audio_end"], st["done_to"], st["latency"], st["progress"]
+    end, done, pr = st["audio_end"], st["done_to"], st["progress"]
+    lat = st["latency"] if st["drafting"] else st["final_latency"]  # what the page shows first: drafts while it watches
     left, received_to = audio.backlog(device, done)
     # seconds of audio finalized per second, over the commits of the last 10 min (silence goes fast, speech ~8x)
     rate = (pr[-1][1] - pr[0][1]).total_seconds() / (pr[-1][0] - pr[0][0]) if len(pr) > 1 and pr[-1][0] > pr[0][0] else None
@@ -658,7 +823,8 @@ def device_status(device: str, st: dict) -> dict:
             "received_to": received_to.isoformat(timespec="seconds") if received_to else None, "left_s": left,
             "rate": round(rate, 1) if rate else None, "eta_s": round(left / rate) if rate and rate > 0.1 and left > 30 else None,
             "last_speech": st["last_speech"].isoformat(timespec="seconds") if st["last_speech"] else None,
-            "refine": st["refine"], "conversation": st["conversation"],
+            "refine": st["refine"], "conversation": st["conversation"], "drafting": st["drafting"], "draft": st["draft"],
+            "draft_to": st["draft_to"].isoformat(timespec="seconds") if st["draft_to"] else None,
             "latency_s": sorted(lat)[len(lat) // 2] if lat else None}
 
 
@@ -780,7 +946,9 @@ async def status_now():
 @app.get("/api/sentences")
 async def sentences(date: str | None = None):
     day = dt.date.fromisoformat(date) if date else dt.date.today()
-    return db.sentences(day.isoformat(), (day + dt.timedelta(days=1)).isoformat())
+    lo, hi = day.isoformat(), (day + dt.timedelta(days=1)).isoformat()
+    drafts = db.drafts(lo, hi)
+    return merge_drafts(db.sentences(lo, hi), drafts, {d: db.kv(f"finalized_to:{d}") for d in {r.get("source") for r in drafts}})
 
 
 @app.get("/api/conversations")

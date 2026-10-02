@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS sentences (       -- final rows; a finalization pass 
     id TEXT NOT NULL, start TEXT NOT NULL, end TEXT NOT NULL, speaker TEXT, speaker_confidence REAL, text TEXT,
     source TEXT, engine TEXT, shown_at TEXT, dictation TEXT);  -- dictation: the app dictated into (history rows)
 CREATE INDEX IF NOT EXISTS sentences_start ON sentences(start);
+CREATE TABLE IF NOT EXISTS drafts (          -- the draft layer's rows (only while a page watches); kept after final rows cover their time
+    id TEXT NOT NULL, start TEXT NOT NULL, end TEXT NOT NULL, speaker TEXT, speaker_confidence REAL, text TEXT,
+    source TEXT, engine TEXT, shown_at TEXT);
+CREATE INDEX IF NOT EXISTS drafts_start ON drafts(start);
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, start TEXT NOT NULL, end TEXT NOT NULL, participants TEXT NOT NULL, speech_s REAL,
     sentences INTEGER NOT NULL, kind TEXT, source TEXT, dictation_share REAL, device TEXT);  -- device: its sentences' source
@@ -32,7 +36,7 @@ CREATE TABLE IF NOT EXISTS pieces (           -- uploaded audio pieces, the inge
 CREATE INDEX IF NOT EXISTS pieces_device ON pieces(device, start_ms);  -- each device's stream and backlog
 CREATE TABLE IF NOT EXISTS timelines (conversation TEXT PRIMARY KEY, body TEXT NOT NULL);  -- the live analysis as it stood at the close
 CREATE TABLE IF NOT EXISTS feedback (conv TEXT NOT NULL, at TEXT NOT NULL, text TEXT NOT NULL);  -- what the owner says a summary got wrong, read back in batches
-CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);  -- per device: finalized_to:<d>, open_conversation:<d>, end_at:<d>, live:<d>
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);  -- per device: finalized_to:<d>, draft_to:<d>, open_conversation:<d>, end_at:<d>, live:<d>
 """
 
 PATH: Path | None = None
@@ -102,6 +106,21 @@ def replace_sentences(c: sqlite3.Connection, lo: str, hi: str, rows: list[dict],
 def insert_sentences(c: sqlite3.Connection, rows: list[dict]):
     c.executemany(f"INSERT INTO sentences ({','.join(S_COLS)}) VALUES ({','.join('?' * len(S_COLS))})",
                   [tuple(r.get(k) for k in S_COLS) for r in rows])
+
+
+D_COLS = S_COLS[:-1]  # a draft has no dictation
+
+
+def drafts(lo: str, hi: str | None = None, source: str | None = None) -> list[dict]:
+    """Draft rows starting in [lo, hi) (no upper bound when hi is None), of one source when given."""
+    return [{k: r[k] for k in D_COLS if r[k] is not None} | {"state": "draft"}
+            for r in conn().execute("SELECT * FROM drafts WHERE start >= ? AND (? IS NULL OR start < ?) AND (? IS NULL OR source = ?) ORDER BY start",
+                                    (lo, hi, hi, source, source))]
+
+
+def insert_drafts(c: sqlite3.Connection, rows: list[dict]):
+    c.executemany(f"INSERT INTO drafts ({','.join(D_COLS)}) VALUES ({','.join('?' * len(D_COLS))})",
+                  [tuple(r.get(k) for k in D_COLS) for r in rows])
 
 
 def has_text(lo: str, hi: str, q: str, source: str | None = None) -> bool:

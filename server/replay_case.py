@@ -9,6 +9,8 @@ Candidates
   volc-window    same windows through Volcengine seed-asr-2.0 (streaming API, speaker ids), cached in work/volc/
   volc-sentence  the live pipeline since 09-29 21:40: no context, Volcengine sentences, conversation clustering (diarist)
   volc-stream    one Volcengine two-pass streaming session per stretch of VAD speech, definite sentences, diarist labels
+  final-pieces   the live final layer since issue #9: server.next_cut pieces (<= CHUNK_S, cut in pauses) as the
+                 audio arrives in 5 s pieces, each piece once to Volcengine, diarist labels
   cloud-window   every 30 s, last 240 s to StepFun file diarization (via the file-mode ASR service), cluster mean vs owner,
                  final_rows replace the window (the live second layer as designed)
   local-window   same cadence, diarization by sherpa-onnx pyannote-segmentation-3.0 + CAM++ clustering on the Mac,
@@ -404,6 +406,33 @@ def rows_streamed(case: Case, dia, embed) -> list[dict]:
     return rows
 
 
+def rows_final_pieces(case: Case, dia, embed) -> list[dict]:
+    """The final layer as the server runs it: audio arrives PIECE_S at a time; whenever server.next_cut finds a cut, the
+    piece from the finalized time to it goes whole to the engine and every sentence of it is final."""
+    from server import MERGE_GAP_S, label_sentences, next_cut
+    total, utts, piece = len(case.x) / SR, vad_utterances(case), 5.0
+    rows, base, end = [], 0.0, piece
+    while base < total - 0.05:
+        end = min(end, total)
+        known = [(max(0.0, a - base), b - base) for a, b in utts if b > base and a < end]
+        speaking = any(a < end < b + MERGE_GAP_S for a, b in utts)  # in speech, or within the merge gap after it
+        cut = next_cut([(a, min(b, end - base)) for a, b in known], end - base, speaking, force=end >= total)
+        if cut is None and end >= total:
+            cut = total - base  # the recording ends mid-speech: the rest is one piece
+        if cut is None:
+            end += piece
+            continue
+        a, e = round(base, 1), round(base + cut, 1)
+        if e <= a:
+            break
+        if any(u < cut for u, _ in known):
+            segs = case.volc_window(a, e)
+            label_sentences(dia, embed, segs, case.x[int(a * SR):int(e * SR)])
+            rows += final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, EPOCH + dt.timedelta(seconds=a), e - a, since=0.0, edge=0.0)[2]
+        base = e
+    return rows
+
+
 def rows_from_windows(case: Case, spk: Speakers, diar, name: str, need_asr: bool, utts=None):
     """The live second layer: windows of REFINE_WINDOW_S every REFINE_EVERY_S, later windows replace earlier rows."""
     total = len(case.x) / SR
@@ -521,6 +550,9 @@ def run(case: Case, name: str) -> list[dict]:
     if name == "volc-sentence":
         from diarist import Diarist, load_embedder
         return rows_per_sentence(case, Diarist(dict(np.load(os.environ.get("OWNER_BANK", os.environ["LIVE_DATA"] + "/owner-redimnet2.npz")))), load_embedder())
+    if name == "final-pieces":
+        from diarist import Diarist, load_embedder
+        return rows_final_pieces(case, Diarist(dict(np.load(os.environ.get("OWNER_BANK", os.environ["LIVE_DATA"] + "/owner-redimnet2.npz")))), load_embedder())
     if name == "volc-stream":
         from diarist import Diarist, load_embedder
         return rows_streamed(case, Diarist(dict(np.load(os.environ.get("OWNER_BANK", os.environ["LIVE_DATA"] + "/owner-redimnet2.npz")))), load_embedder())
