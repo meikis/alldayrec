@@ -27,6 +27,9 @@ enum Recorder {
         foregroundApp = a["on"] as? Bool ?? true
         slicer?.foreground = foregroundApp
         result(nil)
+      case "slices":  // new lengths from the server: the running slicer cuts its next piece with them
+        slicer?.setSlices(fg: a["foreground"] as? Int ?? 1, bg: a["background"] as? Int ?? 20)
+        result(nil)
       case "status": result(status())
       case "upload": if Uploader.pending(dir) > 0 { upload() }; result(nil)
       default: result(FlutterMethodNotImplemented)
@@ -48,7 +51,7 @@ enum Recorder {
     if slicer != nil { return nil }
     for k in ["server", "token", "device"] { defaults.set(a[k] as? String ?? "", forKey: k) }
     defaults.set(a["archive"] as? Bool ?? true, forKey: "archive")
-    let s = Slicer(dir: dir, fgS: a["foreground"] as? Int ?? 5, bgS: a["background"] as? Int ?? 20)
+    let s = Slicer(dir: dir, fgS: a["foreground"] as? Int ?? 1, bgS: a["background"] as? Int ?? 20)
     s.foreground = foregroundApp
     do { try s.start() } catch { return "\(error)" }
     slicer = s
@@ -131,7 +134,8 @@ final class Slicer {
   var foreground = true
   private(set) var files = 0
   private(set) var error: String?
-  private let dir: URL, fgS: Int, bgS: Int
+  private let dir: URL
+  private var fgS: Int, bgS: Int  // set on q
   private let engine = AVAudioEngine()
   private let out = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
   private let q = DispatchQueue(label: "slicer")  // owns everything below
@@ -144,6 +148,8 @@ final class Slicer {
   init(dir: URL, fgS: Int, bgS: Int) { self.dir = dir; self.fgS = fgS; self.bgS = bgS }
 
   func sliceS() -> Int { foreground ? fgS : bgS }
+
+  func setSlices(fg: Int, bg: Int) { q.async { self.fgS = fg; self.bgS = bg } }
 
   func start() throws {
     let session = AVAudioSession.sharedInstance()

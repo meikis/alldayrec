@@ -54,6 +54,9 @@ REFINE_WINDOW_S = int(os.environ.get("REFINE_WINDOW_S", "240"))    # draft layer
 REFINE_MARGIN_S = 1.0                      # audio re-read before the last drafted time: the engine's sentence starts come a little late
 DRAFT_BACK_S = 300                         # a page that opens gets drafts this far back at most (the minutes not final yet)
 RELABEL_GROUPS = True                      # relabel at a close: the engine's speaker ids in a piece as units, split when their voices disagree
+SLICE_FOREGROUND_S = int(os.environ.get("SLICE_FOREGROUND_S", "1"))   # the apps' piece seconds with the app in front: 1 s
+SLICE_BACKGROUND_S = int(os.environ.get("SLICE_BACKGROUND_S", "20"))  # ... in the background             (drafts ~8 s vs ~13 s at 5 s)
+SLICE_SCREEN_OFF_S = int(os.environ.get("SLICE_SCREEN_OFF_S", "60"))  # ... screen off (Android)
 LIVE_AUDIO_S = 120                         # a device whose audio came this recently is recording now: drafts and live analysis
 ENGINE = os.environ.get("ENGINE", "volc")  # second-layer engine: volc (seed-asr-2.0 streaming API) | stepfun (file-mode service)
 BUFFER_S = 900                             # audio kept for refinement; pieces are fed only while finalization is within BUFFER_S - 300
@@ -991,6 +994,13 @@ async def chunk_end(device: str, t: int):
     log.info("%s stopped recording at %s", device, end.time())
     note(f"{device} 停止录音（{end.strftime('%H:%M:%S')}），处理完剩余音频后关闭对话")
     return {"ok": True}
+
+
+@app.get("/api/client-config")
+async def client_config():
+    """What the apps ask on start and while recording: piece lengths per app state (the server changes them without
+    a new build; short pieces in front make drafts quick, long ones in the background save requests)."""
+    return {"slice": {"foreground": SLICE_FOREGROUND_S, "background": SLICE_BACKGROUND_S, "screenOff": SLICE_SCREEN_OFF_S}}
 
 
 @app.get("/api/events")

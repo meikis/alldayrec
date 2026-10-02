@@ -39,6 +39,12 @@ class MainActivity : FlutterActivity() {
                     RecorderService.slicer?.foreground = on
                     result.success(null)
                 }
+                "slices" -> {  // new lengths from the server: the running slicer cuts its next piece with them, a restart reads them
+                    val fg = call.argument<Int>("foreground")!!; val bg = call.argument<Int>("background")!!; val off = call.argument<Int>("screenOff")!!
+                    getSharedPreferences("recorder", MODE_PRIVATE).edit().putInt("foreground", fg).putInt("background", bg).putInt("screenOff", off).apply()
+                    RecorderService.slicer?.apply { fgS = fg; bgS = bg; offS = off }
+                    result.success(null)
+                }
                 "upload" -> {  // pieces left from a stop, a kill or a lost network: send them without recording
                     if (RecorderService.slicer == null && RecorderService.uploader == null)
                         startForegroundService(Intent(this, RecorderService::class.java).setAction("upload"))
@@ -53,7 +59,7 @@ class MainActivity : FlutterActivity() {
 
 /** The microphone stays open; the continuous Opus frame stream is cut into self-contained Ogg files
  *  whose length depends on the app state, and named by the wall time of their first frame. */
-class Slicer(private val dir: File, private val fgS: Int, private val bgS: Int, private val offS: Int) {
+class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: Int, @Volatile var offS: Int) {
     @Volatile var foreground = true
     @Volatile var screenOff = false
     @Volatile private var running = false

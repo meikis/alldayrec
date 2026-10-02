@@ -11,7 +11,8 @@ import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
-const sliceForegroundS = 5, sliceBackgroundS = 20, sliceScreenOffS = 60;
+// piece seconds per app state; the server's /api/client-config overrides these (kept from its last answer)
+const defaultSlices = {'foreground': 1, 'background': 20, 'screenOff': 60};
 const recordingRed = Color(0xffc62828);
 
 void main() {
@@ -44,11 +45,42 @@ class Settings {
   }
 }
 
+/// Piece lengths from the server, so they change without a new build; the last answer is kept for offline starts.
+class Slices {
+  static Future<Map<String, int>> cached() async {
+    final p = await SharedPreferences.getInstance();
+    return {for (final k in defaultSlices.keys) k: p.getInt('slice_$k') ?? defaultSlices[k]!};
+  }
+
+  /// The server's lengths, stored; null when it cannot be asked (offline, an older server).
+  static Future<Map<String, int>?> fetch(Settings s) async {
+    if (s.token.isEmpty) return null;
+    try {
+      final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+      final req = await c.getUrl(Uri.parse('${s.server}/api/client-config'));
+      req.headers.set('Authorization', 'Bearer ${s.token}');
+      final res = await req.close().timeout(const Duration(seconds: 15));
+      final body = jsonDecode(await res.transform(utf8.decoder).join()) as Map;
+      c.close();
+      final got = (body['slice'] as Map).cast<String, dynamic>();
+      final out = {for (final k in defaultSlices.keys) k: (got[k] as num?)?.toInt() ?? defaultSlices[k]!};
+      if (out.values.any((v) => v < 1)) return null;
+      final p = await SharedPreferences.getInstance();
+      for (final e in out.entries) {
+        await p.setInt('slice_${e.key}', e.value);
+      }
+      return out;
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
 class Recorder {
   static const _ch = MethodChannel('live_record/recorder');
-  static Future<void> start(Settings s) => _ch.invokeMethod('start', {
-        'server': s.server, 'token': s.token, 'device': s.device, 'archive': s.archive,
-        'foreground': sliceForegroundS, 'background': sliceBackgroundS, 'screenOff': sliceScreenOffS});
+  static Future<void> start(Settings s, Map<String, int> slices) => _ch.invokeMethod('start', {
+        'server': s.server, 'token': s.token, 'device': s.device, 'archive': s.archive, ...slices});
+  static Future<void> slices(Map<String, int> slices) => _ch.invokeMethod('slices', slices);  // a running recorder takes them at once
   static Future<void> stop() => _ch.invokeMethod('stop');
   static Future<void> upload() => _ch.invokeMethod('upload');  // pieces left and not recording: send them anyway
   static Future<void> foreground(bool on) => _ch.invokeMethod('foreground', {'on': on});
@@ -69,6 +101,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   int page = 0;  // 0 字幕, 1 对话, 2 说话人, 3 上传, 4 设置
   final webs = <WebViewController?>[null, null, null];  // one per web page: each keeps its scroll while another is shown
   Timer? ticker;
+  int ticks = 0;
 
   static const titles = ['字幕', '对话', '说话人', '上传', '设置'];
   static const paths = ['/', '/conversations', '/speakers'];
@@ -78,11 +111,15 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    Settings.load().then((s) => setState(() {
-          settings = s;
-          _loadWeb();
-        }));
+    Settings.load().then((s) {
+      setState(() {
+        settings = s;
+        _loadWeb();
+      });
+      _slices();
+    });
     ticker = Timer.periodic(const Duration(seconds: 2), (_) async {  // the service may be running from before this UI opened
+      if (++ticks % 150 == 0) _slices();  // every 5 min: the server may have changed the lengths
       final s = await Recorder.status();
       // uploading does not wait for recording: pieces left over (a stop, a kill, a lost network) go now
       if (s['running'] != true && s['uploading'] != true && (s['pending'] ?? 0) > 0 && settings?.token.isNotEmpty == true) {
@@ -93,7 +130,18 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) => Recorder.foreground(state == AppLifecycleState.resumed);
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    Recorder.foreground(state == AppLifecycleState.resumed);
+    if (state == AppLifecycleState.resumed) _slices();
+  }
+
+  /// Ask the server for piece lengths; a running recorder switches to them at its next piece.
+  Future<void> _slices() async {
+    final s = settings;
+    if (s == null) return;
+    final got = await Slices.fetch(s);
+    if (got != null && running) await Recorder.slices(got);
+  }
 
   bool get running => status['running'] == true;
 
@@ -129,7 +177,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     if (!await AudioRecorder().hasPermission()) return setState(() => note = '没有麦克风权限');
     note = '';
     try {
-      await Recorder.start(settings!);
+      await Recorder.start(settings!, await Slices.fetch(settings!) ?? await Slices.cached());
     } on PlatformException catch (e) {
       setState(() => note = '无法开始录音 ${e.message}');
     }
@@ -441,11 +489,17 @@ class _SettingsPageState extends State<SettingsPage> {
             onChanged: (v) => setState(() => archive = v),
           ),
           const Divider(height: 1),
-          ListTile(
-            title: const Text('切片长度'),
-            subtitle: Text(Platform.isIOS  // iOS has no reliable screen-off signal; background stands for it
-                ? '前台 $sliceForegroundS 秒 · 后台 $sliceBackgroundS 秒'
-                : '前台 $sliceForegroundS 秒 · 后台 $sliceBackgroundS 秒 · 熄屏 $sliceScreenOffS 秒'),
+          FutureBuilder<Map<String, int>>(
+            future: Slices.cached(),
+            builder: (_, snap) {
+              final s = snap.data ?? defaultSlices;
+              return ListTile(
+                title: const Text('切片长度（服务端下发）'),
+                subtitle: Text(Platform.isIOS  // iOS has no reliable screen-off signal; background stands for it
+                    ? '前台 ${s['foreground']} 秒 · 后台 ${s['background']} 秒'
+                    : '前台 ${s['foreground']} 秒 · 后台 ${s['background']} 秒 · 熄屏 ${s['screenOff']} 秒'),
+              );
+            },
           ),
         ]),
       ),

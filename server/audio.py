@@ -23,19 +23,32 @@ DIR: Path | None = None  # the recordings dir
 read_to: dict[str, int] = {}  # per device: start of the last piece its reader has finished with; later ones are queued
 
 
-def decode(src: Path | bytes) -> np.ndarray | None:
-    """An audio file (a path or its bytes) as 16 kHz mono int16; None when ffmpeg cannot read it."""
+AAC_DELAY = 2112  # samples an AAC encoder puts before the audio (at the iPhone's 16 kHz: 132 ms)
+AAC_FRAME = 1024  # it pads the end to whole frames: 0 to 1023 samples, unknown, so half is cut
+
+
+def unpad(x: np.ndarray) -> np.ndarray:
+    """An ADTS AAC piece without its encoder's delay and (on average) its last-frame padding. Each iPhone piece is a
+    new encoder: decoded, a piece was 0.18 s longer than its audio, overlapped the next piece and spliced 0.1 s of
+    silence into speech at every piece; this leaves at most +-32 ms."""
+    return x[AAC_DELAY:len(x) - AAC_FRAME // 2] if len(x) > AAC_DELAY + AAC_FRAME else x
+
+
+def decode(src: Path | bytes, aac: bool = False) -> np.ndarray | None:
+    """An audio file (a path or its bytes) as 16 kHz mono int16; None when ffmpeg cannot read it. aac: an ADTS piece,
+    unpadded (a path ending in .aac is one)."""
     args, inp = (["-i", str(src)], None) if isinstance(src, Path) else (["-i", "pipe:0"], src)
     out = subprocess.run(["ffmpeg", "-v", "error", *args, "-f", "s16le", "-ac", "1", "-ar", str(SR), "pipe:1"], input=inp, capture_output=True)
     if out.returncode or len(out.stdout) < 2 * SR // 10:
         return None
-    return np.frombuffer(out.stdout[:len(out.stdout) // 2 * 2], np.int16)
+    x = np.frombuffer(out.stdout[:len(out.stdout) // 2 * 2], np.int16)
+    return unpad(x) if aac or (isinstance(src, Path) and src.suffix == ".aac") else x
 
 
 def save(device: str, start_ms: int, body: bytes, content_type: str) -> float | None:
     """Keeps one uploaded piece (start_ms: its device time); returns its seconds, None when it is not audio.
     It is on disk and in the index before this returns, so the client may delete its copy once told so."""
-    x = decode(body)
+    x = decode(body, aac=content_type.split(";")[0] == "audio/aac")
     if x is None:
         return None
     ext = {"audio/ogg": "ogg", "audio/webm": "webm", "audio/aac": "aac"}.get(content_type.split(";")[0], "bin")
@@ -114,6 +127,9 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     for m in (0, 1, 5):  # 10:00, 10:01, a gap, 10:05
         assert save("phone", T(m), tone(60), "audio/ogg") > 59
     assert save("phone", T(9), b"not audio", "audio/ogg") is None
+    x = np.arange(16000, dtype=np.int16)
+    assert len(unpad(x)) == 16000 - AAC_DELAY - AAC_FRAME // 2 and unpad(x)[0] == AAC_DELAY, "AAC: the encoder's delay and half a frame go"
+    assert len(unpad(x[:3000])) == 3000, "too short to hold both: left alone"
 
     async def take(after, n, device="phone"):
         out, s = [], stream(device, after)
