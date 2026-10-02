@@ -48,6 +48,25 @@ export interface Conversation {
   summary?: Summary | null;
 }
 
+export interface LiveTopic {
+  title: string;
+  start: string; // the row it starts at
+  points: string[];
+  decisions: string[];
+  todos: { who?: string; what: string }[];
+  open_questions: string[];
+}
+// the live analysis of an open conversation; kept as the conversation's timeline once it closes
+export interface LiveState {
+  device: string;
+  start: string;
+  topics: LiveTopic[];
+  frozen: number;
+  at: string;
+  upto: string;
+  sentences: number;
+}
+
 export interface DeviceStatus {
   device: string;
   audio_end: string | null;

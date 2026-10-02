@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS people (name TEXT PRIMARY KEY, n INTEGER NOT NULL, e 
 CREATE TABLE IF NOT EXISTS pieces (           -- uploaded audio pieces, the ingest queue; path relative to the recordings dir
     device TEXT NOT NULL, start_ms INTEGER NOT NULL, seconds REAL NOT NULL, path TEXT NOT NULL, PRIMARY KEY (start_ms, device));
 CREATE INDEX IF NOT EXISTS pieces_device ON pieces(device, start_ms);  -- each device's stream and backlog
-CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);  -- per device: finalized_to:<d>, open_conversation:<d>, end_at:<d>
+CREATE TABLE IF NOT EXISTS timelines (conversation TEXT PRIMARY KEY, body TEXT NOT NULL);  -- the live analysis as it stood at the close
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);  -- per device: finalized_to:<d>, open_conversation:<d>, end_at:<d>, live:<d>
 """
 
 PATH: Path | None = None
@@ -144,6 +145,15 @@ def summary(conv_id: str) -> dict | None:
 def put_summary(s: dict, c: sqlite3.Connection | None = None):
     (c or conn()).execute("INSERT OR REPLACE INTO summaries VALUES (?, ?, ?, ?)",
                           (s["conversation"], s["status"], s.get("prompt_version"), json.dumps(s, ensure_ascii=False)))
+
+
+def timeline(conv_id: str) -> dict | None:
+    r = conn().execute("SELECT body FROM timelines WHERE conversation = ?", (conv_id,)).fetchone()
+    return json.loads(r["body"]) if r else None
+
+
+def put_timeline(conv_id: str, body: dict, c: sqlite3.Connection | None = None):
+    (c or conn()).execute("INSERT OR REPLACE INTO timelines VALUES (?, ?)", (conv_id, json.dumps(body, ensure_ascii=False)))
 
 
 # voices, apart pins, people bank

@@ -2,13 +2,23 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import AppHeader from "../components/AppHeader.vue";
+import Timeline from "../components/Timeline.vue";
 import TranscriptRow from "../components/TranscriptRow.vue";
-import { get, hhmm, hhmmss, minutes, post, type Conversation, type Row } from "../lib/api";
+import {
+  get,
+  hhmm,
+  hhmmss,
+  minutes,
+  post,
+  type Conversation,
+  type LiveState,
+  type Row,
+} from "../lib/api";
 import { useSocket } from "../lib/socket";
 
 const props = defineProps<{ id: string }>();
 const route = useRoute();
-const c = ref<(Conversation & { rows: Row[] }) | null>(null),
+const c = ref<(Conversation & { rows: Row[]; timeline?: LiveState | null }) | null>(null),
   missing = ref(false),
   hit = ref("");
 const s = computed(() => c.value?.summary ?? null);
@@ -209,6 +219,11 @@ async function save() {
         摘要生成失败：{{ s.error }} <button @click="regen">重新生成</button>
       </div>
       <div v-else class="summary muted">摘要生成中…</div>
+
+      <template v-if="c.timeline?.topics.length">
+        <h3>会中实时议题</h3>
+        <Timeline :topics="c.timeline.topics" @jump="jumpTo" />
+      </template>
 
       <h3>原文</h3>
       <TranscriptRow v-for="r in c.rows" :key="r.id" :row="r" :hit="hit === r.start" />

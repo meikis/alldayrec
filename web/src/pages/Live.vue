@@ -3,12 +3,14 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppHeader from "../components/AppHeader.vue";
 import DayPicker from "../components/DayPicker.vue";
+import Timeline from "../components/Timeline.vue";
 import TranscriptRow from "../components/TranscriptRow.vue";
 import {
   get,
   hhmm,
   hhmmss,
   type Conversation,
+  type LiveState,
   type LogEvent,
   type Row,
   type Status,
@@ -27,6 +29,8 @@ const rows = ref<Row[]>([]),
   convs = ref<Conversation[]>([]),
   events = ref<LogEvent[]>([]),
   status = ref<Status | null>(null);
+const lives = ref<LiveState[]>([]),
+  hit = ref("");
 const ready = ref(false);
 const follow = ref(true),
   logOpen = ref(false),
@@ -73,12 +77,14 @@ function addEvent(e: LogEvent) {
 
 async function loadDay() {
   const d = day.value;
-  const [rs, cs] = await Promise.all([
+  const [rs, cs, ls] = await Promise.all([
     get<Row[]>("/api/sentences", { date: d }),
     get<Conversation[]>("/api/conversations", { date: d }),
+    get<LiveState[]>("/api/live"),
   ]);
   if (d !== day.value) return; // another day was picked meanwhile
   rows.value = rs;
+  lives.value = ls;
   convs.value = [];
   cs.forEach(addConv);
   ready.value = true;
@@ -118,7 +124,7 @@ onMounted(async () => {
 });
 onUnmounted(() => window.removeEventListener("scroll", onScroll));
 
-const { connected } = useSocket((m) => {
+const { connected, send } = useSocket((m) => {
   // rows and conversations of another day than the one shown are not for this page
   if (m.type === "final") {
     if (live.value) finalize(m);
@@ -127,9 +133,86 @@ const { connected } = useSocket((m) => {
   } else if (m.type === "summary") {
     const c = convs.value.find((x) => x.id === m.conversation);
     if (c) c.summary = { ...m };
+  } else if (m.type === "live") {
+    lives.value = lives.value.filter((l) => l.device !== m.device).concat(m.live ? [m.live] : []);
   } else if (m.type === "event") addEvent(m);
   else status.value = m;
 }, loadDay);
+
+// The live analysis runs only while a page shows today in front: a heartbeat every 20 s, and a wake when
+// the page comes back to the front so a stale analysis is redone at once.
+let wake = true;
+function beat() {
+  if (live.value && !document.hidden && send({ type: "watch", wake })) wake = false;
+}
+function onVisible() {
+  if (document.hidden) return;
+  wake = true;
+  beat();
+}
+let beatTimer = 0;
+onMounted(() => {
+  beatTimer = window.setInterval(beat, 20000);
+  document.addEventListener("visibilitychange", onVisible);
+});
+onUnmounted(() => {
+  clearInterval(beatTimer);
+  document.removeEventListener("visibilitychange", onVisible);
+});
+watch([connected, live], ([c, l]) => c && l && ((wake = true), beat()));
+
+// the most recently updated device's analysis, shown above the transcript in a pane whose height is dragged
+const current = computed(() =>
+  live.value
+    ? lives.value.reduce<LiveState | null>((a, l) => (a && a.at > l.at ? a : l), null)
+    : null,
+);
+const clampH = (h: number) => Math.round(Math.min(Math.max(h, 80), window.innerHeight * 0.7));
+const paneH = ref(
+  clampH(
+    Number(
+      (() => {
+        try {
+          return localStorage.getItem("livePaneH");
+        } catch {
+          return null;
+        }
+      })(),
+    ) || 220,
+  ),
+);
+const paneBox = ref<HTMLElement | null>(null);
+let drag: { y: number; h: number } | null = null;
+function dragStart(e: PointerEvent) {
+  drag = { y: e.clientY, h: paneH.value };
+  (e.target as HTMLElement).setPointerCapture(e.pointerId);
+}
+function dragMove(e: PointerEvent) {
+  if (drag) paneH.value = clampH(drag.h + e.clientY - drag.y);
+}
+function dragEnd() {
+  drag = null;
+  try {
+    localStorage.setItem("livePaneH", String(paneH.value));
+  } catch {}
+}
+watch(
+  () => current.value?.at,
+  async () => {
+    await nextTick();
+    if (paneBox.value) paneBox.value.scrollTop = paneBox.value.scrollHeight; // the newest topic is at the bottom
+  },
+);
+function jump(start: string) {
+  hit.value = start;
+  const el = document.querySelector(`[data-start="${CSS.escape(start)}"]`);
+  if (!el) return;
+  const head = document.querySelector("header")?.getBoundingClientRect().height ?? 0;
+  window.scrollTo({
+    top: el.getBoundingClientRect().top + window.scrollY - head - 8,
+    behavior: "smooth",
+  });
+}
 
 const convLink = (c: Conversation) =>
   c.summary?.status === "done"
@@ -183,10 +266,27 @@ const convLink = (c: Conversation) =>
         <template v-else>连接中…</template>
       </RouterLink>
     </div>
+    <div v-if="current" class="pane">
+      <div ref="paneBox" class="pane-body" :style="{ height: paneH + 'px' }">
+        <div class="pane-meta">
+          实时分析 · 对话 {{ hhmmss(current.start) }} 起 · 更新于 {{ hhmmss(current.at) }} · 到
+          {{ hhmmss(current.upto) }} 共 {{ current.sentences }} 句
+        </div>
+        <Timeline :topics="current.topics" open @jump="jump" />
+      </div>
+      <div
+        class="grip"
+        title="拖动调整高度"
+        @pointerdown="dragStart"
+        @pointermove="dragMove"
+        @pointerup="dragEnd"
+        @pointercancel="dragEnd"
+      ></div>
+    </div>
   </AppHeader>
   <main class="live">
     <template v-for="it in timeline" :key="it.key">
-      <TranscriptRow v-if="it.k === 'row'" :row="it.r" />
+      <TranscriptRow v-if="it.k === 'row'" :row="it.r" :hit="hit === it.r.start" />
       <div v-else-if="it.k === 'conv'" class="conv">
         对话 {{ hhmmss(it.c.start) }}–{{ hhmmss(it.c.end) }} 结束 · 参与
         {{ it.c.participants.join("、") || "—" }} · {{ it.c.sentences }} 句 ·
@@ -223,6 +323,39 @@ const convLink = (c: Conversation) =>
 }
 .live {
   padding-bottom: 120px;
+}
+.pane {
+  flex-basis: 100%;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+}
+.pane-body {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.pane-meta {
+  font-size: 12px;
+  color: var(--muted);
+  padding-top: 4px;
+}
+.grip {
+  height: 14px;
+  margin-bottom: -8px;
+  cursor: ns-resize;
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.grip::after {
+  content: "";
+  width: 40px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+}
+.grip:hover::after {
+  background: var(--muted);
 }
 .conv {
   color: var(--accent);

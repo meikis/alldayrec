@@ -51,5 +51,11 @@ export function useSocket(onMessage: (m: any) => void, onResync: () => void) {
       ws.close();
     }
   });
-  return { connected };
+  // false when not connected: nothing is queued
+  function send(m: unknown): boolean {
+    if (ws?.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(m));
+    return true;
+  }
+  return { connected, send };
 }

@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 
 import audio
 import db
+import live
 import speakers
 import summary
 from conversations import Grouper
@@ -49,6 +50,7 @@ REFINE_WINDOW_S = int(os.environ.get("REFINE_WINDOW_S", "240"))    # most audio 
 REFINE_MARGIN_S = 1.0                      # audio re-read before the last finalized time: the engine's sentence starts come a little late
 ENGINE = os.environ.get("ENGINE", "volc")  # second-layer engine: volc (seed-asr-2.0 streaming API) | stepfun (file-mode service)
 BUFFER_S = 900                             # audio kept for refinement; pieces are fed only while finalization is within BUFFER_S - 300
+LIVE_EVERY_S = int(os.environ.get("LIVE_EVERY_S", "120"))  # new speech in the open conversation before the live analysis is redone
 TURN_GAP_S = float(os.environ.get("TURN_GAP_S", "1.0"))  # same speaker, closer than this: one final row; 0 keeps the engine's sentences as rows
 EDGE_S = 3.0                               # rows touching the window edges may be cut: left to the next pass
 BRIDGE = env("ASR_UPLOAD_BRIDGE_URL")             # returns {upload_url, download_url} for a file name
@@ -267,7 +269,8 @@ def final_rows(segs: list[dict], names: dict, t0: dt.datetime, win_s: float, con
 
 app = FastAPI()
 clients: set[WebSocket] = set()
-state = {"chunks": None, "events": [], "commit": "", "devices": {}, "embed": None, "dias": []}  # devices: one pipeline's state each
+state = {"chunks": None, "events": [], "commit": "", "devices": {}, "embed": None, "dias": [],
+         "watch_until": 0.0, "wake_at": 0.0}  # devices: one pipeline's state each; watch: a page in front wants the live analysis
 
 
 async def broadcast(msg: dict):
@@ -387,7 +390,7 @@ async def pipeline(device: str):
     seg = Segmenter()
     resume = db.kv(f"finalized_to:{device}")
     st = state["devices"][device] = {"seg": seg, "done_to": dt.datetime.fromisoformat(resume) if resume else None, "audio_end": None,
-                                     "last_speech": None, "refine": None, "conversation": None, "latency": [],
+                                     "last_speech": None, "refine": None, "conversation": None, "latency": [], "live": None,
                                      "progress": [],  # (wall time, finalized time) per commit, the last 10 min: the rate
                                      "utts": [], "vad_to": None, "wake": asyncio.Event()}  # VAD utterances not yet final, the last pause
     if resume:
@@ -427,6 +430,9 @@ async def pipeline(device: str):
             note(f"{device}：接着上次打开的对话 {grouper.open['start'][11:19]}", "state")
         else:
             note(f"{device}：开始处理", "state")
+        if (lv := db.kv(f"live:{device}")) and grouper.open and lv["start"] == grouper.open["start"]:
+            st["live"] = lv
+        live_task, live_failed = None, 0.0
         done_to = st["done_to"]  # wall time up to which rows are final
 
         def record(c: dict) -> dict:
@@ -445,6 +451,11 @@ async def pipeline(device: str):
                 for rec in recs:
                     db.insert_conversation(t, rec)
                     db.put_summary({"conversation": rec["id"], "status": "pending", "error": None}, t)
+                    if st["live"] and st["live"]["start"] == rec["start"]:
+                        db.put_timeline(rec["id"], st["live"], t)
+                live_ends = st["live"] and (not grouper.open or grouper.open["start"] != st["live"]["start"])
+                if live_ends:
+                    db.put_kv(f"live:{device}", None, t)
                 if hi:
                     db.put_kv(f"finalized_to:{device}", iso(hi), t)
                 db.put_kv(f"open_conversation:{device}", grouper.open, t)
@@ -462,6 +473,43 @@ async def pipeline(device: str):
                 await broadcast({"type": "conversation", **db.conversation(rec["id"])})
             if not grouper.open:
                 st["conversation"] = None
+            if live_ends:
+                st["live"] = None
+                await broadcast({"type": "live", "device": device, "live": None})
+
+        def live_due() -> bool:
+            """A page is in front, the open conversation has a minute of speech, this is the present and not a backlog,
+            and LIVE_EVERY_S of new speech came (or any, when a page just came to the front)."""
+            o, lv, now = grouper.open, st["live"], time.time()
+            if not o or o["speech_s"] < summary.MIN_SPEECH_S or now > state["watch_until"] or now - live_failed < 120:
+                return False
+            if not st["done_to"] or (dt.datetime.now() - st["done_to"]).total_seconds() > 300:
+                return False
+            if not lv:
+                return True
+            grown = o["speech_s"] - lv["speech_s"]
+            return grown >= LIVE_EVERY_S or (grown > 0 and state["wake_at"] > lv["wall"])
+
+        async def live_update():
+            nonlocal live_failed
+            o = grouper.open
+            lv = st["live"] or {"start": o["start"], "device": device, "topics": [], "frozen": 0}
+            rows, speech = [r for r in o["sentences"] if r.get("text")], o["speech_s"]
+            try:
+                res = await asyncio.to_thread(live.analyze, lv, rows)
+            except Exception as e:
+                live_failed = time.time()
+                log.warning("%s live analysis failed: %r", device, e)
+                note(f"{device}：实时分析失败：{str(e)[:120]}，2 分钟后再试", "error")
+                return
+            res.update(speech_s=speech, wall=time.time(), at=dt.datetime.now().isoformat(timespec="seconds"),
+                       upto=rows[-1]["start"], sentences=len(rows))
+            if grouper.open and grouper.open["start"] == res["start"]:
+                st["live"] = res
+                db.put_kv(f"live:{device}", res)
+                await broadcast({"type": "live", "device": device, "live": res})
+            elif r := db.conn().execute("SELECT id FROM conversations WHERE start = ? AND device = ?", (res["start"], device)).fetchone():
+                db.put_timeline(r[0], res)  # it closed while the call ran
 
         async def refine_pass(end: dt.datetime | None = None) -> bool:
             """One pass; True when a backlog remains. Timer-driven (end None): [done_to - margin, + window], rows near its
@@ -568,6 +616,8 @@ async def pipeline(device: str):
             closed += idle
             if closed:
                 await commit(closed)
+            if (live_task is None or live_task.done()) and live_due():
+                live_task = asyncio.create_task(live_update(), name=f"live:{device}")
 
     def watched(coro, name):
         """A task whose death is logged: an unhandled exception would otherwise stop the pipeline silently."""
@@ -699,6 +749,12 @@ async def events():
     return state["events"]
 
 
+@app.get("/api/live")
+async def live_now():
+    """Each device's live analysis of its open conversation."""
+    return [st["live"] for st in state["devices"].values() if st.get("live")]
+
+
 @app.get("/api/status")
 async def status_now():
     return status()
@@ -771,7 +827,7 @@ async def conversation(conv_id: str):
     c = find_conversation(conv_id)
     if not c:
         raise HTTPException(404, "no such conversation")
-    return {**c, "summary": db.summary(conv_id), "rows": conversation_rows(c)}
+    return {**c, "summary": db.summary(conv_id), "timeline": db.timeline(conv_id), "rows": conversation_rows(c)}
 
 
 @app.post("/api/conversation/{conv_id}/summarize")
@@ -1063,7 +1119,14 @@ async def ws_endpoint(ws: WebSocket):
     clients.add(ws)
     try:
         while True:
-            await ws.receive_text()
+            try:
+                m = json.loads(await ws.receive_text())
+            except ValueError:
+                continue
+            if isinstance(m, dict) and m.get("type") == "watch":  # a page in front: every 20 s; wake: it just came to the front
+                state["watch_until"] = time.time() + 60
+                if m.get("wake"):
+                    state["wake_at"] = time.time()
     except WebSocketDisconnect:
         clients.discard(ws)
 
