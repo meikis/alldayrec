@@ -162,8 +162,10 @@ class RecorderService : Service() {
     }
 }
 
-/** Uploads the .ogg files in start order, one at a time, retrying forever; a file is archived or
- *  deleted once the server has it, so the directory is the offline queue. */
+/** Uploads the .ogg files in start order, retrying forever; a file is archived or deleted once the server has it,
+ *  so the directory is the offline queue. Back-to-back pieces waiting together go as one request (each piece is a
+ *  whole Ogg stream, so their bytes in a row decode as one): with 1 s pieces one request per piece cannot keep up
+ *  when a request takes over a second (10-03: the queue grew to 16 s). */
 class Uploader(private val dir: File, private val server: String, private val token: String, private val device: String,
                private val archive: File?) : Thread() {
     @Volatile var running = true
@@ -172,21 +174,35 @@ class Uploader(private val dir: File, private val server: String, private val to
     private var fails = 0
 
     companion object {
+        const val MAX_BATCH = 30        // pieces in one request
+        const val BATCH_GAP_MS = 1500L  // starts further apart than this are not one stretch (only 1 s pieces get batched)
         /** The pieces waiting, oldest first: the directory is the queue. */
         fun queue(dir: File) = dir.listFiles { f -> f.name.endsWith(".ogg") }?.sortedBy { it.name } ?: emptyList()
     }
 
     private fun files() = queue(dir)
 
+    /** The oldest pieces that follow each other without a gap (a stop or a kill leaves one), at most MAX_BATCH. */
+    private fun batch(q: List<File>): List<File> {
+        val out = mutableListOf(q[0])
+        for (f in q.drop(1)) {
+            if (out.size >= MAX_BATCH || f.nameWithoutExtension.toLong() - out.last().nameWithoutExtension.toLong() > BATCH_GAP_MS) break
+            out += f
+        }
+        return out
+    }
+
     override fun run() {
         while (running) {
-            val f = files().firstOrNull()
-            if (f == null) { sleep(1000); continue }
+            val q = files()
+            if (q.isEmpty()) { sleep(200); continue }
+            val b = batch(q)
             try {
-                val code = post("$server/api/chunks?device=${enc(device)}&start=${f.nameWithoutExtension}", f.readBytes(), "audio/ogg")
+                val code = post("$server/api/chunks?device=${enc(device)}&start=${b[0].nameWithoutExtension}",
+                                b.fold(ByteArray(0)) { acc, f -> acc + f.readBytes() }, "audio/ogg")
                 when {
-                    code == 200 -> { keep(f); sent++; fails = 0; note = null }
-                    code == 400 -> { f.delete(); note = "服务端无法解码一块，已丢弃" }
+                    code == 200 -> { b.forEach(::keep); sent += b.size; fails = 0; note = null }
+                    code == 400 -> { b.forEach { it.delete() }; note = "服务端无法解码一块，已丢弃" }
                     else -> throw Exception("HTTP $code")
                 }
             } catch (e: Exception) {
@@ -215,7 +231,7 @@ class Uploader(private val dir: File, private val server: String, private val to
         if (type != null) c.setRequestProperty("Content-Type", type)
         c.outputStream.use { it.write(body) }
         val code = c.responseCode
-        c.disconnect()
+        (if (code < 400) c.inputStream else c.errorStream)?.use { it.readBytes() }  // read to the end: the connection is reused
         return code
     }
 
