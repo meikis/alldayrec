@@ -22,7 +22,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Foreground service that owns recording and uploading, so neither needs the Flutter UI alive.
+/** Foreground service that owns recording and uploading, so neither needs the Flutter UI alive. Uploading does not
+ *  depend on recording: after a stop (or a launch, or a kill, with pieces left) the service stays up as a dataSync
+ *  service until the queue is empty, sends the end signal after the last piece and stops itself.
  *  START_STICKY: when the system kills the process the service comes back with a null intent and
  *  resumes from the config saved in SharedPreferences, noting the interruption. */
 class RecorderService : Service() {
@@ -32,10 +34,14 @@ class RecorderService : Service() {
         @Volatile var uploader: Uploader? = null
         @Volatile var interruptedAt: Long = 0
         @Volatile var foregroundApp = true
-        fun status(): Map<String, Any?> = mapOf(
-            "running" to (slicer != null), "files" to slicer?.files, "slice" to slicer?.sliceS(), "error" to slicer?.error,
-            "sent" to uploader?.sent, "pending" to uploader?.pending(), "note" to uploader?.note,
-            "interruptedAt" to if (interruptedAt > 0) interruptedAt else null)
+        fun status(dir: File): Map<String, Any?> {
+            val q = Uploader.queue(dir)
+            return mapOf(
+                "running" to (slicer != null), "uploading" to (uploader != null), "files" to slicer?.files, "slice" to slicer?.sliceS(),
+                "error" to slicer?.error, "sent" to uploader?.sent, "note" to uploader?.note,
+                "pending" to q.size, "pendingBytes" to q.sumOf { it.length() }, "oldest" to q.firstOrNull()?.nameWithoutExtension?.toLongOrNull(),
+                "interruptedAt" to if (interruptedAt > 0) interruptedAt else null)
+        }
     }
 
     private val screen = object : BroadcastReceiver() {
@@ -54,9 +60,14 @@ class RecorderService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val prefs = getSharedPreferences("recorder", MODE_PRIVATE)
         Log.i("live-record", "onStartCommand action=${intent?.action} extras=${intent?.extras != null} slicer=${slicer != null} pid=${Process.myPid()} lastPid=${prefs.getInt("pid", 0)}")
+        val dir = File(filesDir, "chunks").apply { mkdirs() }
         if (intent?.action == "stop") {
-            Thread { stopAll(prefs); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }.start()
-            return START_NOT_STICKY
+            stopRecording(prefs, dir)
+            return START_STICKY
+        }
+        if (intent?.action == "upload") {  // from the UI: pieces left (and maybe an end) after a kill or a lost network
+            if (slicer == null) uploadOnly(prefs, dir, prefs.getLong("endAt", 0L).takeIf { it > 0 })
+            return START_STICKY
         }
         // a start from the UI carries a fresh nonce; after a kill the system restarts us with no intent or
         // redelivers the old one, so: same or no nonce while the last run was still active = we were killed
@@ -74,13 +85,13 @@ class RecorderService : Service() {
                 for (k in listOf("foreground", "background", "screenOff")) putInt(k, intent.getIntExtra(k, 20))
                 putBoolean("archive", intent.getBooleanExtra("archive", true))
             }.apply()
-        } else if (!prefs.getBoolean("active", false)) {
-            stopSelf(); return START_NOT_STICKY
+        } else if (!prefs.getBoolean("active", false)) {  // restarted after a kill while only uploading, or nothing to do
+            uploadOnly(prefs, dir, prefs.getLong("endAt", 0L).takeIf { it > 0 })
+            return START_STICKY
         }
         prefs.edit().putBoolean("active", true).putInt("pid", Process.myPid()).apply()
         startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         if (slicer == null) {
-            val dir = File(filesDir, "chunks").apply { mkdirs() }
             dir.listFiles { f -> f.name.endsWith(".part") }?.forEach { it.renameTo(File(it.path.removeSuffix(".part") + ".ogg")) }  // cut short by a kill: still valid Ogg
             Log.i("live-record", "starting slicer")
             slicer = Slicer(dir, prefs.getInt("foreground", 5), prefs.getInt("background", 20), prefs.getInt("screenOff", 60)).also {
@@ -88,31 +99,58 @@ class RecorderService : Service() {
                 it.screenOff = !(getSystemService(POWER_SERVICE) as PowerManager).isInteractive
                 it.start()
             }
-            val archive = if (prefs.getBoolean("archive", true)) File(getExternalFilesDir(null), "recordings") else null
-            uploader = Uploader(dir, prefs.getString("server", "")!!, prefs.getString("token", "")!!, prefs.getString("device", "phone")!!, archive)
-                .also { it.start() }
+            prefs.edit().remove("endAt").apply()  // a new recording carries on the conversation: no end for the old stop
+            ensureUploader(prefs, dir)
         }
         return START_STICKY
     }
 
-    private fun stopAll(prefs: android.content.SharedPreferences) {
-        val at = System.currentTimeMillis()
-        prefs.edit().putBoolean("active", false).apply()
-        slicer?.stop(); slicer = null
-        uploader?.let { u ->
-            val t0 = System.currentTimeMillis()
-            while (u.pending() > 0 && System.currentTimeMillis() - t0 < 120_000) Thread.sleep(500)
-            u.running = false
-            u.end(at)  // the server may close the conversation now
-        }
-        uploader = null
+    private fun ensureUploader(prefs: android.content.SharedPreferences, dir: File): Uploader {
+        uploader?.let { return it }
+        val archive = if (prefs.getBoolean("archive", true)) File(getExternalFilesDir(null), "recordings") else null
+        return Uploader(dir, prefs.getString("server", "")!!, prefs.getString("token", "")!!, prefs.getString("device", "phone")!!, archive)
+            .also { uploader = it; it.start() }
     }
 
-    private fun notification(): Notification {
+    /** The microphone goes now; the queue keeps uploading, the end signal goes after its last piece. */
+    private fun stopRecording(prefs: android.content.SharedPreferences, dir: File) {
+        val at = System.currentTimeMillis()
+        prefs.edit().putBoolean("active", false).putLong("endAt", at).apply()  // kept: a kill before the queue empties still ends it
+        slicer?.stop(); slicer = null
+        uploadOnly(prefs, dir, at)
+    }
+
+    /** Stays up while pieces are left and nothing records; then sends `endAt` (if any) and stops. */
+    private fun uploadOnly(prefs: android.content.SharedPreferences, dir: File, endAt: Long?) {
+        if (Uploader.queue(dir).isEmpty() && endAt == null) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); return }
+        startForeground(1, notification(Uploader.queue(dir).size), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        val u = ensureUploader(prefs, dir)
+        if (draining) return
+        draining = true
+        Thread {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            while (slicer == null && Uploader.queue(dir).isNotEmpty()) {
+                nm.notify(1, notification(Uploader.queue(dir).size))
+                Thread.sleep(2000)
+            }
+            draining = false
+            if (slicer != null) return@Thread  // recording again: the service carries on as before
+            endAt?.let { u.end(it) }  // the server may close the conversation now
+            prefs.edit().remove("endAt").apply()
+            u.running = false; uploader = null
+            stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
+        }.start()
+    }
+
+    @Volatile private var draining = false
+
+    private fun notification(uploading: Int? = null): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        val text = if (interruptedAt > 0) "曾在 ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(interruptedAt))} 被系统中断，已自动恢复" else ""
-        return Notification.Builder(this, CHANNEL).setContentTitle("live-record 正在录音").setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now).setContentIntent(open).setOngoing(true).build()
+        val title = if (uploading != null) "live-record 正在上传 · 剩 $uploading 块" else "live-record 正在录音"
+        val text = if (uploading == null && interruptedAt > 0) "曾在 ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(interruptedAt))} 被系统中断，已自动恢复" else ""
+        return Notification.Builder(this, CHANNEL).setContentTitle(title).setContentText(text)
+            .setSmallIcon(if (uploading != null) android.R.drawable.stat_sys_upload else android.R.drawable.ic_btn_speak_now)
+            .setContentIntent(open).setOngoing(true).build()
     }
 
     override fun onDestroy() {
@@ -133,9 +171,12 @@ class Uploader(private val dir: File, private val server: String, private val to
     @Volatile var note: String? = null
     private var fails = 0
 
-    fun pending() = dir.listFiles { f -> f.name.endsWith(".ogg") }?.size ?: 0
+    companion object {
+        /** The pieces waiting, oldest first: the directory is the queue. */
+        fun queue(dir: File) = dir.listFiles { f -> f.name.endsWith(".ogg") }?.sortedBy { it.name } ?: emptyList()
+    }
 
-    private fun files() = dir.listFiles { f -> f.name.endsWith(".ogg") }?.sortedBy { it.name } ?: emptyList()
+    private fun files() = queue(dir)
 
     override fun run() {
         while (running) {

@@ -2,6 +2,7 @@
 // the app state and uploads them in order: on Android RecorderService.kt (Opus/Ogg, START_STICKY, survives a kill),
 // on iOS Recorder.swift (ADTS AAC, `audio` background mode). This side is settings, status and the pages in a WebView.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -49,6 +50,7 @@ class Recorder {
         'server': s.server, 'token': s.token, 'device': s.device, 'archive': s.archive,
         'foreground': sliceForegroundS, 'background': sliceBackgroundS, 'screenOff': sliceScreenOffS});
   static Future<void> stop() => _ch.invokeMethod('stop');
+  static Future<void> upload() => _ch.invokeMethod('upload');  // pieces left and not recording: send them anyway
   static Future<void> foreground(bool on) => _ch.invokeMethod('foreground', {'on': on});
   static Future<Map> status() async => (await _ch.invokeMethod('status')) as Map;
 }
@@ -64,13 +66,13 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   Map status = {};
   String note = '';
   bool stopping = false;
-  int page = 0;  // 0 字幕, 1 对话, 2 说话人, 3 设置
+  int page = 0;  // 0 字幕, 1 对话, 2 说话人, 3 上传, 4 设置
   final webs = <WebViewController?>[null, null, null];  // one per web page: each keeps its scroll while another is shown
   Timer? ticker;
 
-  static const titles = ['字幕', '对话', '说话人', '设置'];
+  static const titles = ['字幕', '对话', '说话人', '上传', '设置'];
   static const paths = ['/', '/conversations', '/speakers'];
-  static const settingsPage = 3;
+  static const uploadPage = 3, settingsPage = 4;
 
   @override
   void initState() {
@@ -82,6 +84,10 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
         }));
     ticker = Timer.periodic(const Duration(seconds: 2), (_) async {  // the service may be running from before this UI opened
       final s = await Recorder.status();
+      // uploading does not wait for recording: pieces left over (a stop, a kill, a lost network) go now
+      if (s['running'] != true && s['uploading'] != true && (s['pending'] ?? 0) > 0 && settings?.token.isNotEmpty == true) {
+        await Recorder.upload();
+      }
       if (mounted) setState(() => status = s);
     });
   }
@@ -173,6 +179,8 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           const NavigationDrawerDestination(
               icon: Icon(Icons.people_outline), selectedIcon: Icon(Icons.people), label: Text('说话人')),
           const NavigationDrawerDestination(
+              icon: Icon(Icons.cloud_upload_outlined), selectedIcon: Icon(Icons.cloud_upload), label: Text('上传')),
+          const NavigationDrawerDestination(
               icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: Text('设置')),
         ],
       ),
@@ -181,6 +189,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           : IndexedStack(index: page, children: [  // keeps the WebView alive across pages
               for (final w in webs)
                 w == null ? _Empty(onSetup: () => setState(() => page = settingsPage)) : WebViewWidget(controller: w),
+              UploadPage(settings: settings!, status: status, visible: page == uploadPage),
               SettingsPage(settings: settings!, onSaved: _saved),
             ]),
       bottomNavigationBar: page == 0 && settings != null ? _controlBar(cs) : null,
@@ -199,6 +208,8 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
       detail = '已传 ${s['sent']} · 待传 ${s['pending']}';
     } else {
       headline = note.isEmpty ? '未在录音' : note;
+      final n = s['pending'] ?? 0;
+      if (n > 0) detail = s['uploading'] == true ? '正在补传 $n 块' : '待传 $n 块';
     }
     final warn = [
       if (s['error'] != null) '录音错误 ${s['error']}',
@@ -231,6 +242,113 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           ]),
         ),
       ),
+    );
+  }
+}
+
+/// The phone's upload queue (from the native side's status) and how far the server has got with this device's audio.
+class UploadPage extends StatefulWidget {
+  final Settings settings;
+  final Map status;
+  final bool visible;
+  const UploadPage({super.key, required this.settings, required this.status, required this.visible});
+  @override
+  State<UploadPage> createState() => _UploadPageState();
+}
+
+class _UploadPageState extends State<UploadPage> {
+  Map? server;  // this device's entry of /api/status
+  String serverNote = '';
+  Timer? timer;
+
+  @override
+  void initState() {
+    super.initState();
+    timer = Timer.periodic(const Duration(seconds: 5), (_) => widget.visible ? _fetch() : null);
+    _fetch();
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _fetch() async {
+    final s = widget.settings;
+    if (s.token.isEmpty) return;
+    try {
+      final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+      final req = await c.getUrl(Uri.parse('${s.server}/api/status'));
+      req.headers.set('Authorization', 'Bearer ${s.token}');
+      final res = await req.close().timeout(const Duration(seconds: 15));
+      final body = jsonDecode(await res.transform(utf8.decoder).join()) as Map;
+      c.close();
+      final mine = (body['devices'] as List? ?? []).cast<Map>().where((d) => d['device'] == s.device).firstOrNull;
+      if (mounted) setState(() { server = mine; serverNote = mine == null ? '服务端还没有 ${s.device} 的处理任务' : ''; });
+    } catch (e) {
+      if (mounted) setState(() => serverNote = '取不到服务端状态：$e');
+    }
+  }
+
+  static String _at(Object? v) {
+    if (v == null) return '—';
+    final t = v is int ? DateTime.fromMillisecondsSinceEpoch(v) : DateTime.tryParse('$v');
+    if (t == null) return '—';
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(t.month)}-${two(t.day)} ${two(t.hour)}:${two(t.minute)}';
+  }
+
+  static String _span(num s) {
+    final m = (s / 60).round();
+    return m >= 60 ? '${m ~/ 60} 小时 ${m % 60} 分' : '$m 分钟';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context), st = widget.status, srv = server;
+    final pending = (st['pending'] ?? 0) as int, bytes = (st['pendingBytes'] ?? 0) as num;
+    final state = st['running'] == true ? '录音中，边录边传' : st['uploading'] == true ? '正在上传' : pending > 0 ? '等待上传' : '空闲，已全部上传';
+    Widget row(String k, String v, {bool bad = false}) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SizedBox(width: 88, child: Text(k, style: TextStyle(color: t.colorScheme.onSurfaceVariant))),
+          Expanded(child: Text(v, style: bad ? TextStyle(color: t.colorScheme.error) : null)),
+        ]));
+    Widget card(String title, List<Widget> rows) => Card.outlined(
+        margin: const EdgeInsets.only(top: 12),
+        child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(title, style: t.textTheme.titleSmall),
+              const SizedBox(height: 6),
+              ...rows,
+            ])));
+    final left = (srv?['left_s'] ?? 0) as num, eta = srv?['eta_s'] as num?;
+    return RefreshIndicator(
+      onRefresh: _fetch,
+      child: ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 32), children: [
+        card('本机（${widget.settings.device}）', [
+          row('状态', state),
+          row('待传', pending == 0 ? '无' : '$pending 块 · ${bytes < 1048576 ? '${(bytes / 1024).round()} KB' : '${(bytes / 1048576).toStringAsFixed(1)} MB'}'),
+          row('最早一块', pending == 0 ? '—' : '录于 ${_at(st['oldest'])}'),
+          row('本次已传', '${st['sent'] ?? 0} 块'),
+          if (st['note'] != null) row('提示', '${st['note']}', bad: true),
+        ]),
+        if (pending > 0 && st['running'] != true && st['uploading'] != true)
+          Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: FilledButton.icon(onPressed: Recorder.upload, icon: const Icon(Icons.cloud_upload), label: const Text('立即上传'))),
+        card('服务端处理', [
+          if (srv == null) row('状态', serverNote.isEmpty ? '加载中…' : serverNote, bad: serverNote.startsWith('取不到'))
+          else ...[
+            row('已收到', _at(srv['received_to'])),
+            row('已定稿', _at(srv['done_to'])),
+            row('待处理', left < 30 ? '已追上' : '${_span(left)} 录音 · 排队 ${srv['queued']} 块'),
+            if (left >= 30) row('预计完成', eta == null ? '—' : '约 ${_span(eta)}'),
+          ],
+        ]),
+      ]),
     );
   }
 }

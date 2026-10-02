@@ -28,6 +28,7 @@ enum Recorder {
         slicer?.foreground = foregroundApp
         result(nil)
       case "status": result(status())
+      case "upload": if Uploader.pending(dir) > 0 { upload() }; result(nil)
       default: result(FlutterMethodNotImplemented)
       }
     }
@@ -35,9 +36,12 @@ enum Recorder {
   }
 
   static func status() -> [String: Any] {
-    ["running": slicer != nil, "files": slicer?.files ?? NSNull(), "slice": slicer?.sliceS() ?? NSNull(),
-     "error": slicer?.error ?? NSNull(), "sent": uploader?.sent ?? NSNull(), "pending": Uploader.pending(dir),
-     "note": uploader?.note ?? NSNull(), "interruptedAt": interruptedAt ?? NSNull()]
+    let q = Uploader.files(dir)
+    let bytes = q.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+    return ["running": slicer != nil, "uploading": uploader != nil && !q.isEmpty, "files": slicer?.files ?? NSNull(),
+            "slice": slicer?.sliceS() ?? NSNull(), "error": slicer?.error ?? NSNull(), "sent": uploader?.sent ?? NSNull(),
+            "pending": q.count, "pendingBytes": bytes, "oldest": q.first.flatMap { Int64($0.deletingPathExtension().lastPathComponent) } ?? NSNull(),
+            "note": uploader?.note ?? NSNull(), "interruptedAt": interruptedAt ?? NSNull()]
   }
 
   private static func start(_ a: [String: Any]) -> String? {
@@ -50,6 +54,7 @@ enum Recorder {
     slicer = s
     interruptedAt = nil
     defaults.set(true, forKey: "active")
+    defaults.removeObject(forKey: "endAt")  // a new recording carries on: no end for the last stop
     UIApplication.shared.isIdleTimerDisabled = true  // the page is meant to be watched
     upload()
     return nil
@@ -58,6 +63,7 @@ enum Recorder {
   private static func stop() {
     let at = now()
     defaults.set(false, forKey: "active")
+    defaults.set(at, forKey: "endAt")  // sent after the last piece, also by a later launch if this one is killed first
     UIApplication.shared.isIdleTimerDisabled = false
     slicer?.stop(); slicer = nil
     // iOS gives about 30 s after the app leaves the screen; what is not sent by then goes on the next launch
@@ -68,11 +74,16 @@ enum Recorder {
       }
     }
     task = UIApplication.shared.beginBackgroundTask(withName: "stop", expirationHandler: release)  // not ended on expiry = killed
+    endAfterQueue(release)
+  }
+
+  /// Once every piece is up (however long that takes, across suspensions) and nothing records again, the saved end.
+  private static func endAfterQueue(_ done: @escaping () -> Void = {}) {
     Thread.detachNewThread {
-      let t0 = Date()
-      while Uploader.pending(dir) > 0 && Date().timeIntervalSince(t0) < 120 { Thread.sleep(forTimeInterval: 0.5) }
-      if slicer == nil { uploader?.end(at) }  // the server may close the conversation now
-      release()
+      while Uploader.pending(dir) > 0 && slicer == nil { Thread.sleep(forTimeInterval: 0.5) }
+      let at = defaults.object(forKey: "endAt") as? Int64
+      if slicer == nil, let at { uploader?.end(at); defaults.removeObject(forKey: "endAt") }  // the server may close the conversation now
+      done()
     }
   }
 
@@ -87,17 +98,15 @@ enum Recorder {
         try? fm.moveItem(at: f, to: dir.appendingPathComponent(f.lastPathComponent.replacingOccurrences(of: ".part.aac", with: ".aac")))
       }
     }
-    guard defaults.bool(forKey: "active") || Uploader.pending(dir) > 0 else { return }
+    guard defaults.bool(forKey: "active") || Uploader.pending(dir) > 0 || defaults.object(forKey: "endAt") != nil else { return }
     let killed = defaults.bool(forKey: "active")
     defaults.set(false, forKey: "active")
     upload()
     if killed {
       uploader?.note = "上次录音被系统终止，未传的 \(Uploader.pending(dir)) 块正在补传，需要手动重新开始"
-      Thread.detachNewThread {  // close the conversation the kill left open, unless a new recording took over
-        while Uploader.pending(dir) > 0 && slicer == nil { Thread.sleep(forTimeInterval: 1) }
-        if slicer == nil, last > 0 { uploader?.end(last) }
-      }
+      if last > 0 { defaults.set(last, forKey: "endAt") }  // close the conversation the kill left open
     }
+    endAfterQueue()  // unless a new recording takes over first
   }
 
   /// One uploader for the queue directory; a new start only refreshes its settings, so no piece goes twice.

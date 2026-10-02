@@ -39,7 +39,12 @@ class MainActivity : FlutterActivity() {
                     RecorderService.slicer?.foreground = on
                     result.success(null)
                 }
-                "status" -> result.success(RecorderService.status())
+                "upload" -> {  // pieces left from a stop, a kill or a lost network: send them without recording
+                    if (RecorderService.slicer == null && RecorderService.uploader == null)
+                        startForegroundService(Intent(this, RecorderService::class.java).setAction("upload"))
+                    result.success(null)
+                }
+                "status" -> result.success(RecorderService.status(File(filesDir, "chunks")))
                 else -> result.notImplemented()
             }
         }

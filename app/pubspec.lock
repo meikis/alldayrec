@@ -449,10 +449,10 @@ packages:
     dependency: transitive
     description:
       name: webview_flutter_wkwebview
-      sha256: fe359c7fac1002124b5b9e2ba3a41906bbb9b2d029ccb4a0067404d8f3704730
+      sha256: a9cc3f507ee40127ed0812ca54d00701a27833f51ea0b5820f4b3e7f42518bf3
       url: "https://pub.flutter-io.cn"
     source: hosted
-    version: "3.26.1"
+    version: "3.27.0"
   xdg_directories:
     dependency: transitive
     description:
@@ -463,4 +463,4 @@ packages:
     version: "1.1.0"
 sdks:
   dart: ">=3.13.4 <4.0.0"
-  flutter: ">=3.44.0"
+  flutter: ">=3.47.0"

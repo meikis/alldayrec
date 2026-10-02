@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "com.suyiiyii.live_record"
     compileSdk = 37
+    compileSdkMinor = 0  // the SDK repository ships 37 as "android-37.0" only; plain 37 asks for "android-37"
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -29,10 +30,17 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        // The installed app was first signed with another Mac's debug key; an update must carry the same key or it
+        // cannot install over it (and an uninstall drops the pieces not yet sent). That key lives here, outside git.
+        getByName("debug") {
+            val ks = file(System.getProperty("user.home") + "/.android/live-record-debug.keystore")
+            if (ks.exists()) storeFile = ks
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
         }
     }
