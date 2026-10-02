@@ -8,6 +8,7 @@ export interface Row {
   state?: string;
   error?: string;
   dictation?: string;
+  source?: string; // the device that recorded it
 }
 
 export interface At {

@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS sentences (       -- final rows; a finalization pass 
 CREATE INDEX IF NOT EXISTS sentences_start ON sentences(start);
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, start TEXT NOT NULL, end TEXT NOT NULL, participants TEXT NOT NULL, speech_s REAL,
-    sentences INTEGER NOT NULL, kind TEXT, source TEXT, dictation_share REAL);
+    sentences INTEGER NOT NULL, kind TEXT, source TEXT, dictation_share REAL, device TEXT);  -- device: its sentences' source
 CREATE INDEX IF NOT EXISTS conversations_start ON conversations(start);
 CREATE TABLE IF NOT EXISTS summaries (        -- body: the summary as the API returns it
     conversation TEXT PRIMARY KEY, status TEXT NOT NULL, prompt_version INTEGER, body TEXT NOT NULL);
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS apart (voice TEXT NOT NULL, grp TEXT NOT NULL, PRIMAR
 CREATE TABLE IF NOT EXISTS people (name TEXT PRIMARY KEY, n INTEGER NOT NULL, e BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS pieces (           -- uploaded audio pieces, the ingest queue; path relative to the recordings dir
     device TEXT NOT NULL, start_ms INTEGER NOT NULL, seconds REAL NOT NULL, path TEXT NOT NULL, PRIMARY KEY (start_ms, device));
-CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);  -- finalized_to, open_conversation, end_at
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);  -- per device: finalized_to:<d>, open_conversation:<d>, end_at:<d>
 """
 
 PATH: Path | None = None
@@ -39,6 +39,8 @@ def open_db(path: Path):
     global PATH
     PATH = path
     conn().executescript(SCHEMA)
+    if "device" not in {r[1] for r in conn().execute("PRAGMA table_info(conversations)")}:  # 10-02: one pipeline per device
+        conn().execute("ALTER TABLE conversations ADD COLUMN device TEXT")
 
 
 def conn() -> sqlite3.Connection:
@@ -80,14 +82,16 @@ def _sentence(r: sqlite3.Row) -> dict:
     return {k: r[k] for k in S_COLS if r[k] is not None} | {"state": "final"}
 
 
-def sentences(lo: str, hi: str, inclusive: bool = False) -> list[dict]:
-    """Rows starting in [lo, hi), or [lo, hi] with inclusive (a conversation's own rows)."""
+def sentences(lo: str, hi: str, inclusive: bool = False, source: str | None = None) -> list[dict]:
+    """Rows starting in [lo, hi), or [lo, hi] with inclusive (a conversation's own rows); of one source when given."""
     op = "<=" if inclusive else "<"
-    return [_sentence(r) for r in conn().execute(f"SELECT * FROM sentences WHERE start >= ? AND start {op} ? ORDER BY start", (lo, hi))]
+    return [_sentence(r) for r in conn().execute(f"SELECT * FROM sentences WHERE start >= ? AND start {op} ? AND (? IS NULL OR source = ?) ORDER BY start",
+                                                 (lo, hi, source, source))]
 
 
-def replace_sentences(c: sqlite3.Connection, lo: str, hi: str, rows: list[dict]):
-    c.execute("DELETE FROM sentences WHERE start >= ? AND start < ?", (lo, hi))
+def replace_sentences(c: sqlite3.Connection, lo: str, hi: str, rows: list[dict], source: str):
+    """A device's pass replaces only that device's rows: another device may have recorded the same minutes."""
+    c.execute("DELETE FROM sentences WHERE start >= ? AND start < ? AND source = ?", (lo, hi, source))
     insert_sentences(c, rows)
 
 
@@ -96,13 +100,14 @@ def insert_sentences(c: sqlite3.Connection, rows: list[dict]):
                   [tuple(r.get(k) for k in S_COLS) for r in rows])
 
 
-def has_text(lo: str, hi: str, q: str) -> bool:
-    return conn().execute("SELECT 1 FROM sentences WHERE start >= ? AND start <= ? AND instr(text, ?) LIMIT 1", (lo, hi, q)).fetchone() is not None
+def has_text(lo: str, hi: str, q: str, source: str | None = None) -> bool:
+    return conn().execute("SELECT 1 FROM sentences WHERE start >= ? AND start <= ? AND (? IS NULL OR source = ?) AND instr(text, ?) LIMIT 1",
+                          (lo, hi, source, source, q)).fetchone() is not None
 
 
 # conversations and summaries
 
-C_COLS = ("id", "start", "end", "participants", "speech_s", "sentences", "kind", "source", "dictation_share")
+C_COLS = ("id", "start", "end", "participants", "speech_s", "sentences", "kind", "source", "dictation_share", "device")
 
 
 def _conversation(r: sqlite3.Row) -> dict:

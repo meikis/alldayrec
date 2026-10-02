@@ -1,9 +1,10 @@
 """The audio store: what clients upload goes in, one endless time-stamped stream of 16 kHz mono samples comes out.
 
 Only this module knows how audio is kept (today: each uploaded piece as its own file under the recordings dir,
-indexed in the pieces table). The pipeline reads `stream(after)` and the playback reads `cut()`; neither cares
-about formats, files or piece lengths. The stream pauses when nothing new has arrived and when the reader stops
-asking (it pulls at its own pace), and a gap between two pieces is only a jump in their start times.
+indexed in the pieces table). Each device is its own stream: the pipeline of a device reads `stream(device, after)`, the playback reads `cut()`;
+neither cares about formats, files or piece lengths. A stream pauses when nothing new has arrived and when its reader
+stops asking (it pulls at its own pace), and a gap between two pieces is only a jump in their start times. A device
+that sends a backlog of older audio while another one is recording is streamed on its own, not dropped.
 """
 import asyncio
 import datetime as dt
@@ -19,7 +20,7 @@ import db
 log = logging.getLogger("live")
 SR = 16000
 DIR: Path | None = None  # the recordings dir
-read_to_ms = 0           # start of the last piece the stream reader has finished with: later ones are still queued
+read_to: dict[str, int] = {}  # per device: start of the last piece its reader has finished with; later ones are queued
 
 
 def decode(src: Path | bytes) -> np.ndarray | None:
@@ -45,34 +46,41 @@ def save(device: str, start_ms: int, body: bytes, content_type: str) -> float | 
     return len(x) / SR
 
 
-def queued() -> int:
-    """Pieces the stream has not handed out yet."""
-    return db.conn().execute("SELECT count(*) FROM pieces WHERE start_ms > ?", (read_to_ms,)).fetchone()[0]
+def queued(device: str) -> int:
+    """Pieces of a device its stream has not handed out yet."""
+    return db.conn().execute("SELECT count(*) FROM pieces WHERE device = ? AND start_ms > ?", (device, read_to.get(device, -1))).fetchone()[0]
 
 
-async def stream(after: dt.datetime | None):
-    """(start time, samples, device) in time order, from the piece holding `after` (the beginning when None), forever.
-    A piece that arrives older than one already handed out is kept for playback but never streamed."""
-    global read_to_ms
+def pending(after: dict[str, dt.datetime | None]) -> list[str]:
+    """Devices with audio after their finalized time (`after`, by device; a device not in it has none yet)."""
+    return [r[0] for r in db.conn().execute("SELECT device, max(start_ms + seconds * 1000) FROM pieces GROUP BY device")
+            if r[1] > (int(after[r[0]].timestamp() * 1000) if after.get(r[0]) else 0)]
+
+
+async def stream(device: str, after: dt.datetime | None):
+    """(start time, samples) of one device in time order, from the piece holding `after` (its first piece when None),
+    forever. A piece arriving older than one already handed out is kept for playback but not streamed."""
     ms = int(after.timestamp() * 1000) if after else 0
-    p = db.conn().execute("SELECT * FROM pieces WHERE start_ms + seconds * 1000 > ? ORDER BY start_ms LIMIT 1", (ms,)).fetchone()
-    read_to_ms = p["start_ms"] - 1 if p else ms
+    p = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms + seconds * 1000 > ? ORDER BY start_ms LIMIT 1", (device, ms)).fetchone()
+    read_to[device] = p["start_ms"] - 1 if p else ms
     while True:
-        p = db.conn().execute("SELECT * FROM pieces WHERE start_ms > ? ORDER BY start_ms LIMIT 1", (read_to_ms,)).fetchone()
+        p = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms > ? ORDER BY start_ms LIMIT 1", (device, read_to[device])).fetchone()
         if p is None:
             await asyncio.sleep(1)
             continue
         x = await asyncio.to_thread(decode, DIR / p["path"])
         if x is not None:
-            yield dt.datetime.fromtimestamp(p["start_ms"] / 1000), x, p["device"]
-        read_to_ms = p["start_ms"]  # after the yield: the reader came back for more, so this one is done
+            yield dt.datetime.fromtimestamp(p["start_ms"] / 1000), x
+        read_to[device] = p["start_ms"]  # after the yield: the reader came back for more, so this one is done
 
 
-def cut(a: dt.datetime, b: dt.datetime, fmt: str) -> bytes | None:
-    """[a, b] (+0.2 s each side) as `fmt` (wav, s16le), or None when no stored audio covers it."""
+def cut(a: dt.datetime, b: dt.datetime, fmt: str, device: str | None = None) -> bytes | None:
+    """[a, b] (+0.2 s each side) of one device (any when None) as `fmt` (wav, s16le), or None when no stored audio
+    covers it."""
     a_ms, b_ms = int(a.timestamp() * 1000), int(b.timestamp() * 1000)
     pieces = [(r["start_ms"], DIR / r["path"]) for r in db.conn().execute(
-        "SELECT start_ms, path FROM pieces WHERE start_ms <= ? AND start_ms + seconds * 1000 >= ? ORDER BY start_ms", (b_ms, a_ms))]
+        "SELECT start_ms, path FROM pieces WHERE start_ms <= ? AND start_ms + seconds * 1000 >= ? AND (? IS NULL OR device = ?) ORDER BY start_ms",
+        (b_ms, a_ms, device, device))]
     if not pieces:
         return None
     # concatenated back to back (the small gaps between pieces are ignored)
@@ -98,9 +106,9 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
         assert save("phone", T(m), tone(60), "audio/ogg") > 59
     assert save("phone", T(9), b"not audio", "audio/ogg") is None
 
-    async def take(after, n):
-        out, s = [], stream(after)
-        async for t, x, _ in s:
+    async def take(after, n, device="phone"):
+        out, s = [], stream(device, after)
+        async for t, x in s:
             out.append(t.minute)
             if len(out) == n:
                 break
@@ -108,6 +116,10 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
         return out
     assert asyncio.run(take(None, 3)) == [0, 1, 5]
     assert asyncio.run(take(dt.datetime(2026, 10, 2, 10, 1, 30), 2)) == [1, 5], "resumes from the piece holding `after`"
-    assert queued() == 1, "the last piece handed out counts until the reader comes back"
+    assert queued("phone") == 1, "the last piece handed out counts until the reader comes back"
+    assert save("iphone", T(2), tone(30), "audio/aac") > 29  # another device, inside phone's gap
+    assert asyncio.run(take(None, 1, "iphone")) == [2], "each device streams on its own"
+    assert set(pending({"phone": dt.datetime(2026, 10, 2, 10, 6)})) == {"iphone"}, "phone done, iphone has none finalized"
+    assert cut(dt.datetime(2026, 10, 2, 10, 2, 5), dt.datetime(2026, 10, 2, 10, 2, 6), "s16le", "phone") is None
     assert len(cut(dt.datetime(2026, 10, 2, 10, 0, 59), dt.datetime(2026, 10, 2, 10, 1, 1), "s16le")) > 2 * SR * 2
     print("ok")

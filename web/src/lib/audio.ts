@@ -22,4 +22,7 @@ export function play(id: string, src: string) {
 }
 
 export const toggle = (r: Row) =>
-  play(r.id, `/api/audio?${new URLSearchParams({ start: r.start, end: r.end })}`);
+  play(
+    r.id,
+    `/api/audio?${new URLSearchParams({ start: r.start, end: r.end, ...(r.source && { device: r.source }) })}`,
+  );

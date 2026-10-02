@@ -57,7 +57,6 @@ AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")      # empty: no auth (loopback on
 log = logging.getLogger("live")
 
 
-SESSION_STALE_S = 45  # chunks arrive every 20 s; a session without one for this long has ended
 
 
 class Segmenter:
@@ -266,8 +265,7 @@ def final_rows(segs: list[dict], names: dict, t0: dt.datetime, win_s: float, con
 
 app = FastAPI()
 clients: set[WebSocket] = set()
-state = {"chunks": None, "done_to": None, "audio_end": None, "latency": [], "events": [], "commit": "",
-         "refine": None, "device": None, "conversation": None, "last_speech": None}
+state = {"chunks": None, "events": [], "commit": "", "devices": {}, "embed": None, "dias": []}  # devices: one pipeline's state each
 
 
 async def broadcast(msg: dict):
@@ -291,7 +289,8 @@ def find_conversation(conv_id: str) -> dict | None:
 
 
 def conversation_rows(c: dict) -> list[dict]:
-    return db.sentences(c["start"], c["end"], inclusive=True)
+    """Its device's rows in its time; a conversation from before per-device pipelines (no device) takes every row."""
+    return db.sentences(c["start"], c["end"], inclusive=True, source=c.get("device"))
 
 
 summary_q: asyncio.Queue = asyncio.Queue()
@@ -364,73 +363,94 @@ def iso(t: dt.datetime) -> str:
     return t.isoformat(timespec="milliseconds")
 
 
-async def pipeline():
+async def pipelines():
+    """One pipeline per device with audio after its finalized time: a phone sending last night's backlog while an
+    iPhone records today is transcribed on its own timeline. A device's pipeline lives on once started."""
+    from diarist import load_embedder
+    state["embed"] = await asyncio.to_thread(load_embedder)
+    running: dict[str, asyncio.Task] = {}
+    while True:
+        devices = [r[0] for r in db.conn().execute("SELECT DISTINCT device FROM pieces")]
+        after = {d: dt.datetime.fromisoformat(v) for d in devices if (v := db.kv(f"finalized_to:{d}"))}
+        for d in audio.pending(after):
+            if d not in running:
+                log.info("pipeline for %s from %s", d, after.get(d))
+                running[d] = asyncio.create_task(pipeline(d), name=f"pipeline:{d}")
+                running[d].add_done_callback(lambda t, d=d: (log.error("pipeline %s ended: %r", d, t.exception()),
+                                                             note(f"{d} 的处理任务退出：{t.exception()!r}"[:160], "error")) if not t.cancelled() else None)
+        await asyncio.sleep(5)
+
+
+async def pipeline(device: str):
     seg = Segmenter()
-    state["seg"] = seg
-    resume = db.kv("finalized_to")
-    state["done_to"] = dt.datetime.fromisoformat(resume) if resume else None
+    resume = db.kv(f"finalized_to:{device}")
+    st = state["devices"][device] = {"seg": seg, "done_to": dt.datetime.fromisoformat(resume) if resume else None, "audio_end": None,
+                                     "last_speech": None, "refine": None, "conversation": None, "latency": []}
     if resume:
-        log.info("resuming after the last finalized row at %s", resume)
+        log.info("%s resuming after the last finalized row at %s", device, resume)
 
     async def feed():
-        """The audio stream into the segmenter, taking the next stretch only while finalization is less than
+        """The device's audio stream into the segmenter, taking the next stretch only while finalization is less than
         BUFFER_S - 300 s of audio behind: the buffer must not drop audio before it is finalized."""
-        async for t, x, device in audio.stream(state["done_to"]):
+        async for t, x in audio.stream(device, st["done_to"]):
             while True:
-                done = state["done_to"]
+                done = st["done_to"]
                 a = max(seg.audio_base, seg.sample_at(done)) if seg.anchors and done else seg.audio_base
                 if (seg.samples - a) / SR <= BUFFER_S - 300:
                     break
                 await asyncio.sleep(1)
-            state["device"], state["audio_end"] = device, t + dt.timedelta(seconds=len(x) / SR)
+            st["audio_end"] = t + dt.timedelta(seconds=len(x) / SR)
             try:
                 utts = seg.push(t, x)
             except Exception:
-                log.exception("segmenter failed on %.1f s at %s", len(x) / SR, t.time())
+                log.exception("%s: segmenter failed on %.1f s at %s", device, len(x) / SR, t.time())
                 continue
             for u in utts:
-                state["last_speech"] = u[1]  # the refiner skips diarizing stretches with no VAD speech
+                st["last_speech"] = u[1]  # the refiner skips diarizing stretches with no VAD speech
 
     async def refine_loop():
-        from diarist import Diarist, load_embedder
+        from diarist import Diarist
         bank = {k: e for k, (_, e) in db.people().items()}
-        embed, dia, grouper = load_embedder(), Diarist(dict(np.load(DATA / "owner-redimnet2.npz")), people=bank), Grouper(open_=db.kv("open_conversation"))
-        state["embed"], state["dia"] = embed, dia  # a rename on the conversation page teaches the diarist a name
+        embed, dia, grouper = state["embed"], Diarist(dict(np.load(DATA / "owner-redimnet2.npz")), people=bank), Grouper(open_=db.kv(f"open_conversation:{device}"))
+        state["dias"].append(dia)  # a rename on the conversation page teaches every diarist a name
         if grouper.open:
-            log.info("continuing the open conversation from %s", grouper.open["start"])
-            note(f"服务启动，接着上次打开的对话 {grouper.open['start'][11:19]}", "state")
+            log.info("%s continuing the open conversation from %s", device, grouper.open["start"])
+            note(f"{device}：接着上次打开的对话 {grouper.open['start'][11:19]}", "state")
         else:
-            note("服务启动", "state")
-        done_to = state["done_to"]  # wall time up to which rows are final
+            note(f"{device}：开始处理", "state")
+        done_to = st["done_to"]  # wall time up to which rows are final
 
         def record(c: dict) -> dict:
-            return {"id": "c" + c["start"].replace("-", "").replace(":", "").replace("T", "")[:14], "start": c["start"], "end": c["end"],
-                    "participants": c["participants"], "sentences": len(c["sentences"]), "speech_s": round(c["speech_s"], 1)}
+            cid = "c" + c["start"].replace("-", "").replace(":", "").replace("T", "")[:14]
+            if (other := db.conversation(cid)) and other.get("device") != device:  # two devices starting the same second
+                cid += "-" + re.sub(r"[^\w]", "_", device)
+            return {"id": cid, "start": c["start"], "end": c["end"], "participants": c["participants"],
+                    "sentences": len(c["sentences"]), "speech_s": round(c["speech_s"], 1), "device": device}
 
         async def commit(closed: list[dict], rows: list[dict] | None = None, lo: str = "", hi: dt.datetime | None = None):
             """One transaction: the pass's rows replace [lo, hi), closed conversations, the finalized time, the open conversation."""
             recs = [record(c) for c in closed]
             with db.tx() as t:
                 if rows is not None:
-                    db.replace_sentences(t, lo, iso(hi), rows)
+                    db.replace_sentences(t, lo, iso(hi), rows, device)
                 for rec in recs:
                     db.insert_conversation(t, rec)
                     db.put_summary({"conversation": rec["id"], "status": "pending", "error": None}, t)
                 if hi:
-                    db.put_kv("finalized_to", iso(hi), t)
-                db.put_kv("open_conversation", grouper.open, t)
+                    db.put_kv(f"finalized_to:{device}", iso(hi), t)
+                db.put_kv(f"open_conversation:{device}", grouper.open, t)
             if hi:
-                state["done_to"] = hi
+                st["done_to"] = hi
             if rows is not None:
                 await broadcast({"type": "final", "from": lo, "to": iso(hi), "rows": rows})
             for rec in recs:
                 dia.reset()
                 summary_q.put_nowait(rec)
-                log.info("conversation closed %s", rec)
+                log.info("%s conversation closed %s", device, rec)
                 note(f"对话结束：{rec['start'][11:19]} 到 {rec['end'][11:19]}，{rec['sentences']} 句，参与 {'、'.join(rec['participants']) or '—'}", "state")
                 await broadcast({"type": "conversation", **db.conversation(rec["id"])})
             if not grouper.open:
-                state["conversation"] = None
+                st["conversation"] = None
 
         async def refine_pass() -> bool:
             """One pass over [done_to - margin, + window]; True when a backlog remains."""
@@ -447,7 +467,7 @@ async def pipeline():
             if len(x) / SR - since < EDGE_S + 10:
                 return False
             hi = at(len(x) / SR - EDGE_S)
-            if not seg.speaking() and (state["last_speech"] is None or state["last_speech"] <= (done_to or t0)):
+            if not seg.speaking() and (st["last_speech"] is None or st["last_speech"] <= (done_to or t0)):
                 # silence: nothing to diarize, but the clock must advance so a conversation can close on time
                 # (speech still going on at the end of the fed audio is not silence: a replayed 10-01 14:43 lost 90 s that way)
                 done_to = hi
@@ -455,16 +475,15 @@ async def pipeline():
                 return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
             was_open = bool(grouper.open)
             m0 = dia.mark()
-            device = state["device"]
             try:
                 segs = clip_turns(await asyncio.to_thread(engine_segs, x), since)
                 engine = segs[0]["engine"] if segs else None
                 marks = await asyncio.to_thread(label_sentences, dia, embed, segs, x)
             except Exception as e:
                 dia.rollback(m0)
-                log.warning("refine failed: %r", e)
-                note(f"这一轮引擎调用失败：{str(e)[:120]}，下一轮重试", "error")
-                state["refine"] = {"error": str(e)[:200]}
+                log.warning("%s refine failed: %r", device, e)
+                note(f"{device}：这一轮引擎调用失败：{str(e)[:120]}，下一轮重试", "error")
+                st["refine"] = {"error": str(e)[:200]}
                 return False
             labels = {g["speaker"]: g["speaker"] for g in segs}
             by_label = {}
@@ -480,37 +499,37 @@ async def pipeline():
             shown = dt.datetime.now()
             for r in rows:  # end of speech -> on the page: the latency the person sees
                 r["source"], r["engine"], r["shown_at"] = device, engine, iso(shown)
-                state["latency"].append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
-            del state["latency"][:-50]
+                st["latency"].append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
+            del st["latency"][:-50]
             done_to = hi
             closed = [c for r in rows for c in grouper.sentence(r)]
             closed += grouper.advance(hi)
             await commit(closed, rows, iso(lo), hi)
             if grouper.open:
                 o = grouper.open
-                state["conversation"] = {"start": o["start"], "end": o["end"], "sentences": len(o["sentences"])}
-            state["refine"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
+                st["conversation"] = {"start": o["start"], "end": o["end"], "sentences": len(o["sentences"]), "device": device}
+            st["refine"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
                                "speakers": by_label, "changed": len(rows),
                                "backlog_s": round((seg.time_at(seg.samples) - hi).total_seconds())}
-            log.info("refine %s: %s", device, state["refine"])
+            log.info("refine %s: %s", device, st["refine"])
             note(f"定稿一轮：{device} 送 {len(x) / SR:.0f} s（含 {since:.0f} s 上下文）给 {engine or ENGINE}，"
-                 f"{state['refine']['ms'] / 1000:.1f} s，{len(rows)} 句，定稿到 {hi.strftime('%H:%M:%S')}，积压 {state['refine']['backlog_s']} s")
+                 f"{st['refine']['ms'] / 1000:.1f} s，{len(rows)} 句，定稿到 {hi.strftime('%H:%M:%S')}，积压 {st['refine']['backlog_s']} s")
             if grouper.open and not was_open:
-                note(f"对话开始：{grouper.open['start'][11:19]}", "state")
-            return state["refine"]["backlog_s"] > REFINE_WINDOW_S - REFINE_MARGIN_S
+                note(f"{device}：对话开始 {grouper.open['start'][11:19]}", "state")
+            return st["refine"]["backlog_s"] > REFINE_WINDOW_S - REFINE_MARGIN_S
 
         while True:
             await asyncio.sleep(REFINE_EVERY_S)
             while await refine_pass():  # timer-driven: silence also advances, so conversations close on time
                 pass
             closed = []
-            end_at = db.kv("end_at")
-            if end_at and not audio.queued():  # the recorder stopped and its last audio is processed
+            end_at = db.kv(f"end_at:{device}")
+            if end_at and not audio.queued(device):  # the recorder stopped and its last audio is processed
                 closed += grouper.end(dt.datetime.fromisoformat(end_at))
-                db.put_kv("end_at", None)
+                db.put_kv(f"end_at:{device}", None)
             idle = grouper.tick()  # the safety net: nothing at all for IDLE_S (the recorder died without an end)
             if idle:
-                note("20 分钟没有任何事件，按兜底规则关闭对话", "warn")
+                note(f"{device}：20 分钟没有任何事件，按兜底规则关闭对话", "warn")
             closed += idle
             if closed:
                 await commit(closed)
@@ -522,20 +541,27 @@ async def pipeline():
                                        note(f"内部任务 {name} 退出：{t.exception()!r}"[:160], "error")) if not t.cancelled() else None)
         return t
 
-    watched(feed(), "feed")
+    watched(feed(), f"feed:{device}")
     await refine_loop()
 
 
-def status() -> dict:
-    """What the page's status line shows, plus the pipeline's clocks, for diagnosis."""
-    end, done = state["audio_end"], state["done_to"]
-    return {"device": state["device"], "audio_end": end.isoformat(timespec="seconds") if end else None,
+def device_status(device: str, st: dict) -> dict:
+    end, done, lat = st["audio_end"], st["done_to"], st["latency"]
+    return {"device": device, "audio_end": end.isoformat(timespec="seconds") if end else None,
             "behind_s": round((dt.datetime.now() - end).total_seconds(), 1) if end else None,
-            "queued": audio.queued() if audio.DIR else 0, "done_to": done.isoformat(timespec="seconds") if done else None,
-            "last_speech": state["last_speech"].isoformat(timespec="seconds") if state["last_speech"] else None,
-            "commit": state["commit"], "refine": state["refine"], "conversation": state["conversation"],
-            "chunks": state["chunks"], "engine": ENGINE,
-            "latency_s": sorted(state["latency"])[len(state["latency"]) // 2] if state["latency"] else None}
+            "queued": audio.queued(device), "done_to": done.isoformat(timespec="seconds") if done else None,
+            "last_speech": st["last_speech"].isoformat(timespec="seconds") if st["last_speech"] else None,
+            "refine": st["refine"], "conversation": st["conversation"],
+            "latency_s": sorted(lat)[len(lat) // 2] if lat else None}
+
+
+def status() -> dict:
+    """What the page's status line shows (the device whose audio came in last), every device's pipeline, and the
+    pieces still queued over all devices."""
+    ds = [device_status(d, st) for d, st in state["devices"].items()]
+    top = max(ds, key=lambda d: d["audio_end"] or "", default={"device": None, "audio_end": None, "behind_s": None, "done_to": None,
+                                                                 "last_speech": None, "refine": None, "conversation": None, "latency_s": None})
+    return {**top, "queued": sum(d["queued"] for d in ds), "devices": ds, "commit": state["commit"], "chunks": state["chunks"], "engine": ENGINE}
 
 
 async def status_loop():
@@ -600,25 +626,16 @@ async def apk():
     return FileResponse(p, media_type="application/vnd.android.package-archive", filename="live-record.apk")
 
 
-def busy(device: str):
-    """One stream at a time: a second device would silently take the pipeline over."""
-    c = state["chunks"]
-    if c and time.time() - c["at"] < SESSION_STALE_S and c["device"] != device:
-        note(f"拒绝 {device} 开录：{c['device']} 正在录音", "warn")
-        raise HTTPException(409, f"{c['device']} 正在录音，服务端同一时刻只收一路")
-
-
 @app.post("/api/chunks")
 async def chunk(request: Request, device: str, start: int):
     """One self-contained audio file (the apps' Opus or AAC pieces), `start` its device time in unix ms. Kept on disk (also
-    for playback) and queued; the feeder takes the pieces in time order at the pace finalization keeps up with, so a
-    client back from an outage sends its whole backlog at once."""
-    busy(device)
+    for playback) and queued; the device's pipeline takes its pieces in time order at the pace finalization keeps up
+    with, so a client back from an outage sends its whole backlog at once, whatever other devices are doing."""
     seconds = await asyncio.to_thread(audio.save, device, start, await request.body(), request.headers.get("content-type", ""))
     if seconds is None:
         raise HTTPException(400, "could not decode")
     state["chunks"] = {"device": device, "at": time.time()}
-    late = "（早于已处理的位置，只存不转写）" if start <= audio.read_to_ms else ""
+    late = "（早于这台设备已处理的位置，只存不转写）" if start <= audio.read_to.get(device, -1) else ""
     note(f"收到 {device} 的块 {seconds:.1f} s，起于 {dt.datetime.fromtimestamp(start / 1000).strftime('%H:%M:%S')}{late}", "warn" if late else "info")
     return {"seconds": round(seconds, 2)}
 
@@ -627,7 +644,7 @@ async def chunk(request: Request, device: str, start: int):
 async def chunk_end(device: str, t: int):
     """The recorder stopped at device time t (unix ms): the open conversation closes once its audio is processed."""
     end = dt.datetime.fromtimestamp(t / 1000)
-    db.put_kv("end_at", iso(end))  # kept across a restart: the queue may still hold the audio before it
+    db.put_kv(f"end_at:{device}", iso(end))  # kept across a restart: the queue may still hold the audio before it
     log.info("%s stopped recording at %s", device, end.time())
     note(f"{device} 停止录音（{end.strftime('%H:%M:%S')}），处理完剩余音频后关闭对话")
     return {"ok": True}
@@ -653,8 +670,8 @@ async def sentences(date: str | None = None):
 async def conversations(date: str | None = None):
     day = dt.date.fromisoformat(date) if date else dt.date.today()
     closed = db.conversations(day.isoformat(), (day + dt.timedelta(days=1)).isoformat())
-    o = state["conversation"]
-    return closed + ([{**o, "state": "open"}] if o and o["start"][:10] == day.isoformat() else [])
+    return closed + [{**st["conversation"], "state": "open"} for st in state["devices"].values()
+                     if st["conversation"] and st["conversation"]["start"][:10] == day.isoformat()]
 
 
 @app.get("/api/days")
@@ -678,7 +695,7 @@ async def search(q: str = "", tag: str = "", kind: str = "", who: str = "", afte
             continue
         if q:
             meta = json.dumps([s.get(k) for k in ("title", "summary", "tags", "todos", "decisions")], ensure_ascii=False)
-            if q.lower() not in meta.lower() and not db.has_text(c["start"], c["end"], q):
+            if q.lower() not in meta.lower() and not db.has_text(c["start"], c["end"], q, c.get("device")):
                 continue
         out.append(c)
         if len(out) == limit:
@@ -754,7 +771,7 @@ async def apply_rename(conv_id: str, frm: str, to: str) -> dict:
         es = []
         for r in long:
             try:
-                x = np.frombuffer(await cut(r["start"], min(r["end"], (dt.datetime.fromisoformat(r["start"]) + dt.timedelta(seconds=15)).isoformat()), "s16le"), np.int16)
+                x = np.frombuffer(await cut(r["start"], min(r["end"], (dt.datetime.fromisoformat(r["start"]) + dt.timedelta(seconds=15)).isoformat()), "s16le", r.get("source")), np.int16)
             except HTTPException:  # history conversations have no recording here
                 continue
             es.append(await asyncio.to_thread(state["embed"], x))
@@ -763,7 +780,8 @@ async def apply_rename(conv_id: str, frm: str, to: str) -> dict:
             n = n0 + len(es)
             mean = (e0 * n0 + np.sum(es, 0)) / n
             db.conn().execute("INSERT OR REPLACE INTO people VALUES (?, ?, ?)", (to, n, db.blob(mean)))
-            state["dia"].people[to] = mean / np.linalg.norm(mean)
+            for dia in state["dias"]:
+                dia.people[to] = mean / np.linalg.norm(mean)
             learnt = len(es)
     note(f"对话 {c['start'][11:19]}：{frm} 改名为 {to}" + (f"，记住了 {learnt} 句的声纹" if learnt else ""), "state")
     return {"participants": c["participants"], "renamed": len(hit), "voiceprints": learnt}
@@ -947,7 +965,7 @@ async def voices_loop():
                 es = []
                 for r in long:
                     try:
-                        x = np.frombuffer(await cut(r["start"], min(r["end"], (dt.datetime.fromisoformat(r["start"]) + dt.timedelta(seconds=15)).isoformat()), "s16le"), np.int16)
+                        x = np.frombuffer(await cut(r["start"], min(r["end"], (dt.datetime.fromisoformat(r["start"]) + dt.timedelta(seconds=15)).isoformat()), "s16le", r.get("source")), np.int16)
                     except HTTPException:
                         continue
                     es.append(await asyncio.to_thread(state["embed"], x))
@@ -964,15 +982,15 @@ async def voices_loop():
 
 
 @app.get("/api/audio")
-async def audio_wav(start: str, end: str):
-    """WAV of [start, end] (+0.2 s each side) cut from the uploaded pieces covering it."""
-    wav = await cut(start, end, "wav")
+async def audio_wav(start: str, end: str, device: str | None = None):
+    """WAV of [start, end] (+0.2 s each side) cut from the uploaded pieces of `device` (any when not given) covering it."""
+    wav = await cut(start, end, "wav", device)
     return Response(wav, media_type="audio/wav")
 
 
-async def cut(start: str, end: str, fmt: str) -> bytes:
+async def cut(start: str, end: str, fmt: str, device: str | None = None) -> bytes:
     a, b = dt.datetime.fromisoformat(start), dt.datetime.fromisoformat(end)
-    out = await asyncio.to_thread(audio.cut, a, b, fmt) if 0 < (b - a).total_seconds() <= 120 else None
+    out = await asyncio.to_thread(audio.cut, a, b, fmt, device) if 0 < (b - a).total_seconds() <= 120 else None
     if out is None:
         raise HTTPException(404, "no recording covers this time")
     return out
@@ -1014,7 +1032,7 @@ def main():
 
     @app.on_event("startup")
     async def start():
-        for name, coro in (("pipeline", pipeline()), ("status", status_loop()), ("summary", summary_worker()),
+        for name, coro in (("pipeline", pipelines()), ("status", status_loop()), ("summary", summary_worker()),
                            ("voices", voices_loop())):
             asyncio.create_task(coro, name=name).add_done_callback(
                 lambda t, n=name: log.error("task %s ended: %r", n, t.exception()) if not t.cancelled() else None)
