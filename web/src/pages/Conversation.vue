@@ -231,7 +231,7 @@ async function save() {
         <div class="muted foot">
           {{
             s.model
-              ? `由 ${s.model} 生成 · ${(s.created_at ?? "").slice(5, 16).replace("T", " ")}`
+              ? `由 ${s.model}${s.via === "live" ? "（会中实时 Agent）" : ""} 生成 · ${(s.created_at ?? "").slice(5, 16).replace("T", " ")}`
               : "语音不足 60 秒，没有生成摘要"
           }}
           <button @click="regen">重新生成</button>

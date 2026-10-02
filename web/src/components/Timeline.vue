@@ -9,7 +9,7 @@ defineEmits<{ jump: [start: string] }>();
 <template>
   <div
     v-for="(t, i) in topics"
-    :key="i + t.start"
+    :key="t.id ?? i + t.start"
     class="topic"
     :class="{ now: open && i === topics.length - 1 }"
   >

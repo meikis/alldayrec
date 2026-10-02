@@ -341,15 +341,27 @@ async def summary_worker():
     await asyncio.gather(*(summarize_loop() for _ in range(SUMMARY_WORKERS)))
 
 
+def summarize(c: dict, tags: list[str]) -> dict:
+    """A conversation that closed with a live agent gets its final summary from that agent (the whole conversation
+    and the day in its context, the prefix cached); any other, and every redo, from a plain summary call."""
+    rows = conversation_rows(c)
+    tl = db.timeline(c["id"]) if c.get("via_live") else None
+    if tl and tl.get("messages") and c.get("speech_s", 0) >= summary.MIN_SPEECH_S:
+        return {**summary.result(c, rows, *live.final(tl, rows, tags)), "via": "live"}
+    return summary.summarize(c, rows, tags)
+
+
 async def summarize_loop():
     while True:
         c = await summary_q.get()
         for delay in (10, 60, 300, None):
             try:
-                res = await asyncio.to_thread(summary.summarize, c, conversation_rows(c), list(tag_counts())[:60])
+                res = await asyncio.to_thread(summarize, c, list(tag_counts())[:60])
                 break
             except Exception as e:  # HTTP errors, timeouts, a reply that is not JSON
                 log.warning("summary %s failed: %r", c["id"], e)
+                if delay == 300:
+                    c.pop("via_live", None)  # the last try takes the plain summary
                 res = {"conversation": c["id"], "status": "failed", "error": repr(e)[:300]}
                 if delay:
                     await asyncio.sleep(delay)
@@ -434,7 +446,7 @@ async def pipeline(device: str):
             note(f"{device}：接着上次打开的对话 {grouper.open['start'][11:19]}", "state")
         else:
             note(f"{device}：开始处理", "state")
-        if (lv := db.kv(f"live:{device}")) and grouper.open and lv["start"] == grouper.open["start"]:
+        if (lv := db.kv(f"live:{device}")) and "messages" in lv and grouper.open and lv["start"] == grouper.open["start"]:
             st["live"] = lv
         live_task, live_failed = None, 0.0
         done_to = st["done_to"]  # wall time up to which rows are final
@@ -457,6 +469,7 @@ async def pipeline(device: str):
                     db.put_summary({"conversation": rec["id"], "status": "pending", "error": None}, t)
                     if st["live"] and st["live"]["start"] == rec["start"]:
                         db.put_timeline(rec["id"], st["live"], t)
+                        rec["via_live"] = True  # its agent writes the final summary
                 live_ends = st["live"] and (not grouper.open or grouper.open["start"] != st["live"]["start"])
                 if live_ends:
                     db.put_kv(f"live:{device}", None, t)
@@ -497,7 +510,7 @@ async def pipeline(device: str):
         async def live_update():
             nonlocal live_failed
             o = grouper.open
-            lv = st["live"] or {"start": o["start"], "device": device, "topics": [], "frozen": 0}
+            lv = st["live"] or live.new(o["start"], device, db.conversations(o["start"][:10], o["start"]))
             rows, speech = [r for r in o["sentences"] if r.get("text")], o["speech_s"]
             try:
                 res = await asyncio.to_thread(live.analyze, lv, rows)
@@ -511,7 +524,7 @@ async def pipeline(device: str):
             if grouper.open and grouper.open["start"] == res["start"]:
                 st["live"] = res
                 db.put_kv(f"live:{device}", res)
-                await broadcast({"type": "live", "device": device, "live": res})
+                await broadcast({"type": "live", "device": device, "live": live.public(res)})
             elif r := db.conn().execute("SELECT id FROM conversations WHERE start = ? AND device = ?", (res["start"], device)).fetchone():
                 db.put_timeline(r[0], res)  # it closed while the call ran
 
@@ -756,7 +769,7 @@ async def events():
 @app.get("/api/live")
 async def live_now():
     """Each device's live analysis of its open conversation."""
-    return [st["live"] for st in state["devices"].values() if st.get("live")]
+    return [live.public(st["live"]) for st in state["devices"].values() if st.get("live")]
 
 
 @app.get("/api/status")
@@ -831,7 +844,7 @@ async def conversation(conv_id: str):
     c = find_conversation(conv_id)
     if not c:
         raise HTTPException(404, "no such conversation")
-    return {**c, "summary": db.summary(conv_id), "timeline": db.timeline(conv_id), "feedback": db.feedback(conv_id),
+    return {**c, "summary": db.summary(conv_id), "timeline": live.public(t) if (t := db.timeline(conv_id)) else None, "feedback": db.feedback(conv_id),
             "rows": conversation_rows(c)}
 
 

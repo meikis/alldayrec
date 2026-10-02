@@ -42,16 +42,22 @@ def transcript(rows: list[dict]) -> str:
     return "\n".join(f'[{r["start"][11:19]}] {r.get("speaker") or "S?"}: {r["text"]}' for r in rows if r.get("text"))
 
 
-def chat(text: str, known_tags: list[str]) -> tuple[dict, dict]:
-    """(parsed result, raw response); raises on HTTP errors and on a reply that is not JSON."""
-    system = SYSTEM + ("\n已有标签：" + "、".join(known_tags) if known_tags else "")
-    req = {"model": os.environ["LLM_MODEL"], "response_format": {"type": "json_object"},
-           "messages": [{"role": "system", "content": system}, {"role": "user", "content": text}]}
+def complete(messages: list[dict], timeout: int = 300) -> tuple[dict, dict]:
+    """One chat call answering a JSON object: (parsed reply, raw response); raises on HTTP errors and on a reply that is not JSON."""
+    req = {"model": os.environ["LLM_MODEL"], "response_format": {"type": "json_object"}, "messages": messages}
     r = urllib.request.urlopen(urllib.request.Request(
         os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions", json.dumps(req).encode(),
-        {"Authorization": f'Bearer {os.environ["LLM_API_KEY"]}', "Content-Type": "application/json"}), timeout=300)
+        {"Authorization": f'Bearer {os.environ["LLM_API_KEY"]}', "Content-Type": "application/json"}), timeout=timeout)
     raw = json.load(r)
     return json.loads(raw["choices"][0]["message"]["content"]), raw
+
+
+def instructions(known_tags: list[str]) -> str:
+    return SYSTEM + ("\n已有标签：" + "、".join(known_tags) if known_tags else "")
+
+
+def chat(text: str, known_tags: list[str]) -> tuple[dict, dict]:
+    return complete([{"role": "system", "content": instructions(known_tags)}, {"role": "user", "content": text}])
 
 
 def anchor(res: dict, rows: list[dict]) -> dict:
@@ -79,9 +85,14 @@ def summarize(conv: dict, rows: list[dict], known_tags: list[str] = ()) -> dict:
     if conv.get("speech_s", 0) < MIN_SPEECH_S or not rows:
         first = next((r["text"] for r in rows if r.get("text")), "")
         return {**base, "status": "done", "model": None, "title": first[:20], "summary": "", **{k: [] for k in LISTS}}
-    res, raw = chat(transcript(rows), list(known_tags))
+    return result(conv, rows, *chat(transcript(rows), list(known_tags)))
+
+
+def result(conv: dict, rows: list[dict], res: dict, raw: dict) -> dict:
+    """A model's reply in the SYSTEM format as the stored summary."""
     res = anchor(res, rows)
-    return {**base, "status": "done", "model": raw.get("model"), "usage": raw.get("usage"),
+    return {"conversation": conv["id"], "prompt_version": PROMPT_VERSION, "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "error": None, "status": "done", "model": raw.get("model"), "usage": raw.get("usage"),
             "media_share": media_share(rows, res["media_spans"]),
             **{k: res.get(k) or ("" if k in ("title", "summary") else []) for k in ("title", "summary", *LISTS)}}
 

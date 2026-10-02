@@ -72,6 +72,7 @@ export interface Summary {
   media_share?: number; // of the speech, the part in media_spans
   decisions?: (At & { text: string; quote?: string })[];
   model?: string | null;
+  via?: "live"; // written by the conversation's live agent at its close
   created_at?: string;
 }
 
@@ -88,6 +89,7 @@ export interface Conversation {
 }
 
 export interface LiveTopic {
+  id?: number; // the agent's handle; timelines kept before it have none
   title: string;
   start: string; // the row it starts at
   points: string[];
@@ -100,7 +102,6 @@ export interface LiveState {
   device: string;
   start: string;
   topics: LiveTopic[];
-  frozen: number;
   at: string;
   upto: string;
   sentences: number;
