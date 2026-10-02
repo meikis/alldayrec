@@ -53,6 +53,7 @@ REFINE_EVERY_S = int(os.environ.get("REFINE_EVERY_S", "30"))  # draft layer: a p
 REFINE_WINDOW_S = int(os.environ.get("REFINE_WINDOW_S", "240"))    # draft layer: most audio one pass takes
 REFINE_MARGIN_S = 1.0                      # audio re-read before the last drafted time: the engine's sentence starts come a little late
 DRAFT_BACK_S = 300                         # a page that opens gets drafts this far back at most (the minutes not final yet)
+RELABEL_GROUPS = True                      # relabel at a close: the engine's speaker ids in a piece as units, split when their voices disagree
 LIVE_AUDIO_S = 120                         # a device whose audio came this recently is recording now: drafts and live analysis
 ENGINE = os.environ.get("ENGINE", "volc")  # second-layer engine: volc (seed-asr-2.0 streaming API) | stepfun (file-mode service)
 BUFFER_S = 900                             # audio kept for refinement; pieces are fed only while finalization is within BUFFER_S - 300
@@ -464,6 +465,7 @@ async def pipeline(device: str):
                                      # the draft layer: its own progress, VAD utterances, last pause, wake-up, and its rows not yet covered
                                      "draft_to": dt.datetime.fromisoformat(draft0) if draft0 else None, "draft_utts": [],
                                      "vad_to": None, "wake": asyncio.Event(), "draft": None, "drafting": False,
+                                     "voiced": [],  # the open conversation's final sentences with their voiceprints: relabelled at its close
                                      "drafts": db.drafts(iso(done0) if done0 else "", None, device)}
     if resume:
         log.info("%s resuming after the last finalized row at %s", device, resume)
@@ -494,7 +496,7 @@ async def pipeline(device: str):
                     st["wake"].set()
             del st["draft_utts"][:-200]
 
-    from diarist import Diarist
+    from diarist import Diarist, relabel
     bank = {k: e for k, (_, e) in db.people().items()}
     owner = dict(np.load(DATA / "owner-redimnet2.npz"))
     embed, dia, grouper = state["embed"], Diarist(owner, people=bank), Grouper(open_=db.kv(f"open_conversation:{device}"))
@@ -537,6 +539,26 @@ async def pipeline(device: str):
         return {"id": cid, "start": c["start"], "end": c["end"], "participants": c["participants"],
                 "sentences": len(c["sentences"]), "speech_s": round(c["speech_s"], 1), "device": device}
 
+    def relabel_rows(rec: dict) -> tuple[list[dict], int] | None:
+        """A closed conversation's final rows labelled again with all its sentences in view (diarist.relabel), and how
+        many changed; None when its voices do not cover its rows (a restart lost the earlier ones)."""
+        vs = [v for v in st["voiced"] if rec["start"] <= v["start"] <= rec["end"]]
+        rows = db.sentences(rec["start"], rec["end"], inclusive=True, source=device)
+        if not vs or not rows:
+            return None
+        labels = relabel([v["e"] for v in vs], [v["dur"] for v in vs], owner,
+                         [v["key"] or ("alone", i) for i, v in enumerate(vs)] if RELABEL_GROUPS else None, people=dia.people)
+        changed, missing = 0, 0
+        for r in rows:
+            mine = [(v["dur"], lab) for v, lab in zip(vs, labels) if r["start"] <= v["start"] <= r["end"]]
+            if not mine:
+                missing += 1
+                continue
+            new = max(mine)[1]  # a row of several sentences: its longest one's
+            if new != r.get("speaker"):
+                r["speaker"], changed = new, changed + 1
+        return (rows, changed) if missing <= len(rows) // 10 else None
+
     async def commit(closed: list[dict], rows: list[dict] | None = None, lo: str = "", hi: dt.datetime | None = None):
         """One transaction: the piece's rows replace [lo, hi), closed conversations (with the live analysis that
         overlaps one), the finalized time, the open conversation."""
@@ -545,8 +567,15 @@ async def pipeline(device: str):
         with db.tx() as t:
             if rows is not None:
                 db.replace_sentences(t, lo, iso(hi), rows, device)
-            attached = False
+            attached, relabelled = False, []
             for rec in recs:
+                if (rl := relabel_rows(rec)) and rl[1]:  # every label again, with the whole conversation in view
+                    t.executemany("UPDATE sentences SET speaker = ? WHERE source = ? AND id = ?", [(r["speaker"], device, r["id"]) for r in rl[0]])
+                    rec["participants"] = sorted({r["speaker"] for r in rl[0] if r.get("speaker") and r["speaker"] not in IGNORE}, key=str)
+                    relabelled.append((rec, rl[0], rl[1]))
+                    if lv and overlaps(lv, rec):
+                        lv = {**lv, "drafted": True}  # its agent saw other labels: the closing turn resends the final transcript
+                st["voiced"] = [v for v in st["voiced"] if v["start"] > rec["end"]]
                 db.insert_conversation(t, rec)
                 db.put_summary({"conversation": rec["id"], "status": "pending", "error": None}, t)
                 if lv and overlaps(lv, rec):
@@ -568,6 +597,11 @@ async def pipeline(device: str):
             st["progress"] = [p for p in st["progress"] if now - p[0] < 600] + [(now, hi)]
         if rows is not None:
             await broadcast({"type": "final", "device": device, "from": lo, "to": iso(hi), "rows": rows})
+        for rec, rs, n in relabelled:
+            log.info("%s relabelled %d of %d rows of %s", device, n, len(rs), rec["id"])
+            note(f"对话 {rec['start'][11:19]}：整段重新认人，{len(rs)} 句里改了 {n} 句", "state")
+            await broadcast({"type": "final", "device": device, "from": rec["start"],
+                             "to": iso(dt.datetime.fromisoformat(rec["end"]) + dt.timedelta(milliseconds=1)), "rows": rs})
         for rec in recs:
             dia.reset()
             ddia.reset()
@@ -650,7 +684,7 @@ async def pipeline(device: str):
         try:
             segs = await asyncio.to_thread(engine_segs, x)
             engine = segs[0]["engine"] if segs else None
-            await asyncio.to_thread(label_sentences, dia, embed, segs, x)
+            marks = await asyncio.to_thread(label_sentences, dia, embed, segs, x)
         except Exception as e:
             dia.rollback(m0)
             log.warning("%s final piece failed: %r", device, e)
@@ -662,6 +696,9 @@ async def pipeline(device: str):
         for g in segs:  # final_rows keys confidence by label
             by_label[g["speaker"]] = max(by_label.get(g["speaker"], 0.0), g["confidence"])
         lo, hi, rows = final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, base, len(x) / SR, by_label, 0.0, at, 0.0)
+        st["voiced"] += [{"start": iso(at(g["start_ms"] / 1000)), "dur": (g["end_ms"] - g["start_ms"]) / 1000,
+                          "e": dia.E[m[0] - 1] if m else None, "key": (iso(base), g["engine_speaker"]) if g.get("engine_speaker") else None}
+                         for g, m in zip(segs, marks)]
         with open(DATA / f"{lo.date()}.passes.jsonl", "a") as f:  # every piece's raw engine output, for tracing lost rows
             f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"), "layer": "final", "t0": iso(base), "since": 0.0,
                                 "from": iso(lo), "to": iso(hi), "segs": segs}, ensure_ascii=False) + "\n")

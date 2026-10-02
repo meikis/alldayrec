@@ -10,7 +10,9 @@ Candidates
   volc-sentence  the live pipeline since 09-29 21:40: no context, Volcengine sentences, conversation clustering (diarist)
   volc-stream    one Volcengine two-pass streaming session per stretch of VAD speech, definite sentences, diarist labels
   final-pieces   the live final layer since issue #9: server.next_cut pieces (<= CHUNK_S, cut in pauses) as the
-                 audio arrives in 5 s pieces, each piece once to Volcengine, diarist labels
+                 audio arrives in 5 s pieces, each piece once to Volcengine, diarist labels; FINAL_LABELS=online (as
+                 each piece comes) | offline (diarist.relabel at the end) | engine (the engine's ids per piece as
+                 units) | guarded (engine units split when their voices disagree: the server's relabel at a close)
   cloud-window   every 30 s, last 240 s to StepFun file diarization (via the file-mode ASR service), cluster mean vs owner,
                  final_rows replace the window (the live second layer as designed)
   local-window   same cadence, diarization by sherpa-onnx pyannote-segmentation-3.0 + CAM++ clustering on the Mac,
@@ -411,7 +413,7 @@ def rows_final_pieces(case: Case, dia, embed) -> list[dict]:
     piece from the finalized time to it goes whole to the engine and every sentence of it is final."""
     from server import MERGE_GAP_S, label_sentences, next_cut
     total, utts, piece = len(case.x) / SR, vad_utterances(case), 5.0
-    rows, base, end = [], 0.0, piece
+    rows, pieces, base, end = [], [], 0.0, piece
     while base < total - 0.05:
         end = min(end, total)
         known = [(max(0.0, a - base), b - base) for a, b in utts if b > base and a < end]
@@ -428,8 +430,20 @@ def rows_final_pieces(case: Case, dia, embed) -> list[dict]:
         if any(u < cut for u, _ in known):
             segs = case.volc_window(a, e)
             label_sentences(dia, embed, segs, case.x[int(a * SR):int(e * SR)])
-            rows += final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, EPOCH + dt.timedelta(seconds=a), e - a, since=0.0, edge=0.0)[2]
+            pieces.append((a, e, segs))
         base = e
+    mode = os.environ.get("FINAL_LABELS", "online")  # online: as each piece comes | offline | engine (speaker ids as units)
+    if mode != "online":
+        from diarist import GUARD, relabel
+        flat = [(a, g) for a, _, segs in pieces for g in segs]
+        x_of = lambda a, g: case.x[int((a + g["start_ms"] / 1000) * SR):int((a + min(g["end_ms"], g["start_ms"] + 15000) / 1000) * SR)]
+        E = [embed(x_of(a, g)) if g["end_ms"] - g["start_ms"] >= 300 else None for a, g in flat]
+        groups = [(a, g["engine_speaker"]) if g.get("engine_speaker") else ("alone", i) for i, (a, g) in enumerate(flat)] if mode in ("engine", "guarded") else None
+        guard = GUARD if mode == "guarded" else None
+        for (_, g), l in zip(flat, relabel(E, [(g["end_ms"] - g["start_ms"]) / 1000 for _, g in flat], dia.bank_raw, groups, guard=guard)):
+            g["speaker"] = l
+    for a, e, segs in pieces:
+        rows += final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, EPOCH + dt.timedelta(seconds=a), e - a, since=0.0, edge=0.0)[2]
     return rows
 
 
@@ -552,7 +566,10 @@ def run(case: Case, name: str) -> list[dict]:
         return rows_per_sentence(case, Diarist(dict(np.load(os.environ.get("OWNER_BANK", os.environ["LIVE_DATA"] + "/owner-redimnet2.npz")))), load_embedder())
     if name == "final-pieces":
         from diarist import Diarist, load_embedder
-        return rows_final_pieces(case, Diarist(dict(np.load(os.environ.get("OWNER_BANK", os.environ["LIVE_DATA"] + "/owner-redimnet2.npz")))), load_embedder())
+        bank = dict(np.load(os.environ.get("OWNER_BANK", os.environ["LIVE_DATA"] + "/owner-redimnet2.npz")))
+        dia = Diarist(bank)
+        dia.bank_raw = bank
+        return rows_final_pieces(case, dia, load_embedder())
     if name == "volc-stream":
         from diarist import Diarist, load_embedder
         return rows_streamed(case, Diarist(dict(np.load(os.environ.get("OWNER_BANK", os.environ["LIVE_DATA"] + "/owner-redimnet2.npz")))), load_embedder())

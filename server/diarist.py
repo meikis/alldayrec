@@ -110,6 +110,72 @@ class Diarist:
         return self.ids[i], round(best[1], 3)
 
 
+GUARD = float(os.environ.get("DIAR_GUARD", "0.6"))  # an engine group whose long sentence is this far from the group's mean voiceprint is split
+
+
+def relabel(E: list, dur: list[float], bank: dict[str, np.ndarray], groups: list | None = None,
+            people: dict[str, np.ndarray] | None = None, th: float = TH, guard: float | None = GUARD) -> list[str]:
+    """Labels for a whole conversation at once, after it closed: the online labels of a sentence were fixed with only
+    the sentences before it. E: unit voiceprints (None: too short to embed); dur: seconds; groups: per sentence a key
+    the engine gives (its speaker id within one piece): sentences sharing one are clustered as one unit, their mean
+    voiceprint, so a turn's short sentences follow its long ones. Same rules as add(): 我 when a cluster of MIN_ME
+    sentences is OWNER_MIN close to the bank, a name PEOPLE_MIN close to a named voice, else S<n> in order of first
+    appearance; a sentence in no cluster joins the nearest labelled centroid at JOIN, else S?."""
+    from sklearn.cluster import AgglomerativeClustering
+    bank_v = [_unit(v) for v in bank.values()]
+    people = {k: _unit(v) for k, v in (people or {}).items()}
+    keys = groups if groups is not None else list(range(len(E)))
+    units: dict = {}
+    for i, k in enumerate(keys):
+        if E[i] is not None:
+            units.setdefault(k, []).append(i)
+    long = lambda m: [i for i in m if dur[i] >= MIN_DUR]
+    units = {k: m for k, m in units.items() if long(m)}  # a unit needs one sentence long enough to trust its voiceprint
+    if groups is not None and guard is not None:  # the engine may give two people one id in a piece: such a group falls apart
+        for k in list(units):
+            m = _unit(np.mean([E[i] for i in long(units[k])], 0))
+            if any(float(E[i] @ m) < guard for i in long(units[k])):
+                for i in units.pop(k):
+                    units[("alone", i)] = [i]
+        units = {k: m for k, m in units.items() if long(m)}
+    ks = list(units)
+    out: list[str | None] = [None] * len(E)
+    if ks:
+        V = np.array([_unit(np.mean([E[i] for i in long(units[k])], 0)) for k in ks])
+        lab = AgglomerativeClustering(n_clusters=None, distance_threshold=th, metric="cosine",
+                                      linkage="average").fit_predict(V) if len(ks) > 1 else np.zeros(1, int)
+        names, n_s = {}, 0
+        for c in sorted(set(lab), key=lambda c: min(min(units[k]) for k, l in zip(ks, lab) if l == c)):
+            members = [i for k, l in zip(ks, lab) if l == c for i in units[k]]
+            m = _unit(np.mean([E[i] for i in members if dur[i] >= MIN_DUR], 0))
+            if len(members) >= MIN_ME and max((float(m @ o) for o in bank_v), default=0) >= OWNER_MIN:
+                names[c] = "我"
+            elif people and len(members) >= MIN_ME and (best := max((float(m @ v), k) for k, v in people.items()))[0] >= PEOPLE_MIN:
+                names[c] = best[1]
+            else:
+                n_s += 1
+                names[c] = f"S{n_s}"
+        for k, l in zip(ks, lab):
+            for i in units[k]:
+                out[i] = names[l]
+    cents: dict[str, list] = {}
+    for i, l in enumerate(out):
+        if l and dur[i] >= MIN_DUR:
+            cents.setdefault(l, []).append(E[i])
+    cents = {k: _unit(np.mean(v, 0)) for k, v in cents.items()}
+    for i, k in enumerate(keys):
+        if out[i] is None:
+            mates = [out[j] for j, kk in enumerate(keys) if kk == k and out[j]] if groups is not None else []
+            if mates:
+                out[i] = max(set(mates), key=mates.count)  # its turn mates' label
+            elif E[i] is not None and cents:
+                score, best = max((float(E[i] @ v), k2) for k2, v in cents.items())
+                out[i] = best if score >= JOIN else "S?"
+            else:
+                out[i] = "S?"
+    return out
+
+
 if __name__ == "__main__":
     rng = np.random.default_rng(0)
     me, a, b = (_unit(rng.normal(size=192)) for _ in range(3))
@@ -127,4 +193,11 @@ if __name__ == "__main__":
     named = [d.add(noisy(v), 2.0)[0] for v in seq]
     assert set(l for l, v in zip(named[11:], seq[11:]) if v is a) == {"李某"}, named
     assert "李某" not in {l for l, v in zip(named, seq) if v is b}, named
+    E = [noisy(v) for v in seq]  # the same conversation, labelled once at its close
+    lab = relabel(E, [2.0] * len(E), {"dji-mac": noisy(me)})
+    assert all(l == "我" for l, v in zip(lab, seq) if v is me), lab
+    assert len({l for l, v in zip(lab, seq) if v is a}) == 1 and len({l for l, v in zip(lab, seq) if v is b}) == 1, lab
+    assert {l for l, v in zip(lab, seq) if v is a}.isdisjoint({l for l, v in zip(lab, seq) if v is b}), lab
+    mixed = relabel(E, [2.0] * len(E), {"dji-mac": noisy(me)}, groups=["one"] * len(E))  # an engine id over everyone
+    assert mixed == lab, "a group whose voices disagree falls apart instead of making one speaker"
     print("ok", out, named)
