@@ -102,6 +102,59 @@ async def _run(x: np.ndarray, mode: str, pace_s: float, speakers: bool, log=None
                   "text": (last or {}).get("result", {}).get("text", "")}
 
 
+async def _stream(x: np.ndarray, pace_s: float, end_window_ms: int | None = None) -> tuple[list[dict], dict]:
+    """bigmodel_async with two-pass recognition: the server cuts sentences (800 ms of silence) and re-reads each with
+    the nostream model; only those carry definite, and result_type single sends each sentence once."""
+    import websockets
+    headers = {"X-Api-Key": os.environ["VOLC_ASR_KEY"], "X-Api-Resource-Id": RESOURCE,
+               "X-Api-Connect-Id": str(uuid.uuid4()), "X-Api-Request-Id": str(uuid.uuid4())}
+    req = {"user": {"uid": "live-record"},
+           "audio": {"format": "pcm", "codec": "raw", "rate": SR, "bits": 16, "channel": 1},
+           "request": {"model_name": "bigmodel", "enable_itn": True, "enable_punc": True, "show_utterances": True,
+                       "result_type": "single", "enable_nonstream": True, "enable_speaker_info": True,
+                       **({"end_window_size": end_window_ms} if end_window_ms else {})}}  # default 800 ms of silence ends a sentence
+    step = SR * PACKET_MS // 1000
+    packets = [x[i:i + step].tobytes() for i in range(0, len(x), step)] or [b""]
+    utts, untimed, t0 = [], [], time.perf_counter()  # untimed: definite results without times (seen on 05-26), not usable
+    async with websockets.connect(URL.format(mode="async"), additional_headers=headers, max_size=None, ping_interval=None) as ws:
+        await ws.send(frame(FULL_CLIENT, POS_SEQ, 1, json.dumps(req).encode()))
+        first = parse(await ws.recv())
+        if first["type"] == SERVER_ERROR:
+            raise RuntimeError(f"{first['code']}: {first['payload']}")
+        logid = ws.response.headers.get("X-Tt-Logid") if hasattr(ws, "response") else None
+
+        async def reader():
+            async for data in ws:
+                r = parse(data)
+                if r["type"] == SERVER_ERROR:
+                    raise RuntimeError(f"{r['code']}: {r['payload']}")
+                p = r.get("payload")
+                for u in (p.get("result", {}).get("utterances") or [] if isinstance(p, dict) else []):
+                    if u.get("definite") and "start_time" not in u:
+                        untimed.append(u.get("text", ""))
+                    elif u.get("definite"):
+                        utts.append({"text": u["text"], "start_ms": u["start_time"], "end_ms": u["end_time"],
+                                     **({"speaker": "SPEAKER_" + str(u["additions"]["speaker_id"])} if u.get("additions", {}).get("speaker_id") is not None else {})})
+                if r.get("seq", 0) < 0:
+                    return
+
+        task = asyncio.create_task(reader())
+        for i, pk in enumerate(packets, start=2):
+            end = i == len(packets) + 1
+            await ws.send(frame(AUDIO_ONLY, NEG_WITH_SEQ if end else POS_SEQ, -i if end else i, pk))
+            if pace_s:
+                await asyncio.sleep(pace_s)
+            if task.done():
+                break
+        await asyncio.wait_for(task, timeout=120)
+    return utts, {"seconds": round(time.perf_counter() - t0, 1), "logid": logid, "untimed": untimed}
+
+
+def stream(x: np.ndarray, pace_s: float = 0.02, end_window_ms: int | None = None):
+    """One stretch of speech through one two-pass streaming session: its definite sentences (ms from x[0])."""
+    return asyncio.run(asyncio.wait_for(_stream(x, pace_s, end_window_ms), timeout=30 + len(x) / SR * (pace_s * 5 + 0.3)))
+
+
 def transcribe(x: np.ndarray, mode: str = "nostream", pace_s: float = 0.02, speakers: bool = True):  # 0.02: 10x real time
     """Bounded: a stalled connection (send blocked, no answer) must fail so the caller retries next pass."""
     budget = 30 + len(x) / SR * (pace_s * 5 + 0.3)  # sending time plus the engine's ~0.25x real time, with headroom

@@ -8,6 +8,7 @@ Candidates
   vad-owner      same, each utterance labelled 我 if its CAM++ score against the owner >= OWNER_MIN (per-sentence rule)
   volc-window    same windows through Volcengine seed-asr-2.0 (streaming API, speaker ids), cached in work/volc/
   volc-sentence  the live pipeline since 09-29 21:40: no context, Volcengine sentences, conversation clustering (diarist)
+  volc-stream    one Volcengine two-pass streaming session per stretch of VAD speech, definite sentences, diarist labels
   cloud-window   every 30 s, last 240 s to StepFun file diarization (via the file-mode ASR service), cluster mean vs owner,
                  final_rows replace the window (the live second layer as designed)
   local-window   same cadence, diarization by sherpa-onnx pyannote-segmentation-3.0 + CAM++ clustering on the Mac,
@@ -239,12 +240,14 @@ class Case:
 
         def one(item):
             k, a, b = item
+            err = None
             for attempt in range(8):
                 try:
                     return k, self.asr._post(self.x[int(a * SR):int(b * SR)])
                 except Exception as e:
+                    err = e  # `e` is unbound after the except block
                     time.sleep(2 ** attempt)  # 429 from StepFun when two replays run at once
-            raise RuntimeError(f"ASR gave up on {k}: {e!r}")
+            raise RuntimeError(f"ASR gave up on {k}: {err!r}")
 
         t = time.time()
         with cf.ThreadPoolExecutor(2) as ex, open(self.cache_path, "a") as f:  # the live service shares the key
@@ -348,6 +351,57 @@ def _volc_window(self, a: float, b: float) -> list[dict]:
 
 
 Case.volc_window = _volc_window
+
+STREAM_GAP_S = float(os.environ.get("STREAM_GAP_S", "10"))    # VAD silence that ends a streaming session
+STREAM_PRE_S, STREAM_POST_S = 1.0, 2.5                         # audio sent before the first and after the last utterance
+STREAM_PACE = float(os.environ.get("STREAM_PACE", "0.02"))     # seconds per 200 ms packet: 0.02 = 10x, 0.2 = real time
+STREAM_END_MS = int(os.environ.get("STREAM_END_MS", "0")) or None  # the server's sentence-ending silence; None: its 800 ms
+
+
+def _volc_session(self, a: float, b: float) -> list[dict]:
+    p = self.work / (f"volc-stream-{STREAM_PACE}" + (f"-end{STREAM_END_MS}" if STREAM_END_MS else "")) / f"{a:.1f}-{b:.1f}.json"
+    if p.exists():
+        return json.load(open(p))
+    p.parent.mkdir(exist_ok=True)
+    import volc_asr
+    for attempt in range(3):
+        try:
+            utts, info = volc_asr.stream(self.x[int(a * SR):int(b * SR)], STREAM_PACE, STREAM_END_MS)
+            break
+        except Exception as e:
+            print(f"  stream {a:.0f}-{b:.0f} attempt {attempt + 1} failed: {e!r}"[:160], flush=True)
+            time.sleep(5)
+    else:
+        raise RuntimeError(f"stream gave up on {a:.0f}-{b:.0f}")
+    segs = [{"speaker": "SPEAKER_0", **u, "start_ms": u["start_ms"] + int(a * 1000), "end_ms": u["end_ms"] + int(a * 1000), "engine": "volc"} for u in utts]
+    print(f"  stream {a:.0f}-{b:.0f}: {info['seconds']} s, {len(segs)} sentences" + (f", {len(info['untimed'])} without times: {info['untimed'][:2]}" if info["untimed"] else ""), flush=True)
+    json.dump(segs, open(p, "w"), ensure_ascii=False)
+    return segs
+
+
+Case.volc_session = _volc_session
+
+
+def rows_streamed(case: Case, dia, embed) -> list[dict]:
+    """A streaming session per stretch of speech: our VAD utterances closer than STREAM_GAP_S share one, sent from
+    STREAM_PRE_S before to STREAM_POST_S after; the server's definite sentences are final as they come, labelled by
+    the conversation clustering like volc-sentence."""
+    from server import label_sentences
+    total = len(case.x) / SR
+    sessions = []
+    for a, b in vad_utterances(case):
+        if sessions and a - sessions[-1][1] < STREAM_GAP_S:
+            sessions[-1][1] = b
+        else:
+            sessions.append([a, b])
+    segs = []
+    for a, b in sessions:
+        segs += case.volc_session(round(max(0.0, a - STREAM_PRE_S), 1), round(min(total, b + STREAM_POST_S), 1))
+    print(f"  {len(sessions)} sessions, {sum(min(total, b + STREAM_POST_S) - max(0, a - STREAM_PRE_S) for a, b in sessions) / 60:.1f} min sent of {total / 60:.1f}")
+    segs.sort(key=lambda g: g["start_ms"])
+    label_sentences(dia, embed, segs, case.x)
+    _, _, rows = final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, EPOCH, total + 20, since=0)
+    return rows
 
 
 def rows_from_windows(case: Case, spk: Speakers, diar, name: str, need_asr: bool, utts=None):
@@ -467,6 +521,9 @@ def run(case: Case, name: str) -> list[dict]:
     if name == "volc-sentence":
         from diarist import Diarist, load_embedder
         return rows_per_sentence(case, Diarist(dict(np.load(os.environ.get("OWNER_BANK", os.environ["LIVE_DATA"] + "/owner-redimnet2.npz")))), load_embedder())
+    if name == "volc-stream":
+        from diarist import Diarist, load_embedder
+        return rows_streamed(case, Diarist(dict(np.load(os.environ.get("OWNER_BANK", os.environ["LIVE_DATA"] + "/owner-redimnet2.npz")))), load_embedder())
     if name in ("local-window", "hybrid-window"):
         d = LocalDiarizer()
 
