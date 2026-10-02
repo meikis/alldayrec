@@ -10,7 +10,7 @@ import os
 import urllib.request
 
 MIN_SPEECH_S = 60
-PROMPT_VERSION = 5  # 2: tags, 3: people, 4: speech to AI told apart from speech to people, 5: media played aloud
+PROMPT_VERSION = 6  # 2: tags, 3: people, 4: speech to AI told apart from speech to people, 5: media played aloud, 6: no "there was none" lines, fewer people
 SYSTEM = """你在整理一段现场录音转写出来的对话。每行是「[时间] 说话人: 文本」。说话人标签来自声纹聚类：「我」是录音者本人，S1、S2… 是其他人，同一个人可能被拆成多个标签，S? 是太短没认出来的句子。转写有错别字和同音误识别，按意图理解。
 「我」说的话有两种听众，先分清再整理：
 - 对人：说给在场或线上的人听，有来有回，别人会接话、回应、提问
@@ -32,7 +32,8 @@ ai_spans 是我对 AI 说话的连续时间段（第一句和最后一句的时�
 media_spans 是外放媒体的连续时间段（第一句和最后一句的时间）：中间夹着在场的人说话（包括我对媒体内容的点评），就在那里断开分成两段；没有就给空数组。
 媒体里的话不是任何在场的人说的：不进 people、todos、decisions、topics，不要写成「我」说的或做的；summary 里一句带过在看或听什么（整段都是媒体时，就写在看或听什么、大致讲了什么）。
 对 AI 说的话只进 ai_requests，不进 todos、decisions、people；summary 里一句带过我在让 AI 做什么即可。todos 只收人要做的事：我答应别人的、别人答应的、别人要我做的、我自己说要做的。
-people 每个说了实质内容的标签一项（「我」在最前，S? 和只有附和的不列），按这个人自己的话写，不要写成别人对他的评价。
+people 只列在这段里说了实质内容的标签（观点、信息、经历、提问、表态），「我」在最前；S?、只有附和的、只说了一两句零碎话（问一句、喊人、接一句玩笑、递东西）的都不列。人多的闲聊挑主要说话的几个，一般不超过 8 个。按这个人自己的话写，不要写成别人对他的评价。
+summary 只写这段里有的事：没有媒体、没有对 AI 说话、没有待办时不要提「没有」。
 没有就给空数组，不编造原文里没有的内容。"""
 
 
@@ -64,6 +65,11 @@ def anchor(res: dict, rows: list[dict]) -> dict:
         res[k] = [{"from": at(x.get("from")), "to": at(x.get("to"))} for x in res.get(k) or [] if isinstance(x, dict)]
         res[k] = [x for x in res[k] if x["from"] and x["to"]]
     res["topics"].sort(key=lambda x: x["at"] or "~")
+    people = {}  # the model sometimes lists one label twice
+    for x in res.get("people") or []:
+        if isinstance(x, dict) and x.get("who"):
+            people.setdefault(x["who"], {"who": x["who"], "points": []})["points"] += x.get("points") or []
+    res["people"] = list(people.values())
     return res
 
 
@@ -114,6 +120,7 @@ if __name__ == "__main__":
     r = anchor({"topics": [{"title": "b", "at": "10:02:00"}, {"title": "a", "at": "10:00:01"}], "todos": [{"text": "x", "at": "9:99"}]}, rows)
     assert [t["title"] for t in r["topics"]] == ["a", "b"] and r["topics"][0]["at"] == rows[0]["start"]
     assert r["todos"][0]["at"] is None and r["decisions"] == []
+    assert anchor({"people": [{"who": "S1", "points": ["a"]}, {"who": "S1", "points": ["b"]}, "x"]}, rows)["people"] == [{"who": "S1", "points": ["a", "b"]}]
     rows = [dict(rows[0], end="2026-09-30T10:00:09.000"), dict(rows[1], end="2026-09-30T10:02:09.000"), dict(start="2026-09-30T10:03:00.000", end="2026-09-30T10:03:30.000", text="欢迎收看", speaker="S2")]
     spans = anchor({"media_spans": [{"from": "10:03:00", "to": "10:03:00"}, {"from": "10:00:01", "to": "bad"}, "x"]}, rows)["media_spans"]
     assert spans == [{"from": rows[2]["start"], "to": rows[2]["start"]}], spans
