@@ -107,13 +107,24 @@ def analyze(state: dict, rows: list[dict]) -> dict:
     topics, next_id = apply(state, res.get("ops"), rows, fresh)
     reply = {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}
     return {**state, "topics": topics, "next_id": next_id, "fed_to": fresh[-1]["start"],
+            "drafted": state.get("drafted") or any(r.get("state") == "draft" for r in fresh),
             "messages": state["messages"] + [msg, reply], "model": raw.get("model"), "usage": raw.get("usage")}
 
 
+DRAFTED = "这段对话已经全部定稿。你前面看到的转写有一部分是实时初稿，可能有错字、漏句、说话人不对；下面是整段对话的定稿转写，总结以它为准：\n"
+
+
+def final_turn(state: dict, rows: list[dict]) -> str:
+    """The closing turn's transcript: the rows it has not seen; all of them, final, when it saw drafts (the final
+    summary is kept and searched, so it must not rest on the draft layer's quick text)."""
+    if state.get("drafted"):
+        return DRAFTED + transcript(rows)
+    return turn(state, rows)[0]
+
+
 def final(state: dict, rows: list[dict], known_tags: list[str]) -> tuple[dict, dict]:
-    """The closing turn: the rows it has not seen, then the final summary in summary.SYSTEM's format."""
-    text, _ = turn(state, rows)
-    return complete(state["messages"] + [{"role": "user", "content": f"{text}\n\n{FINAL}{instructions(known_tags)}"}])
+    """The closing turn: final_turn, then the final summary in summary.SYSTEM's format."""
+    return complete(state["messages"] + [{"role": "user", "content": f"{final_turn(state, rows)}\n\n{FINAL}{instructions(known_tags)}"}])
 
 
 if __name__ == "__main__":
@@ -139,4 +150,6 @@ if __name__ == "__main__":
     assert topics[1]["start"] == "2026-10-02T10:10:00.000"  # a time past every row: the turn's first row
     assert analyze({**s, "fed_to": rows[-1]["start"]}, rows)["fed_to"] == rows[-1]["start"]  # nothing new: no call
     assert json.dumps(public({**s, "messages": [1]})).find("messages") < 0
+    assert "S1: 句0" not in final_turn(s, rows) and "S1: 句10" in final_turn(s, rows)  # only what it has not seen
+    assert final_turn({**s, "drafted": True}, rows).startswith(DRAFTED) and "S1: 句0" in final_turn({**s, "drafted": True}, rows)
     print("ok")

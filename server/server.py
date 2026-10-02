@@ -162,13 +162,14 @@ def _http(url, data=None, headers=None, method=None) -> bytes:
 FILE_MODELS = tuple(os.environ.get("FILE_MODELS", "stepaudio-2.5-asr-8006,doubao-seedasr-2.0").split(","))  # file-mode engines, in order of preference
 
 
-def engine_segs(x: np.ndarray) -> list[dict]:
-    """Sentences with times and speaker ids for a window of audio, from the configured engine."""
+def engine_segs(x: np.ndarray, partial=None) -> list[dict]:
+    """Sentences with times and speaker ids for a window of audio, from the configured engine. partial(segs): the
+    sentences so far, whenever an answer adds some during the call (volc only)."""
     if ENGINE != "volc":
         return diarize(x)
     import volc_asr
     t = time.perf_counter()
-    utts, info = volc_asr.transcribe(x)
+    utts, info = volc_asr.transcribe(x, partial=partial and (lambda us: partial([{"speaker": "SPEAKER_0", **u, "engine": "volc"} for u in us])))
     log.info("volc: %.0f s audio in %.1f s, %d utterances, logid %s", len(x) / SR, time.perf_counter() - t, len(utts), info.get("logid"))
     return [{"speaker": "SPEAKER_0", **u, "engine": "volc"} for u in utts]
 
@@ -730,10 +731,52 @@ async def pipeline(device: str):
             st["draft_to"] = hi  # silence: nothing to send
             db.put_kv(f"draft_to:{device}", iso(hi))
             return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
+        sent, n_rows = since, 0  # seconds into the window up to which rows went out while the call ran
+
+        async def publish(rows: list[dict], upto: dt.datetime):
+            """Store, push and advance draft_to: a crash after this does not redo these rows."""
+            nonlocal n_rows
+            shown = dt.datetime.now()
+            for r in rows:
+                r["id"], r["state"] = "d" + r["id"][1:], "draft"
+                r["source"], r["engine"], r["shown_at"] = device, ENGINE, iso(shown)
+                st["latency"].append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
+            del st["latency"][:-50]
+            with db.tx() as t:
+                db.insert_drafts(t, rows)
+                db.put_kv(f"draft_to:{device}", iso(upto), t)
+            st["draft_to"], n_rows = upto, n_rows + len(rows)
+            done = st["done_to"]
+            st["drafts"] += [r for r in rows if not done or r["start"] >= iso(done)]
+            if rows:
+                await broadcast({"type": "draft", "device": device, "rows": rows})
+            show_open()
+            maybe_live()
+
+        async def early(segs: list[dict]):
+            """An answer during the call: its sentences but the last (it may still grow) go out now, labelled in order."""
+            nonlocal sent
+            segs = clip_turns(segs[:-1], sent)
+            if not segs:
+                return
+            await asyncio.to_thread(label_sentences, ddia, embed, segs, x)
+            rows = final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, t0, len(x) / SR, None, sent, at, 0.0)[2]
+            sent = segs[-1]["end_ms"] / 1000
+            await publish(rows, at(sent))
+
+        loop, answers = asyncio.get_running_loop(), asyncio.Queue()
+        call = asyncio.ensure_future(asyncio.to_thread(engine_segs, x, lambda segs: loop.call_soon_threadsafe(answers.put_nowait, segs)))
         m0 = ddia.mark()
         try:
-            segs = clip_turns(await asyncio.to_thread(engine_segs, x), since)
-            engine = segs[0]["engine"] if segs else None
+            while not call.done():  # a 5 min backfill window: its first sentences in ~3 s, not after the whole call
+                try:
+                    segs = await asyncio.wait_for(answers.get(), 0.5)
+                except asyncio.TimeoutError:
+                    continue
+                await early(segs)
+                m0 = ddia.mark()
+            raw = call.result()
+            segs = clip_turns(raw, sent)
             marks = await asyncio.to_thread(label_sentences, ddia, embed, segs, x)
         except Exception as e:
             ddia.rollback(m0)
@@ -743,31 +786,17 @@ async def pipeline(device: str):
         by_label = {}
         for g in segs:
             by_label[g["speaker"]] = max(by_label.get(g["speaker"], 0.0), g["confidence"])
-        lo, hi, rows = final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, t0, len(x) / SR, by_label, since, at, edge)
+        lo, hi, rows = final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, t0, len(x) / SR, by_label, sent, at, edge)
         kept = [m for g, m in zip(segs, marks) if m and at(g["start_ms"] / 1000) < hi]  # sentences left open come back next pass
         ddia.rollback(kept[-1] if kept else m0)
+        hi = max(hi, at(sent))  # rows that went out early near the window's end: never draft them twice
         with open(DATA / f"{lo.date()}.passes.jsonl", "a") as f:
             f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"), "layer": "draft", "t0": iso(t0), "since": since,
-                                "from": iso(lo), "to": iso(hi), "segs": segs}, ensure_ascii=False) + "\n")
-        shown = dt.datetime.now()
-        for r in rows:
-            r["id"], r["state"] = "d" + r["id"][1:], "draft"
-            r["source"], r["engine"], r["shown_at"] = device, engine, iso(shown)
-            st["latency"].append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
-        del st["latency"][:-50]
-        with db.tx() as t:
-            db.insert_drafts(t, rows)
-            db.put_kv(f"draft_to:{device}", iso(hi), t)
-        st["draft_to"] = hi
-        done = st["done_to"]
-        st["drafts"] += [r for r in rows if not done or r["start"] >= iso(done)]
-        if rows:
-            await broadcast({"type": "draft", "device": device, "rows": rows})
-        show_open()
+                                "early_to": sent, "from": iso(at(since)), "to": iso(hi), "segs": raw}, ensure_ascii=False) + "\n")
+        await publish(rows, hi)
         st["draft"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
-                       "changed": len(rows), "to": iso(hi)}
+                       "changed": n_rows, "early_s": round(sent - since), "to": iso(hi)}
         log.info("draft %s: %s", device, st["draft"])
-        maybe_live()
         if end is not None:  # pauses that came during the pass have set wake again
             return len(x) / SR >= REFINE_WINDOW_S
         return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S

@@ -55,6 +55,13 @@ def parse(data: bytes) -> dict:
     return out
 
 
+def utterances(payload: dict | None) -> list[dict]:
+    """The definite sentences of one answer: [{text, start_ms, end_ms, speaker?}]."""
+    return [{"text": u["text"], "start_ms": u["start_time"], "end_ms": u["end_time"],
+             **({"speaker": "SPEAKER_" + str(u["additions"]["speaker_id"])} if u.get("additions", {}).get("speaker_id") is not None else {})}
+            for u in (payload or {}).get("result", {}).get("utterances", []) if u.get("definite", True)]
+
+
 async def _run(x: np.ndarray, mode: str, pace_s: float, speakers: bool, log=None) -> tuple[list[dict], dict]:
     import websockets
     headers = {"X-Api-Key": os.environ["VOLC_ASR_KEY"], "X-Api-Resource-Id": RESOURCE,
@@ -95,10 +102,7 @@ async def _run(x: np.ndarray, mode: str, pace_s: float, speakers: bool, log=None
             if pace_s:
                 await asyncio.sleep(pace_s)
         await asyncio.wait_for(task, timeout=120)
-    utts = [{"text": u["text"], "start_ms": u["start_time"], "end_ms": u["end_time"],
-             **({"speaker": "SPEAKER_" + str(u["additions"]["speaker_id"])} if u.get("additions", {}).get("speaker_id") is not None else {})}
-            for u in (last or {}).get("result", {}).get("utterances", []) if u.get("definite", True)]
-    return utts, {"seconds": round(time.perf_counter() - t0, 1), "responses": responses, "logid": logid,
+    return utterances(last), {"seconds": round(time.perf_counter() - t0, 1), "responses": responses, "logid": logid,
                   "text": (last or {}).get("result", {}).get("text", "")}
 
 
@@ -155,10 +159,19 @@ def stream(x: np.ndarray, pace_s: float = 0.02, end_window_ms: int | None = None
     return asyncio.run(asyncio.wait_for(_stream(x, pace_s, end_window_ms), timeout=30 + len(x) / SR * (pace_s * 5 + 0.3)))
 
 
-def transcribe(x: np.ndarray, mode: str = "nostream", pace_s: float = 0.02, speakers: bool = True):  # 0.02: 10x real time
-    """Bounded: a stalled connection (send blocked, no answer) must fail so the caller retries next pass."""
+def transcribe(x: np.ndarray, mode: str = "nostream", pace_s: float = 0.02, speakers: bool = True, partial=None):  # 0.02: 10x real time
+    """Bounded: a stalled connection (send blocked, no answer) must fail so the caller retries next pass.
+    partial(utts): called with the definite sentences so far each time an answer adds some (nostream answers every
+    ~4 s while a window goes in at 10x, each ~15-20 s of audio further: a 5 min window's first sentences in ~3 s)."""
     budget = 30 + len(x) / SR * (pace_s * 5 + 0.3)  # sending time plus the engine's ~0.25x real time, with headroom
-    return asyncio.run(asyncio.wait_for(_run(x, mode, pace_s, speakers), timeout=budget))
+    seen = [0]
+
+    def log(r):
+        us = utterances(r["payload"])
+        if partial and len(us) > seen[0]:
+            seen[0] = len(us)
+            partial(us)
+    return asyncio.run(asyncio.wait_for(_run(x, mode, pace_s, speakers, log), timeout=budget))
 
 
 def main():
