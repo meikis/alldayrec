@@ -43,6 +43,7 @@ SR = 16000
 FRAME_LEN, FRAME_SHIFT = 400, 160          # FireRed fbank: 25 ms window, 10 ms shift
 MERGE_GAP_S = 0.6                          # VAD utterances closer than this are one
 MAX_UTTERANCE_S = 15.0
+VAD_CUT_S = 0.5                            # a VAD-driven pass ends this far into the pause (< MERGE_GAP_S: still silence)
 REFINE_EVERY_S = int(os.environ.get("REFINE_EVERY_S", "30"))  # finalization cadence
 REFINE_WINDOW_S = int(os.environ.get("REFINE_WINDOW_S", "240"))    # most audio one pass takes (catching up a backlog)
 REFINE_MARGIN_S = 1.0                      # audio re-read before the last finalized time: the engine's sentence starts come a little late
@@ -233,7 +234,7 @@ def label_sentences(dia, embed, segs: list[dict], x: np.ndarray) -> list:
 
 
 def final_rows(segs: list[dict], names: dict, t0: dt.datetime, win_s: float, conf: dict | None = None,
-               since: float = EDGE_S, at=None) -> tuple[dt.datetime, dt.datetime, list[dict]]:
+               since: float = EDGE_S, at=None, edge: float = EDGE_S) -> tuple[dt.datetime, dt.datetime, list[dict]]:
     """Second pass: the diarized speaker turns of one window become the final rows for [from, to).
 
     VAD utterances glue fast back-and-forth into one line (no pause to cut at), so the final
@@ -242,7 +243,8 @@ def final_rows(segs: list[dict], names: dict, t0: dt.datetime, win_s: float, con
     `since` (seconds into the window) is where the previous pass stopped: rows before it are
     already final and never rewritten. `at` maps seconds into the window to wall time; the default
     is linear from t0, the live server passes the segmenter's clock (a new session's file starting
-    inside the window jumps it).
+    inside the window jumps it). `edge` is how close to the window end a row may end: 0 when the window ends in
+    a pause the VAD saw.
     """
     rows = []
     for g in sorted(segs, key=lambda g: g["start_ms"]):
@@ -251,7 +253,7 @@ def final_rows(segs: list[dict], names: dict, t0: dt.datetime, win_s: float, con
             rows[-1]["b"], rows[-1]["text"] = b, rows[-1]["text"] + g["text"]
         else:
             rows.append(dict(a=a, b=b, speaker=who, text=g["text"]))
-    lo, hi = since, win_s - EDGE_S
+    lo, hi = since, win_s - edge
     keep = [r for r in rows if r["a"] >= lo - 0.05]  # turns are clipped to `since` by the caller
     cut = next((i for i, r in enumerate(keep) if r["b"] > hi), len(keep))
     to = keep[cut]["a"] if cut < len(keep) else hi
@@ -386,7 +388,8 @@ async def pipeline(device: str):
     resume = db.kv(f"finalized_to:{device}")
     st = state["devices"][device] = {"seg": seg, "done_to": dt.datetime.fromisoformat(resume) if resume else None, "audio_end": None,
                                      "last_speech": None, "refine": None, "conversation": None, "latency": [],
-                                     "progress": []}  # (wall time, finalized time) per commit, the last 10 min: the rate
+                                     "progress": [],  # (wall time, finalized time) per commit, the last 10 min: the rate
+                                     "utts": [], "vad_to": None, "wake": asyncio.Event()}  # VAD utterances not yet final, the last pause
     if resume:
         log.info("%s resuming after the last finalized row at %s", device, resume)
 
@@ -406,8 +409,13 @@ async def pipeline(device: str):
             except Exception:
                 log.exception("%s: segmenter failed on %.1f s at %s", device, len(x) / SR, t.time())
                 continue
-            for u in utts:
+            for i, u in enumerate(utts):
                 st["last_speech"] = u[1]  # the refiner skips diarizing stretches with no VAD speech
+                st["utts"].append((u[0], u[1]))
+                nxt = utts[i + 1][0] if i + 1 < len(utts) else seg.time_at(seg.pending[0]) if seg.pending else None
+                if nxt is None or (nxt - u[1]).total_seconds() >= MERGE_GAP_S:  # a pause, not a split of a long utterance
+                    st["vad_to"] = u[1] + dt.timedelta(seconds=VAD_CUT_S)
+                    st["wake"].set()
 
     async def refine_loop():
         from diarist import Diarist
@@ -455,22 +463,35 @@ async def pipeline(device: str):
             if not grouper.open:
                 st["conversation"] = None
 
-        async def refine_pass() -> bool:
-            """One pass over [done_to - margin, + window]; True when a backlog remains."""
+        async def refine_pass(end: dt.datetime | None = None) -> bool:
+            """One pass; True when a backlog remains. Timer-driven (end None): [done_to - margin, + window], rows near its
+            end left open. VAD-driven: from 1 s before the first unfinished utterance to `end`, a point in the pause after
+            an utterance, every row final."""
             nonlocal done_to
             if not seg.anchors:
                 return False  # no audio yet
             t_run = time.perf_counter()
-            # from where the last pass stopped, or from the oldest buffered audio
-            t0, x = seg.window(REFINE_WINDOW_S, done_to - dt.timedelta(seconds=REFINE_MARGIN_S) if done_to else seg.time_at(seg.audio_base))
+            if end is None:
+                # from where the last pass stopped, or from the oldest buffered audio
+                t0, x = seg.window(REFINE_WINDOW_S, done_to - dt.timedelta(seconds=REFINE_MARGIN_S) if done_to else seg.time_at(seg.audio_base))
+            else:
+                st["utts"] = [u for u in st["utts"] if done_to is None or u[1] > done_to]
+                if not st["utts"]:
+                    return False
+                start = st["utts"][0][0] - dt.timedelta(seconds=1)
+                if done_to:
+                    start = max(start, done_to - dt.timedelta(seconds=REFINE_MARGIN_S))
+                t0, x = seg.window(min(REFINE_WINDOW_S, (seg.sample_at(end) - seg.sample_at(start)) / SR), start)
             a0 = seg.sample_at(t0)
             at = lambda s: seg.time_at(a0 + int(s * SR))  # the window may span a session boundary, where the clock jumps
-            # a first pass may start mid-sentence: skip its edge; later passes start at a sentence the last one left open
-            since = EDGE_S if done_to is None else max(0.0, (seg.sample_at(done_to) - a0) / SR)
-            if len(x) / SR - since < EDGE_S + 10:
+            # a first timer pass may start mid-sentence: skip its edge; later passes start at a sentence the last one left open
+            since = (EDGE_S if end is None else 0.0) if done_to is None else max(0.0, (seg.sample_at(done_to) - a0) / SR)
+            # a VAD window cut short of its pause (catching up a backlog) may end mid-sentence like a timer one
+            edge = 0.0 if end is not None and len(x) / SR < REFINE_WINDOW_S else EDGE_S
+            if len(x) / SR - since < (0.3 if end is not None else EDGE_S + 10):
                 return False
             hi = at(len(x) / SR - EDGE_S)
-            if not seg.speaking() and (st["last_speech"] is None or st["last_speech"] <= (done_to or t0)):
+            if end is None and not seg.speaking() and (st["last_speech"] is None or st["last_speech"] <= (done_to or t0)):
                 # silence: nothing to diarize, but the clock must advance so a conversation can close on time
                 # (speech still going on at the end of the fed audio is not silence: a replayed 10-01 14:43 lost 90 s that way)
                 done_to = hi
@@ -492,7 +513,7 @@ async def pipeline(device: str):
             by_label = {}
             for g in segs:  # final_rows keys confidence by label
                 by_label[g["speaker"]] = max(by_label.get(g["speaker"], 0.0), g["confidence"])
-            lo, hi, rows = final_rows(segs, labels, t0, len(x) / SR, by_label, since, at)
+            lo, hi, rows = final_rows(segs, labels, t0, len(x) / SR, by_label, since, at, edge)
             kept = [m for g, m in zip(segs, marks) if m and at(g["start_ms"] / 1000) < hi]  # sentences left open come back next pass
             dia.rollback(kept[-1] if kept else m0)
             with open(DATA / f"{lo.date()}.passes.jsonl", "a") as f:  # every pass's raw engine output, for tracing lost rows
@@ -513,18 +534,29 @@ async def pipeline(device: str):
                 st["conversation"] = {"start": o["start"], "end": o["end"], "sentences": len(o["sentences"]), "device": device}
             st["refine"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
                                "speakers": by_label, "changed": len(rows),
-                               "backlog_s": round((seg.time_at(seg.samples) - hi).total_seconds())}
+                               "backlog_s": round((seg.time_at(seg.samples) - hi).total_seconds()), "by": "timer" if end is None else "vad"}
             log.info("refine %s: %s", device, st["refine"])
             note(f"定稿一轮：{device} 送 {len(x) / SR:.0f} s（含 {since:.0f} s 上下文）给 {engine or ENGINE}，"
                  f"{st['refine']['ms'] / 1000:.1f} s，{len(rows)} 句，定稿到 {hi.strftime('%H:%M:%S')}，积压 {st['refine']['backlog_s']} s")
             if grouper.open and not was_open:
                 note(f"{device}：对话开始 {grouper.open['start'][11:19]}", "state")
+            if end is not None:  # pauses that came during the pass have set wake again
+                return len(x) / SR >= REFINE_WINDOW_S
             return st["refine"]["backlog_s"] > REFINE_WINDOW_S - REFINE_MARGIN_S
 
         while True:
-            await asyncio.sleep(REFINE_EVERY_S)
-            while await refine_pass():  # timer-driven: silence also advances, so conversations close on time
-                pass
+            try:  # a pause after speech finalizes at once; the timer still runs for silence and pause-less speech
+                await asyncio.wait_for(st["wake"].wait(), REFINE_EVERY_S)
+                by_vad = True
+            except asyncio.TimeoutError:
+                by_vad = False
+            st["wake"].clear()
+            if by_vad:
+                while st["vad_to"] and (done_to is None or st["vad_to"] > done_to) and await refine_pass(st["vad_to"]):
+                    pass
+            else:
+                while await refine_pass():  # silence also advances, so conversations close on time
+                    pass
             closed = []
             end_at = db.kv(f"end_at:{device}")
             if end_at and not audio.queued(device):  # the recorder stopped and its last audio is processed

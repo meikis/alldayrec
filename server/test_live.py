@@ -42,6 +42,8 @@ def test_final_rows():
     lo, hi, rows = final_rows(segs, {"A": "他人", "B": "我"}, t0, 60.0)
     assert [(r["speaker"], r["text"]) for r in rows] == [("他人", "你定的吗？"), ("我", "什么？"), ("他人", "就是额度。")], rows
     assert lo == t0 + dt.timedelta(seconds=3) and hi == t0 + dt.timedelta(seconds=50), (lo, hi)
+    _, hi, rows = final_rows(segs, {"A": "他人", "B": "我"}, t0, 60.0, edge=0.0)  # a VAD window ends in a pause: all final
+    assert rows[-1]["text"] == "可能被窗口尾截断" and hi == t0 + dt.timedelta(seconds=60), (hi, rows[-1])
 
 
 if __name__ == "__main__":
