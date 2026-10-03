@@ -43,6 +43,14 @@ config OMI_ENABLE_BATTERY
         "Enable the battery support."
     default n
 
+config LR_NAME_PREFIX
+    string "Board name: the BLE name is this plus the last two address bytes, e.g. LR-X1-3F2A"
+    default "LR-X1"
+
+config LR_BATTERY_VDDH
+    bool "Battery on VDDH (nice!nano): read VDDH/5 inside the chip, no divider or charger pins"
+    default n
+
 config OMI_ENABLE_USB
     bool "Enable the usb"
     help

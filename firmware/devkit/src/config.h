@@ -10,9 +10,18 @@
 
 // PIN definitions
 // https://github.com/Seeed-Studio/Adafruit_nRF52_Arduino/blob/5aa3573913449410fd60f76b75673c53855ff2ec/variants/Seeed_XIAO_nRF52840_Sense/variant.cpp#L34
+#include <zephyr/devicetree.h>
+#define LR_USER DT_PATH(zephyr_user)
+#if DT_NODE_HAS_PROP(LR_USER, pdm_clk_gpios)  // an external PDM mic, wired per a board overlay (lr_promicro.overlay)
+#define LR_PIN(prop) NRF_GPIO_PIN_MAP(DT_PROP(DT_GPIO_CTLR(LR_USER, prop), port), DT_GPIO_PIN(LR_USER, prop))
+#define PDM_DIN_PIN LR_PIN(pdm_din_gpios)
+#define PDM_CLK_PIN LR_PIN(pdm_clk_gpios)
+#define PDM_PWR_PIN LR_PIN(pdm_pwr_gpios)
+#else  // the XIAO nRF52840 Sense's own mic
 #define PDM_DIN_PIN NRF_GPIO_PIN_MAP(0, 16)
 #define PDM_CLK_PIN NRF_GPIO_PIN_MAP(1, 0)
 #define PDM_PWR_PIN NRF_GPIO_PIN_MAP(1, 10)
+#endif
 
 // Codecs
 #ifdef CONFIG_OMI_CODEC_OPUS

@@ -40,7 +40,11 @@ int16_t sample_buffer[ADC_TOTAL_SAMPLES];
 
 #define ADC_RESOLUTION 12
 #define ADC_CHANNEL 7
+#ifdef CONFIG_LR_BATTERY_VDDH
+#define ADC_PORT SAADC_CH_PSELP_PSELP_VDDHDIV5 // VDDH / 5: the battery feeds VDDH on the nice!nano
+#else
 #define ADC_PORT SAADC_CH_PSELP_PSELP_AnalogInput7 // AIN7
+#endif
 #define ADC_REFERENCE ADC_REF_INTERNAL             // 0.6V
 #define ADC_GAIN ADC_GAIN_1_6                      // ADC REFERENCE * 6 = 3.6V
 
@@ -96,11 +100,17 @@ static uint8_t is_initialized = false;
 
 static int battery_enable_read()
 {
+    if (IS_ENABLED(CONFIG_LR_BATTERY_VDDH)) {
+        return 0;
+    }
     return gpio_pin_set(gpio_battery_dev, GPIO_BATTERY_READ_ENABLE, 1);
 }
 
 int battery_set_fast_charge()
 {
+    if (IS_ENABLED(CONFIG_LR_BATTERY_VDDH)) {
+        return 0; // no charger pins
+    }
     if (!is_initialized) {
         return -ECANCELED;
     }
@@ -110,6 +120,9 @@ int battery_set_fast_charge()
 
 int battery_set_slow_charge()
 {
+    if (IS_ENABLED(CONFIG_LR_BATTERY_VDDH)) {
+        return 0; // no charger pins
+    }
     if (!is_initialized) {
         return -ECANCELED;
     }
@@ -121,6 +134,9 @@ int battery_charge_start()
 {
     int ret = 0;
 
+    if (IS_ENABLED(CONFIG_LR_BATTERY_VDDH)) {
+        return 0; // no charger pins
+    }
     if (!is_initialized) {
         return -ECANCELED;
     }
@@ -131,6 +147,9 @@ int battery_charge_start()
 
 int battery_charge_stop()
 {
+    if (IS_ENABLED(CONFIG_LR_BATTERY_VDDH)) {
+        return 0; // no charger pins
+    }
     if (!is_initialized) {
         return -ECANCELED;
     }
@@ -169,7 +188,7 @@ int battery_get_millivolt(uint16_t *battery_millivolt)
     ret |= adc_raw_to_millivolts(adc_vref, ADC_GAIN, ADC_RESOLUTION, &adc_mv);
 
     // Calculate battery voltage.
-    *battery_millivolt = adc_mv * ((R1 + R2) / R2);
+    *battery_millivolt = IS_ENABLED(CONFIG_LR_BATTERY_VDDH) ? adc_mv * 5 : adc_mv * ((R1 + R2) / R2);
     k_mutex_unlock(&battery_mut);
 
     LOG_DBG("%d mV", *battery_millivolt);
@@ -221,6 +240,11 @@ int battery_init()
 
     if (ret) {
         LOG_ERR("ADC setup failed (error %d)", ret);
+    }
+
+    if (IS_ENABLED(CONFIG_LR_BATTERY_VDDH)) {
+        is_initialized = true;
+        return ret;
     }
 
     // GPIO

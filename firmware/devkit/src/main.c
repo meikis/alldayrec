@@ -3,6 +3,7 @@
 #include <zephyr/pm/device.h>
 
 #include "button.h"
+#include "lib/battery/battery.h"
 #include "codec.h"
 #include "config.h"
 #include "led.h"
@@ -145,6 +146,7 @@ int main(void)
     LOG_INF("Model: %s", CONFIG_BT_DIS_MODEL);
     LOG_INF("Firmware revision: %s", CONFIG_BT_DIS_FW_REV_STR);
     LOG_INF("Hardware revision: %s", CONFIG_BT_DIS_HW_REV_STR);
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(p25q16h), okay)  // the XIAO's QSPI flash
     // Force QSPI flash into deep sleep mode
     const struct device *flash_dev = DEVICE_DT_GET(DT_NODELABEL(p25q16h));
     if (device_is_ready(flash_dev)) {
@@ -155,6 +157,7 @@ int main(void)
     } else {
         LOG_ERR("QSPI flash device not ready");
     }
+#endif
     LOG_PRINTK("\n");
     LOG_INF("Initializing LEDs...\n");
 

@@ -1,5 +1,6 @@
 #include "transport.h"
 
+#include <string.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/hci.h>
@@ -261,18 +262,32 @@ int accel_start()
 
     return 1;
 }
-// Advertisement data
+// Advertisement data: 31 bytes at most, so the board name (LR-X1) here and the full name (LR-X1-3F2A) in the scan response
 static const struct bt_data bt_ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
     BT_DATA(BT_DATA_UUID128_ALL, audio_service_uuid.val, sizeof(audio_service_uuid.val)),
-    BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+    BT_DATA(BT_DATA_NAME_SHORTENED, CONFIG_LR_NAME_PREFIX, sizeof(CONFIG_LR_NAME_PREFIX) - 1),
 };
 
-// Scan response data
-static const struct bt_data bt_sd[] = {
-    BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(BT_UUID_DIS_VAL)),
+static char lr_name[CONFIG_BT_DEVICE_NAME_MAX + 1];
+
+// Scan response data (the DIS UUID left out for room: the service itself is still there)
+static struct bt_data bt_sd[] = {
+    {.type = BT_DATA_NAME_COMPLETE, .data_len = 0, .data = (const uint8_t *) lr_name},
     BT_DATA(BT_DATA_UUID128_ALL, dfu_service_uuid.val, sizeof(dfu_service_uuid.val)),
 };
+
+/* The unit's name: the board name and the last two bytes of its identity address, which stays with the chip */
+static void lr_set_name(void)
+{
+    bt_addr_le_t addr;
+    size_t n = 1;
+    bt_id_get(&addr, &n);
+    snprintk(lr_name, sizeof(lr_name), "%s-%02X%02X", CONFIG_LR_NAME_PREFIX, addr.a.val[1], addr.a.val[0]);
+    bt_set_name(lr_name);
+    bt_sd[0].data_len = strlen(lr_name);
+    LOG_INF("BLE name %s", lr_name);
+}
 
 //
 // State and Characteristics
@@ -736,6 +751,7 @@ int transport_start()
         return err;
     }
     LOG_INF("Transport bluetooth initialized");
+    lr_set_name();
 
     //  Enable button
 #ifdef CONFIG_OMI_ENABLE_BUTTON
