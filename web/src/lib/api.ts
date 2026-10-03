@@ -119,6 +119,17 @@ export interface DeviceStatus {
   latency_s: number | null;
   refine?: { at: string; ms: number; error?: string; backlog_s?: number } | null;
   conversation?: { start: string; sentences: number } | null;
+  hw?: RecorderStatus | null; // a BLE recorder, as its phone last read it
+}
+
+export interface RecorderStatus {
+  at: string;
+  model?: string;
+  fw?: string;
+  battery?: number;
+  store?: number; // 0 recording to the card; -19 no card; -28 card full
+  free_kb?: number;
+  total_kb?: number;
 }
 
 export interface Status {

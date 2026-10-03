@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import AppHeader from "../components/AppHeader.vue";
-import { get, type DeviceStatus, type Status } from "../lib/api";
+import { get, type DeviceStatus, type RecorderStatus, type Status } from "../lib/api";
 import { useSocket } from "../lib/socket";
 
 // What the server is doing per device: how far its audio has arrived, how far it is finalized, what is left and
@@ -25,6 +25,14 @@ function span(s: number) {
   const m = Math.round(s / 60);
   return m >= 60 ? `${Math.floor(m / 60)} 小时 ${m % 60} 分` : `${m} 分钟`;
 }
+const card = (h: RecorderStatus) =>
+  h.store === -19
+    ? "没有卡"
+    : h.store === -28
+      ? "已满，停止离线录音"
+      : h.total_kb
+        ? `剩 ${((h.free_kb ?? 0) / 1048576).toFixed(1)} / ${(h.total_kb / 1048576).toFixed(1)} GB`
+        : "—";
 const caughtUp = (d: DeviceStatus) => d.left_s < 30;
 const eta = (d: DeviceStatus) => {
   if (!d.eta_s) return "—";
@@ -60,6 +68,13 @@ const eta = (d: DeviceStatus) => {
             ? `进行中，${d.conversation.start.slice(11, 16)} 起 · ${d.conversation.sentences} 句`
             : "无"
         }}</span>
+        <template v-if="d.hw">
+          <span>录音设备</span
+          ><span>{{ [d.hw.model, d.hw.fw && "固件 " + d.hw.fw].filter(Boolean).join(" · ") }}</span>
+          <span>电量</span><span>{{ d.hw.battery != null ? d.hw.battery + "%" : "—" }}</span>
+          <span>存储卡</span><span :class="{ bad: d.hw.store }">{{ card(d.hw) }}</span>
+          <span>上报于</span><span>{{ at(d.hw.at) }}</span>
+        </template>
       </div>
     </section>
     <section v-if="status" class="card">

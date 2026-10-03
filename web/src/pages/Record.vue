@@ -13,7 +13,11 @@ const SVC = "19b10000-e8f2-537e-4f6c-d104768a1214",
   AUDIO = "19b10001-e8f2-537e-4f6c-d104768a1214",
   CODEC = "19b10002-e8f2-537e-4f6c-d104768a1214",
   OPUS_16K = 20,
-  FRAME_MS = 10;
+  FRAME_MS = 10,
+  // the offline store (firmware src/lr_store.h): TIME takes the phone's clock, its read is the card's state. The
+  // phone app takes the recorded files; this page only sets the clock so they can be dated
+  STORE = "7c3e0000-1a2b-4c5d-8e9f-6c6976657265",
+  TIME = "7c3e0001-1a2b-4c5d-8e9f-6c6976657265";
 // typed by hand, else a name of its own for this browser, kept from the first visit
 const device = ref((localStorage.device ||= `web-recorder-${crypto.randomUUID().slice(0, 8)}`)),
   source = ref<"mic" | "ble">(localStorage.source === "ble" ? "ble" : "mic"),
@@ -22,6 +26,7 @@ const device = ref((localStorage.device ||= `web-recorder-${crypto.randomUUID().
   sent = ref(0),
   queued = ref(0),
   packets = ref(0),
+  hw = ref(""),
   lastPiece = ref(""),
   recording = ref(false);
 let rec: MediaRecorder | null = null,
@@ -31,7 +36,7 @@ let rec: MediaRecorder | null = null,
 const queue: { blob: Blob; start: number; device: string }[] = [];
 const stat = computed(() =>
   recording.value
-    ? `录音中 · ${source.value === "ble" ? `收到 ${packets.value} 包 · ` : ""}已传 ${sent.value} 块 · 待传 ${queued.value}`
+    ? `录音中 · ${source.value === "ble" ? `收到 ${packets.value} 包 · ${hw.value ? hw.value + " · " : ""}` : ""}已传 ${sent.value} 块 · 待传 ${queued.value}`
     : "已停止",
 );
 const note = (s: string) =>
@@ -160,11 +165,24 @@ async function connect() {
   const codec = (await (await svc.getCharacteristic(CODEC)).readValue()).getUint8(0);
   if (codec !== OPUS_16K)
     throw new Error(`设备的编码是 ${codec}，这里只认 Opus 16 kHz（${OPUS_16K}）`);
+  await recorderState(gatt);
   const ch = await svc.getCharacteristic(AUDIO);
   ch.oncharacteristicvaluechanged = onPacket; // assigned, not added: a reconnect hands back the same object
   await ch.startNotifications();
   lastSeq = -1;
   note(`已连上 ${ble!.name}，Opus 16 kHz，按设备名 ${target()} 上传`);
+}
+/** Sets the board's clock, reads its battery and card, and tells the server, as the app does. */
+async function recorderState(gatt: BluetoothRemoteGATTServer) {
+  const time = await (await gatt.getPrimaryService(STORE)).getCharacteristic(TIME);
+  const now = new DataView(new ArrayBuffer(8));
+  now.setBigUint64(0, BigInt(Date.now()), true);
+  await time.writeValueWithResponse(now.buffer);
+  const t = await time.readValue();
+  const battery = (await (await (await gatt.getPrimaryService("battery_service")).getCharacteristic("battery_level")).readValue()).getUint8(0);
+  const st = { store: t.getInt16(6, true), free_kb: t.getUint32(8, true), total_kb: t.getUint32(12, true), battery };
+  hw.value = `电量 ${battery}% · ${st.store === -19 ? "没有存储卡" : st.store === -28 ? "存储卡已满" : `卡剩 ${(st.free_kb / 1048576).toFixed(1)} GB`}`;
+  await send(`/api/device-status?device=${encodeURIComponent(target())}`, new Blob([JSON.stringify(st)], { type: "application/json" }), "application/json").catch(() => {});
 }
 async function onDrop() {
   cut();
@@ -180,7 +198,7 @@ async function onDrop() {
   }
 }
 async function startBle() {
-  ble = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
+  ble = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }], optionalServices: [STORE, "battery_service"] });
   ble.addEventListener("gattserverdisconnected", () => void onDrop());
   frames = [];
   lastEnd = 0;

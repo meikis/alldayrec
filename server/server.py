@@ -900,7 +900,7 @@ def device_status(device: str, st: dict) -> dict:
 def status() -> dict:
     """What the page's status line shows (the device whose audio came in last), every device's pipeline, and the
     pieces still queued over all devices."""
-    ds = [device_status(d, st) for d, st in state["devices"].items()]
+    ds = [{**device_status(d, st), "hw": db.kv(f"hw:{d}")} for d, st in state["devices"].items()]
     top = max(ds, key=lambda d: d["audio_end"] or "", default={"device": None, "audio_end": None, "behind_s": None, "done_to": None,
                                                                  "last_speech": None, "refine": None, "conversation": None, "latency_s": None})
     summaries = db.conn().execute("SELECT count(*) FROM summaries WHERE status = 'pending'").fetchone()[0]
@@ -993,6 +993,16 @@ async def chunk_end(device: str, t: int):
     db.put_kv(f"end_at:{device}", iso(end))  # kept across a restart: the queue may still hold the audio before it
     log.info("%s stopped recording at %s", device, end.time())
     note(f"{device} 停止录音（{end.strftime('%H:%M:%S')}），处理完剩余音频后关闭对话")
+    return {"ok": True}
+
+
+@app.post("/api/device-status")
+async def device_status_report(device: str, request: Request):
+    """What a client last read from a BLE recorder (battery, card, firmware, model), shown with the device's pipeline."""
+    hw = await request.json()
+    if not isinstance(hw, dict):
+        raise HTTPException(400, "a JSON object")
+    db.put_kv(f"hw:{device}", {**hw, "at": iso(dt.datetime.now())})
     return {"ok": True}
 
 

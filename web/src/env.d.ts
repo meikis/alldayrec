@@ -9,6 +9,7 @@ interface BluetoothRemoteGATTCharacteristic extends EventTarget {
   value?: DataView;
   oncharacteristicvaluechanged: ((e: Event) => void) | null;
   readValue(): Promise<DataView>;
+  writeValueWithResponse(v: BufferSource): Promise<void>;
   startNotifications(): Promise<BluetoothRemoteGATTCharacteristic>;
 }
 interface BluetoothRemoteGATTServer {
@@ -24,5 +25,7 @@ interface BluetoothDevice extends EventTarget {
   gatt?: BluetoothRemoteGATTServer;
 }
 interface Navigator {
-  bluetooth: { requestDevice(o: { filters: { services: string[] }[] }): Promise<BluetoothDevice> };
+  bluetooth: {
+    requestDevice(o: { filters: { services: string[] }[]; optionalServices?: string[] }): Promise<BluetoothDevice>;
+  };
 }
