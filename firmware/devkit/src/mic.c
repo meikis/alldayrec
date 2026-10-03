@@ -8,7 +8,7 @@
 
 #include "config.h"
 #include "led.h"
-#include "nrfx_clock.h"
+#include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include "nrfx_pdm.h"
 #include "utils.h"
 
@@ -55,9 +55,18 @@ static void pdm_irq_handler(nrfx_pdm_evt_t const *event)
 int mic_start()
 {
 
-    // Start the high frequency clock
-    if (!nrf_clock_hf_is_running(NRF_CLOCK, NRF_CLOCK_HFCLK_HIGH_ACCURACY)) {
-        nrf_clock_task_trigger(NRF_CLOCK, NRF_CLOCK_TASK_HFCLKSTART);
+    // Hold the crystal (HFXO) for as long as the mic runs. The PDM clock is divided from HFCLK; a bare HFCLKSTART
+    // is undone whenever the BLE stack (MPSL) releases its own request, and HFCLK falls back to the RC oscillator:
+    // on battery (no USB holding HFXO) frames came ~1% fast, 36 s an hour off the frame-clock timestamps.
+    static struct onoff_client hfxo;
+    sys_notify_init_spinwait(&hfxo.notify);
+    int err = onoff_request(z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF), &hfxo);
+    int res;
+    while (err >= 0 && sys_notify_fetch_result(&hfxo.notify, &res) == -EAGAIN) {
+        k_msleep(1);
+    }
+    if (err < 0) {
+        LOG_ERR("HFXO request failed: %d", err);
     }
 
     // Configure PDM
