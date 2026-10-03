@@ -45,7 +45,10 @@ object Dfu {
         DfuServiceInitiator(address).setDeviceName(name).setKeepBond(true)
             .setForceDfu(false)
             .setForceScanningForNewAddressInLegacyDfu(true)  // the bootloader advertises as AdaDFU on another address
-            .setPacketsReceiptNotificationsValue(16)
+            // As lr_dfu.py (issue #33): the Adafruit bootloader stalls mid-image on PRN 16 (XIAO) and on big packets.
+            // The library asks for MTU 517 and sends MTU-3 bytes a packet (244 at the bootloader's 247): keep 20 B.
+            .setPacketsReceiptNotificationsValue(8)
+            .disableMtuRequest()
             .setZip(Uri.fromFile(zip))
             .start(ctx, DfuService::class.java)
     }
