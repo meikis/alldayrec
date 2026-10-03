@@ -949,6 +949,7 @@ DIST = HERE / "static/dist"  # the web app (web/, built by deploy.sh)
 @app.get("/speakers")
 @app.get("/calendar")
 @app.get("/progress")
+@app.get("/connect")
 @app.get("/p/{name}")
 async def page(conv_id: str = "", name: str = ""):
     return FileResponse(DIST / "index.html", headers=NO_CACHE)
@@ -1012,6 +1013,13 @@ async def client_config():
     """What the apps ask on start and while recording: piece lengths per app state (the server changes them without
     a new build; short pieces in front make drafts quick, long ones in the background save requests)."""
     return {"slice": {"foreground": SLICE_FOREGROUND_S, "background": SLICE_BACKGROUND_S, "screenOff": SLICE_SCREEN_OFF_S}}
+
+
+@app.get("/api/app-setup")
+async def app_setup():
+    """For the web page's QR: the token to hand the app, so it doesn't need typing in by hand. Empty in no-auth
+    mode (AUTH_TOKEN unset), same as everywhere else."""
+    return {"token": AUTH_TOKEN}
 
 
 @app.get("/api/events")

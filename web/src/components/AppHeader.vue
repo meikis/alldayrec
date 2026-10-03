@@ -17,6 +17,7 @@ defineProps<{ inApp?: boolean }>();
         <RouterLink to="/calendar" exact-active-class="on">日历</RouterLink>
         <RouterLink to="/speakers" exact-active-class="on">说话人</RouterLink>
         <RouterLink to="/progress" exact-active-class="on">进度</RouterLink>
+        <RouterLink to="/connect" exact-active-class="on">连接手机</RouterLink>
       </nav>
       <slot />
     </div>

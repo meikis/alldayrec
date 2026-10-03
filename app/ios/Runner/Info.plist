@@ -30,6 +30,8 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>录音并上传到 live-record 服务端转写</string>
+	<key>NSCameraUsageDescription</key>
+	<string>扫码登录需要使用摄像头</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

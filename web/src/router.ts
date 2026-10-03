@@ -41,6 +41,11 @@ export const router = createRouter({
       component: () => import("./pages/Record.vue"),
       meta: { title: "live-record 录音" },
     },
+    {
+      path: "/connect",
+      component: () => import("./pages/Connect.vue"),
+      meta: { title: "连接手机" },
+    },
   ],
 });
 router.afterEach((to) => {

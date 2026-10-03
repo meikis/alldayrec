@@ -7,6 +7,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -677,6 +678,17 @@ class _SettingsPageState extends State<SettingsPage> {
     await widget.onSaved();
   }
 
+  /// The web page's "连接手机" QR fills these two fields instead of typing them by hand, then saves the same way
+  /// the 保存 button does.
+  Future<void> _scan() async {
+    final r = await Navigator.push<Map<String, String>>(
+        context, MaterialPageRoute(builder: (_) => const QrScanPage()));
+    if (r == null) return;
+    server.text = r['server']!;
+    token.text = r['token']!;
+    await _save();
+  }
+
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context);
@@ -699,6 +711,9 @@ class _SettingsPageState extends State<SettingsPage> {
               onPressed: () => setState(() => showToken = !showToken)),
         ),
       ),
+      const SizedBox(height: 12),
+      OutlinedButton.icon(
+          onPressed: _scan, icon: const Icon(Icons.qr_code_scanner_rounded), label: const Text('扫码登录')),
       const SizedBox(height: 12),
       InputDecorator(
           decoration: const InputDecoration(labelText: '设备名', helperText: '取自系统设置里的手机名称；BLE 录音硬件的音频按硬件名上传',
@@ -747,6 +762,43 @@ class _SettingsPageState extends State<SettingsPage> {
       FilledButton(onPressed: _save, style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)), child: const Text('保存')),
     ]);
   }
+}
+
+/// Scans the web page's "连接手机" QR (`liverecord://setup?server=...&token=...`); pops with {'server', 'token'}
+/// on a match. Other QR contents get a hint and the scanner stays open (repeated frames of the same one don't spam it).
+class QrScanPage extends StatefulWidget {
+  const QrScanPage({super.key});
+  @override
+  State<QrScanPage> createState() => _QrScanPageState();
+}
+
+class _QrScanPageState extends State<QrScanPage> {
+  final controller = MobileScannerController();
+  String? lastRaw;
+
+  void _onDetect(BarcodeCapture capture) {
+    if (!mounted) return;  // a stray detection after the page is already popping
+    final raw = capture.barcodes.isEmpty ? null : capture.barcodes.first.rawValue;
+    if (raw == null || raw == lastRaw) return;
+    lastRaw = raw;
+    final uri = Uri.tryParse(raw);
+    if (uri == null || uri.scheme != 'liverecord' || uri.host != 'setup' || !uri.queryParameters.containsKey('server')) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('不是登录二维码，请在网页的「连接手机」里扫'), behavior: SnackBarBehavior.floating));
+      return;
+    }
+    Navigator.pop(context, {'server': uri.queryParameters['server']!, 'token': uri.queryParameters['token'] ?? ''});
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      Scaffold(appBar: AppBar(title: const Text('扫码登录')), body: MobileScanner(controller: controller, onDetect: _onDetect));
 }
 
 /// The BLE recorder (Android): which one is bound and, as last read over the link, its battery, card, offline sync
