@@ -1,0 +1,4 @@
+/* Seeed Expansion Board Base for XIAO: microSD CS on D2 (P0.28). SPI stays D8/D9/D10.
+ * The board's buzzer sits on D3 (P0.29), which the Omi overlay gives to I2S with D2: I2S off (no speaker here). */
+&spi2 { cs-gpios = <&gpio0 28 GPIO_ACTIVE_LOW>; };
+&i2s0 { status = "disabled"; };

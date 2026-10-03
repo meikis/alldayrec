@@ -1,0 +1,6 @@
+/* The SD card at 8 MHz, not the Omi board's 24: on jumper wires and the expansion board 24 MHz gave disk errors
+ * (failed unlink, multi-second write stalls, a card dead after a warm reset). 8 MHz is still ~1 MB/s. */
+&sdhc0 { spi-max-frequency = <8000000>; };
+
+/* Not SPIM: with nordic,nrf-spim on spi2 the SD init hung (watchdog resets, the card left stuck) on the soldered
+ * module, where the legacy SPI driver mounts. Kept on the board's nrf-spi until that is understood. */
