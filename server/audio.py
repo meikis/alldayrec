@@ -1,16 +1,21 @@
 """The audio store: what clients upload goes in, one endless time-stamped stream of 16 kHz mono samples comes out.
 
-Only this module knows how audio is kept (today: each uploaded piece as its own file under the recordings dir,
-indexed in the pieces table). Each device is its own stream: the pipeline of a device reads `stream(device, after)`, the playback reads `cut()`;
+Only this module knows how audio is kept (today: each uploaded piece appended unchanged to its device's file for the
+hour it starts in, chunks/<device>/<date>/<HH>.<ext>, and indexed in the pieces table by path, pos and size; one file a
+piece made 3600 tiny files an hour while the app was in front). Each device is its own stream: the pipeline of a device reads `stream(device, after)`, the playback reads `cut()`;
 neither cares about formats, files or piece lengths. A stream pauses when nothing new has arrived and when its reader
 stops asking (it pulls at its own pace), and a gap between two pieces is only a jump in their start times. A device
 that sends a backlog of older audio while another one is recording is streamed on its own, not dropped.
 """
 import asyncio
 import datetime as dt
+import io
 import logging
+import os
 import re
 import subprocess
+import threading
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +26,7 @@ log = logging.getLogger("live")
 SR = 16000
 DIR: Path | None = None  # the recordings dir
 read_to: dict[str, int] = {}  # per device: start of the last piece its reader has finished with; later ones are queued
+_append = threading.Lock()  # uploads are saved in threads: one append (and its index row) at a time
 
 
 AAC_DELAY = 2112  # samples an AAC encoder puts before the audio (at the iPhone's 16 kHz: 132 ms)
@@ -34,29 +40,60 @@ def unpad(x: np.ndarray) -> np.ndarray:
     return x[AAC_DELAY:len(x) - AAC_FRAME // 2] if len(x) > AAC_DELAY + AAC_FRAME else x
 
 
-def decode(src: Path | bytes, aac: bool = False) -> np.ndarray | None:
-    """An audio file (a path or its bytes) as 16 kHz mono int16; None when ffmpeg cannot read it. aac: an ADTS piece,
-    unpadded (a path ending in .aac is one)."""
-    args, inp = (["-i", str(src)], None) if isinstance(src, Path) else (["-i", "pipe:0"], src)
-    out = subprocess.run(["ffmpeg", "-v", "error", *args, "-f", "s16le", "-ac", "1", "-ar", str(SR), "pipe:1"], input=inp, capture_output=True)
+def decode(body: bytes, aac: bool = False) -> np.ndarray | None:
+    """One piece's bytes as 16 kHz mono int16; None when ffmpeg cannot read them. aac: an ADTS piece, unpadded."""
+    out = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "s16le", "-ac", "1", "-ar", str(SR), "pipe:1"], input=body, capture_output=True)
     if out.returncode or len(out.stdout) < 2 * SR // 10:
         return None
     x = np.frombuffer(out.stdout[:len(out.stdout) // 2 * 2], np.int16)
-    return unpad(x) if aac or (isinstance(src, Path) and src.suffix == ".aac") else x
+    return unpad(x) if aac else x
+
+
+def hour_file(device: str, start_ms: int, ext: str) -> Path:
+    """Where a piece starting at start_ms goes, relative to DIR: its device's file for that (local) hour."""
+    t = dt.datetime.fromtimestamp(start_ms / 1000)
+    return Path("chunks") / re.sub(r"[^\w.-]", "_", device) / f"{t:%Y-%m-%d}" / f"{t:%H}.{ext}"
+
+
+def append(path: Path, body: bytes) -> int:
+    """Appends body to DIR / path and returns where it starts; on disk (fsync) when this returns. Hold _append."""
+    f = DIR / path
+    new = not f.exists()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    with open(f, "ab") as h:
+        pos = h.seek(0, os.SEEK_END)  # a failed write before leaves bytes no row points at: harmless
+        h.write(body)
+        h.flush()
+        os.fsync(h.fileno())
+    if new:  # the file's name is durable too
+        d = os.open(f.parent, os.O_RDONLY)
+        os.fsync(d)
+        os.close(d)
+    return pos
 
 
 def save(device: str, start_ms: int, body: bytes, content_type: str) -> float | None:
     """Keeps one uploaded piece (start_ms: its device time); returns its seconds, None when it is not audio.
-    It is on disk and in the index before this returns, so the client may delete its copy once told so."""
+    It is on disk and in the index before this returns, so the client may delete its copy once told so. A piece sent
+    again replaces the row; its first copy stays in the hour file, unread."""
     x = decode(body, aac=content_type.split(";")[0] == "audio/aac")
     if x is None:
         return None
     ext = {"audio/ogg": "ogg", "audio/webm": "webm", "audio/aac": "aac"}.get(content_type.split(";")[0], "bin")
-    path = Path("chunks") / re.sub(r"[^\w.-]", "_", device) / f"{start_ms}.{ext}"
-    (DIR / path).parent.mkdir(parents=True, exist_ok=True)
-    (DIR / path).write_bytes(body)
-    db.conn().execute("INSERT OR REPLACE INTO pieces VALUES (?, ?, ?, ?)", (device, start_ms, round(len(x) / SR, 3), str(path)))
+    path = hour_file(device, start_ms, ext)
+    with _append:
+        pos = append(path, body)
+        db.conn().execute("INSERT OR REPLACE INTO pieces VALUES (?, ?, ?, ?, ?, ?)",
+                          (device, start_ms, round(len(x) / SR, 3), str(path), pos, len(body)))
     return len(x) / SR
+
+
+def samples(p) -> np.ndarray | None:
+    """A pieces row's audio, decoded."""
+    with open(DIR / p["path"], "rb") as f:
+        f.seek(p["pos"])
+        body = f.read(p["size"])
+    return decode(body, aac=p["path"].endswith(".aac"))
 
 
 def queued(device: str) -> int:
@@ -90,7 +127,7 @@ async def stream(device: str, after: dt.datetime | None):
         if p is None:
             await asyncio.sleep(1)
             continue
-        x = await asyncio.to_thread(decode, DIR / p["path"])
+        x = await asyncio.to_thread(samples, p)
         if x is not None:
             yield dt.datetime.fromtimestamp(p["start_ms"] / 1000), x
         read_to[device] = p["start_ms"]  # after the yield: the reader came back for more, so this one is done
@@ -100,21 +137,26 @@ def cut(a: dt.datetime, b: dt.datetime, fmt: str, device: str | None = None) -> 
     """[a, b] (+0.2 s each side) of one device (any when None) as `fmt` (wav, s16le), or None when no stored audio
     covers it."""
     a_ms, b_ms = int(a.timestamp() * 1000), int(b.timestamp() * 1000)
-    pieces = [(r["start_ms"], DIR / r["path"]) for r in db.conn().execute(
-        "SELECT start_ms, path FROM pieces WHERE start_ms <= ? AND start_ms + seconds * 1000 >= ? AND (? IS NULL OR device = ?) ORDER BY start_ms",
-        (b_ms, a_ms, device, device))]
-    if not pieces:
+    pieces = db.conn().execute(
+        "SELECT * FROM pieces WHERE start_ms <= ? AND start_ms + seconds * 1000 >= ? AND (? IS NULL OR device = ?) ORDER BY start_ms",
+        (b_ms, a_ms, device, device)).fetchall()
+    xs = [x for x in map(samples, pieces) if x is not None]
+    if not xs:
         return None
     # concatenated back to back (the small gaps between pieces are ignored)
-    off = max(0.0, (a_ms - pieces[0][0]) / 1000 - 0.2)
-    ins = [x for _, p in pieces for x in ("-i", str(p))]
-    out = subprocess.run(["ffmpeg", "-v", "error", *ins, "-filter_complex", "".join(f"[{i}:a]" for i in range(len(pieces))) +
-                          f"concat=n={len(pieces)}:v=0:a=1[a]", "-map", "[a]", "-ss", f"{off:.3f}", "-t", f"{(b - a).total_seconds() + 0.4:.3f}",
-                          "-ac", "1", "-ar", str(SR), "-f", fmt, "pipe:1"], capture_output=True)
-    if out.returncode or len(out.stdout) <= 44:
-        log.warning("could not cut %s: %s", pieces[0][1].name, out.stderr.decode()[-200:])
+    i = int(max(0.0, (a_ms - pieces[0]["start_ms"]) / 1000 - 0.2) * SR)
+    x = np.concatenate(xs)[i:i + int(((b - a).total_seconds() + 0.4) * SR)]
+    if not len(x):
         return None
-    return out.stdout
+    if fmt == "s16le":
+        return x.tobytes()
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes(x.tobytes())
+    return out.getvalue()
 
 
 if __name__ == "__main__":  # the stream's order, resume point and late pieces, on synthetic tones
@@ -127,6 +169,12 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     for m in (0, 1, 5):  # 10:00, 10:01, a gap, 10:05
         assert save("phone", T(m), tone(60), "audio/ogg") > 59
     assert save("phone", T(9), b"not audio", "audio/ogg") is None
+    files = [p.relative_to(DIR).as_posix() for p in DIR.rglob("*.ogg")]
+    assert files == ["chunks/phone/2026-10-02/10.ogg"], files
+    size = (DIR / files[0]).stat().st_size
+    assert save("phone", T(1), tone(60), "audio/ogg") > 59, "sent again"
+    assert (DIR / files[0]).stat().st_size > size and db.conn().execute("SELECT count(*) FROM pieces").fetchone()[0] == 3, \
+        "a piece sent again is appended once more and replaces its row"
     x = np.arange(16000, dtype=np.int16)
     assert len(unpad(x)) == 16000 - AAC_DELAY - AAC_FRAME // 2 and unpad(x)[0] == AAC_DELAY, "AAC: the encoder's delay and half a frame go"
     assert len(unpad(x[:3000])) == 3000, "too short to hold both: left alone"
@@ -149,4 +197,6 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     left, end = backlog("phone", dt.datetime(2026, 10, 2, 10, 1, 30))
     assert 89 < left < 91 and end == dt.datetime(2026, 10, 2, 10, 6), (left, end)  # 30 s of 10:01 + all of 10:05
     assert len(cut(dt.datetime(2026, 10, 2, 10, 0, 59), dt.datetime(2026, 10, 2, 10, 1, 1), "s16le")) > 2 * SR * 2
+    with wave.open(io.BytesIO(cut(dt.datetime(2026, 10, 2, 10, 0, 59), dt.datetime(2026, 10, 2, 10, 1, 1), "wav", "phone"))) as w:
+        assert w.getframerate() == SR and abs(w.getnframes() - 2.4 * SR) < 2, w.getnframes()
     print("ok")

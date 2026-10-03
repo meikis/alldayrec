@@ -31,8 +31,9 @@ CREATE TABLE IF NOT EXISTS voices (           -- one label of one conversation; 
     clip TEXT, clip_start TEXT, clip_end TEXT, clip_text TEXT, UNIQUE (conv, label));
 CREATE TABLE IF NOT EXISTS apart (voice TEXT NOT NULL, grp TEXT NOT NULL, PRIMARY KEY (voice, grp));
 CREATE TABLE IF NOT EXISTS people (name TEXT PRIMARY KEY, n INTEGER NOT NULL, e BLOB NOT NULL);
-CREATE TABLE IF NOT EXISTS pieces (           -- uploaded audio pieces, the ingest queue; path relative to the recordings dir
-    device TEXT NOT NULL, start_ms INTEGER NOT NULL, seconds REAL NOT NULL, path TEXT NOT NULL, PRIMARY KEY (start_ms, device));
+CREATE TABLE IF NOT EXISTS pieces (           -- uploaded audio pieces, the ingest queue; size bytes at pos of path (the
+    device TEXT NOT NULL, start_ms INTEGER NOT NULL, seconds REAL NOT NULL, path TEXT NOT NULL,  -- hour file, relative
+    pos INTEGER, size INTEGER, PRIMARY KEY (start_ms, device));                                 -- to the recordings dir)
 CREATE INDEX IF NOT EXISTS pieces_device ON pieces(device, start_ms);  -- each device's stream and backlog
 CREATE TABLE IF NOT EXISTS timelines (conversation TEXT PRIMARY KEY, body TEXT NOT NULL);  -- the live analysis as it stood at the close
 CREATE TABLE IF NOT EXISTS feedback (conv TEXT NOT NULL, at TEXT NOT NULL, text TEXT NOT NULL);  -- what the owner says a summary got wrong, read back in batches
@@ -49,6 +50,9 @@ def open_db(path: Path):
     conn().executescript(SCHEMA)
     if "device" not in {r[1] for r in conn().execute("PRAGMA table_info(conversations)")}:  # 10-02: one pipeline per device
         conn().execute("ALTER TABLE conversations ADD COLUMN device TEXT")
+    if "pos" not in {r[1] for r in conn().execute("PRAGMA table_info(pieces)")}:  # 10-04: pieces in hour files (pack_pieces.py)
+        conn().execute("ALTER TABLE pieces ADD COLUMN pos INTEGER")
+        conn().execute("ALTER TABLE pieces ADD COLUMN size INTEGER")
 
 
 def conn() -> sqlite3.Connection:
