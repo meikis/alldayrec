@@ -386,7 +386,11 @@ static ssize_t dfu_control_point_write_handler(struct bt_conn *conn,
                                                uint8_t flags)
 {
     LOG_INF("dfu_control_point_write_handler");
-    if (len == 1 && ((uint8_t *) buf)[0] == 0x06) {
+    if (len == 1 && ((uint8_t *) buf)[0] == 0x57) {  // ours: into the UF2 bootloader (USB drive), as the 1200 bps touch
+        lr_store_shutdown();
+        NRF_POWER->GPREGRET = 0x57;
+        NVIC_SystemReset();
+    } else if (len == 1 && ((uint8_t *) buf)[0] == 0x06) {
         NRF_POWER->GPREGRET = 0xA8;
         NVIC_SystemReset();
     } else if (len == 2 && ((uint8_t *) buf)[0] == 0x01) {

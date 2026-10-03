@@ -20,14 +20,14 @@ PRN = 8  # (16 lost the XIAO bootloader mid-image, 10-03) the bootloader reports
 PKT_LEN = 20  # legacy DFU's packet size. 240-byte packets (MTU 247) stalled the Adafruit bootloader mid-image (10-03)
 
 
-async def enter_bootloader(name: str):
+async def enter_bootloader(name: str, uf2=False):
     dev = await BleakScanner.find_device_by_filter(lambda d, a: AUDIO_SVC in a.service_uuids and (a.local_name or "").startswith(name), 20)
     if not dev:
         sys.exit(f"no {name}")
     print(f"{dev.name}: rebooting into the bootloader")
     async with BleakClient(dev) as c:
         try:
-            await c.write_gatt_char(CP, b"\x06", response=True)
+            await c.write_gatt_char(CP, b"\x57" if uf2 else b"\x06", response=True)  # 0x57: the USB (UF2) bootloader
         except Exception:
             pass  # it resets before it answers
 
@@ -87,6 +87,8 @@ async def send(pkg: str):
 
 
 if __name__ == "__main__":
+    if "--uf2" in sys.argv:  # lr.sh flash: into the USB drive bootloader, for a firmware without a serial port
+        sys.exit(asyncio.run(enter_bootloader(sys.argv[sys.argv.index("--name") + 1], uf2=True)))
     pkg = sys.argv[1]
     if "--name" in sys.argv:
         asyncio.run(enter_bootloader(sys.argv[sys.argv.index("--name") + 1]))

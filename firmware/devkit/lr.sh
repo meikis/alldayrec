@@ -55,14 +55,16 @@ flash)
   uf2drive() { for v in /Volumes/*; do [ -f "$v/INFO_UF2.TXT" ] && { echo "$v"; return; }; done; return 0; }  # XIAO-SENSE, NICENANO, ...
   if [ -z "$(uf2drive)" ]; then
     port=$(ls /dev/cu.usbmodem* 2>/dev/null | head -1) || true
-    [ -n "$port" ] || { echo "no board on USB" >&2; exit 1; }
-    stty -f "$port" 1200 || true
+    if [ -n "$port" ]; then /bin/stty -f "$port" 1200 || true  # macOS stty: GNU stty (coreutils first in PATH) has no -f
+    else  # no serial port (a firmware without it): ask over Bluetooth, LR_NAME picks the board
+      uv run --no-project --with bleak python "$D/lr_dfu.py" --uf2 --name "${LR_NAME:-LR-}" || { echo "no board on USB or Bluetooth" >&2; exit 1; }
+    fi
     for _ in $(seq 40); do [ -n "$(uf2drive)" ] && break; sleep 0.5; done
   fi
   drive=$(uf2drive)
   [ -n "$drive" ] || { echo "bootloader drive did not show up: double-tap reset once (old firmware?)" >&2; exit 1; }
   sleep 1
-  cp -X "$UF2" "$drive/" 2>/dev/null || true  # the board reboots mid-copy; cp's complaint is expected
+  /bin/cp -X "$UF2" "$drive/" 2>/dev/null || true  # macOS cp (-X: no resource forks; GNU cp has no -X); the board reboots mid-copy, so its complaint is expected
   for _ in $(seq 40); do ls /dev/cu.usbmodem* >/dev/null 2>&1 && break; sleep 0.5; done
   echo "flashed $V via $drive: $(ls /dev/cu.usbmodem* 2>/dev/null || echo 'no serial port yet')"
   ;;

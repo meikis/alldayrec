@@ -10,6 +10,9 @@
 		pdm-din-gpios = <&gpio0 6 0>;
 		pdm-clk-gpios = <&gpio0 8 0>;
 		pdm-pwr-gpios = <&gpio0 17 0>;
+		/* The nice!nano's VCC pin, switched by P0.13 (high: on): the SD module there. sdcard.c turns it off and on
+		 * before mounting, so a card left stuck mid-command (a reset, a lost link mid-read) starts clean */
+		sd-pwr-gpios = <&gpio0 13 GPIO_ACTIVE_HIGH>;
 	};
 };
 
@@ -44,12 +47,3 @@
 	};
 };
 &spi2 { cs-gpios = <&gpio0 20 GPIO_ACTIVE_LOW>; };
-
-/* The nice!nano's VCC pin is switched by P0.13: held high, the SD module there always has power */
-&gpio0 {
-	vcc_on {
-		gpio-hog;
-		gpios = <13 GPIO_ACTIVE_HIGH>;
-		output-high;
-	};
-};

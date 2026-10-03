@@ -56,8 +56,12 @@ static void count_free(void)
     }
 }
 
+static uint32_t dropped;     // frames lost on the way to the card (gaps in the frame numbers it got)
+static uint16_t append_max;  // the slowest append so far, ms
+
 static int append(const void *data, uint32_t len)
 {
+    int64_t t0 = k_uptime_get();
     if (free_kb < RESERVE_KB) {
         if (store_err != -ENOSPC) {
             LOG_ERR("card full (%u KB free): not recording", free_kb);
@@ -73,6 +77,7 @@ static int append(const void *data, uint32_t len)
     }
     int n = fs_write(&f, data, len);
     fs_close(&f);
+    append_max = MAX(append_max, (uint16_t) MIN(k_uptime_get() - t0, UINT16_MAX));
     if (n > 0) {
         seg_size += n;
         free_kb -= MIN(free_kb, DIV_ROUND_UP(n, 1024));
@@ -106,6 +111,9 @@ void lr_store_frame(uint32_t frame_no, const uint8_t *data, uint16_t len)
     if (len > 255 || (store_err && store_err != -ENOSPC)) {
         return;  // no card; a full one still takes the frames to the record, which append() then drops
     }
+    if (rec_count && frame_no > rec_next) {
+        dropped += frame_no - rec_next;
+    }
     if (rec_count && (frame_no != rec_next || rec_count == REC_FRAMES || rec_len + 1 + len > sizeof(rec))) {
         flush();
     }
@@ -127,7 +135,7 @@ void lr_store_frame(uint32_t frame_no, const uint8_t *data, uint16_t len)
 //
 // Commands, handled on the store's own thread: SD access and notifications may block, the BT RX thread must not
 //
-enum { LIST = 1, READ = 2, STOP = 3, DELETE = 4, FORGET = 5, SYNC = 0x10, ROTATE = 0x11 };
+enum { LIST = 1, READ = 2, STOP = 3, DELETE = 4, FORGET = 5, USB_DISK = 6, SYNC = 0x10, ROTATE = 0x11, UNLEND = 0x12 };
 struct cmd {
     uint8_t op;
     uint32_t file, offset;
@@ -147,15 +155,38 @@ static ssize_t time_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
     return len;
 }
 
+/* Why the last boot ended, for a phone to see: RESETREAS, and the fatal error a crash left in RAM that survives a
+ * reset (reason, PC; zero when none) */
+static uint32_t resetreas, last_fault[2];
+static __noinit uint32_t fault[3];  // magic, reason, pc
+
+void k_sys_fatal_error_handler(unsigned int reason, const z_arch_esf_t *esf)
+{
+    fault[0] = 0xFA017;
+    fault[1] = reason;
+    fault[2] = esf ? esf->basic.pc : 0;
+    NVIC_SystemReset();
+}
+
 static ssize_t time_read(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len,
                          uint16_t offset)
 {
-    uint8_t v[16];
+    extern int16_t usb_diag[4];
+    uint8_t v[42];
     sys_put_le16(boot, v);
     sys_put_le32(transport_frame_no, v + 2);
     sys_put_le16(store_err, v + 6);
     sys_put_le32(free_kb, v + 8);
     sys_put_le32(total_kb, v + 12);
+    sys_put_le32(resetreas, v + 16);
+    sys_put_le32(last_fault[0], v + 20);
+    sys_put_le32(last_fault[1], v + 24);
+    sys_put_le32(dropped, v + 28);
+    sys_put_le16(append_max, v + 32);
+    sys_put_le16(usb_diag[0], v + 34);
+    sys_put_le16(usb_diag[1], v + 36);
+    sys_put_le16(usb_diag[2], v + 38);
+    sys_put_le16(usb_diag[3], v + 40);
     return bt_gatt_attr_read(conn, attr, buf, len, offset, v, sizeof(v));
 }
 
@@ -169,6 +200,9 @@ static ssize_t ctrl_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
     }
     if (len >= 9) {
         c.offset = sys_get_le32(b + 5);
+    }
+    if (c.op == USB_DISK && len >= 2) {
+        c.file = b[1];  // on (1) / off (0)
     }
     k_msgq_put(&cmds, &c, K_NO_WAIT);
     return len;
@@ -298,11 +332,51 @@ static void forget_bond(const struct bt_bond_info *info, void *arg)
     }
 }
 
+extern volatile bool usb_disk_lent;  // usb.c: the card reader shows the card
+extern bool usb_charge;
+
+/* The card to the computer (USB disk) and back. Lent, the card is unmounted and nothing records to it (-EBUSY); back,
+ * it is mounted again (the ProMicro powers it off and on first) and recording goes on in a new segment. */
+static int lend(bool on)
+{
+    if (on == usb_disk_lent) {
+        return 0;
+    }
+    if (on && (!usb_charge || store_err)) {
+        return usb_charge ? store_err : -ENOTCONN;  // not on a computer, or no card to lend
+    }
+    k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+    if (on) {
+        flush();
+        unmount_sd_card();
+        store_err = -EBUSY;
+        usb_disk_lent = true;
+        LOG_INF("card lent to USB");
+    } else {
+        usb_disk_lent = false;
+        int err = mount_sd_card();
+        store_err = err;
+        if (!err) {
+            seg++;
+            seg_size = 0;
+            file_path(path, (uint32_t) boot << 16 | seg);
+            count_free();
+        }
+        LOG_INF("card back from USB: %d", err);
+    }
+    k_mutex_unlock(&write_sdcard_mutex);
+    return 0;
+}
+
 static void store_thread(void)
 {
     struct cmd c;
     for (;;) {
         k_msgq_get(&cmds, &c, K_FOREVER);
+        if (c.op == UNLEND) {
+            lend(false);
+            continue;
+        }
         struct bt_conn *conn = get_current_connection();
         if (c.op == SYNC || c.op == ROTATE) {
             k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
@@ -330,6 +404,9 @@ static void store_thread(void)
             list(conn);
         } else if (c.op == READ) {
             send_file(conn, c.file, c.offset);
+        } else if (c.op == USB_DISK) {
+            int err = lend(c.file);
+            reply(conn, 0x86, c.file, (uint8_t) err, 1);
         } else if (c.op == FORGET) {
             int n = 0;
             bt_foreach_bond(BT_ID_DEFAULT, forget_bond, &(struct forget){conn, &n});
@@ -366,6 +443,14 @@ void lr_store_shutdown(void)
     }
 }
 
+void lr_store_lend(bool on)
+{
+    if (!on) {
+        struct cmd c = {.op = UNLEND};
+        k_msgq_put(&cmds, &c, K_NO_WAIT);
+    }
+}
+
 void lr_store_rotate(void)
 {
     struct cmd c = {.op = ROTATE};
@@ -375,11 +460,29 @@ void lr_store_rotate(void)
 /* Mount the SD card, count this boot, pick its first segment, start the command thread. */
 int lr_store_init(void)
 {
+    resetreas = NRF_POWER->RESETREAS;
+    NRF_POWER->RESETREAS = resetreas;  // write-1-to-clear: the next boot sees only its own
+    if (fault[0] == 0xFA017) {
+        last_fault[0] = fault[1];
+        last_fault[1] = fault[2];
+        fault[0] = 0;
+    }
     struct fs_file_t f;
     fs_file_t_init(&f);
     int err = mount_sd_card();
     if (err) {
         return store_err = err;
+    }
+    // a computer the card is lent to (USB disk) leaves it alone: no Spotlight index, no fseventsd log
+    struct fs_file_t m;
+    fs_file_t_init(&m);
+    if (!fs_open(&m, "/SD:/.metadata_never_index", FS_O_CREATE | FS_O_WRITE)) {
+        fs_close(&m);
+    }
+    fs_mkdir("/SD:/.fseventsd");
+    fs_file_t_init(&m);
+    if (!fs_open(&m, "/SD:/.fseventsd/no_log", FS_O_CREATE | FS_O_WRITE)) {
+        fs_close(&m);
     }
     err = fs_mkdir(DIR);
     if (err && err != -EEXIST) {

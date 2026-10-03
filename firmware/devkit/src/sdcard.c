@@ -30,8 +30,24 @@ struct gpio_dt_spec sd_en_gpio_pin = {.port = DEVICE_DT_GET(DT_NODELABEL(gpio0))
 bool sd_enabled = false;
 static const struct gpio_dt_spec sd_cs = GPIO_DT_SPEC_GET_BY_IDX(DT_NODELABEL(spi2), cs_gpios, 0);  // per board overlay
 
+#if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), sd_pwr_gpios)
+static const struct gpio_dt_spec sd_pwr = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), sd_pwr_gpios);
+#endif
+
 int mount_sd_card(void)
 {
+#if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), sd_pwr_gpios)
+    // a board that switches the card's supply: off long enough to drain, then on, so the card starts from reset. At
+    // boot only: NCS 2.7's SD disk has no deinit, it would not initialise the card again (mounted back after USB, -EIO)
+    static bool powered;
+    if (!powered) {
+        gpio_pin_configure_dt(&sd_pwr, GPIO_OUTPUT_INACTIVE);
+        k_msleep(300);
+        gpio_pin_set_dt(&sd_pwr, 1);
+        k_msleep(50);
+        powered = true;
+    }
+#endif
     // initialize the sd card enable pin (v2)
     if (gpio_is_ready_dt(&sd_en_gpio_pin)) {
         LOG_INF("SD Enable Pin ready");
