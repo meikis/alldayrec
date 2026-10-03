@@ -26,6 +26,7 @@
 #include "mic.h"
 #include "sdcard.h"
 #include "speaker.h"
+#include "lr_log.h"
 #include "lr_store.h"
 // #include "friend.h"
 LOG_MODULE_REGISTER(transport, CONFIG_LOG_DEFAULT_LEVEL);
@@ -388,17 +389,13 @@ static ssize_t dfu_control_point_write_handler(struct bt_conn *conn,
     LOG_INF("dfu_control_point_write_handler");
     if (len == 1 && ((uint8_t *) buf)[0] == 0x57) {  // ours: into the UF2 bootloader (USB drive), as the 1200 bps touch
         lr_store_shutdown();
-        NRF_POWER->GPREGRET = 0x57;
-        NVIC_SystemReset();
+        lr_log_reset(0x57);
     } else if (len == 1 && ((uint8_t *) buf)[0] == 0x06) {
-        NRF_POWER->GPREGRET = 0xA8;
-        NVIC_SystemReset();
+        lr_log_reset(0xA8);
     } else if (len == 2 && ((uint8_t *) buf)[0] == 0x01) {
         uint8_t notification_value = 0x10;
         bt_gatt_notify(conn, attr, &notification_value, sizeof(notification_value));
-
-        NRF_POWER->GPREGRET = 0xA8;
-        NVIC_SystemReset();
+        lr_log_reset(0xA8);
     }
     return len;
 }
@@ -457,6 +454,7 @@ static void _transport_connected(struct bt_conn *conn, uint8_t err)
     current_connection = bt_conn_ref(conn);
     current_mtu = info.le.data_len->tx_max_len;
     LOG_INF("Transport connected");
+    lr_log(LR_CONNECT, 0, info.le.interval | info.le.latency << 16, info.le.timeout);
     LOG_DBG("Interval: %d, latency: %d, timeout: %d", info.le.interval, info.le.latency, info.le.timeout);
     LOG_DBG("TX PHY %s, RX PHY %s", phy2str(info.le.phy->tx_phy), phy2str(info.le.phy->rx_phy));
     LOG_DBG("LE data len updated: TX (len: %d time: %d) RX (len: %d time: %d)",
@@ -481,6 +479,7 @@ static void _transport_disconnected(struct bt_conn *conn, uint8_t err)
     is_connected = false;
 
     LOG_INF("Transport disconnected");
+    lr_log(LR_DISCONNECT, err, 0, 0);
 
     if (current_connection != NULL) {
         bt_conn_unref(current_connection);
@@ -502,13 +501,13 @@ static bool _le_param_req(struct bt_conn *conn, struct bt_le_conn_param *param)
 static void _le_param_updated(struct bt_conn *conn, uint16_t interval, uint16_t latency, uint16_t timeout)
 {
     LOG_INF("Connection parameters updated.");
+    lr_log(LR_PARAM, 0, interval | latency << 16, timeout);
     LOG_DBG("[ interval: %d, latency: %d, timeout: %d ]", interval, latency, timeout);
 }
 
 static void _le_phy_updated(struct bt_conn *conn, struct bt_conn_le_phy_info *param)
 {
-    // LOG_DBG("LE PHY updated: TX PHY %s, RX PHY %s",
-    //        phy2str(param->tx_phy), phy2str(param->rx_phy));
+    lr_log(LR_PHY, 0, param->tx_phy, param->rx_phy);
 }
 
 static void _le_data_length_updated(struct bt_conn *conn, struct bt_conn_le_data_len_info *info)
@@ -520,8 +519,15 @@ static void _le_data_length_updated(struct bt_conn *conn, struct bt_conn_le_data
             info->rx_max_len,
             info->rx_max_time);
     current_mtu = info->tx_max_len;
+    lr_log(LR_MTU, 1, info->tx_max_len, info->rx_max_len);
     k_sem_give(&pusher_wake_sem);
 }
+
+static void att_mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
+{
+    lr_log(LR_MTU, 0, tx, rx);
+}
+static struct bt_gatt_cb gatt_cb = {.att_mtu_updated = att_mtu_updated};
 
 //
 // Pairing: a stranger nearby must not listen in or take the recordings. Every characteristic but battery and device
@@ -553,11 +559,13 @@ static enum bt_security_err pairing_accept(struct bt_conn *conn, const struct bt
 static void pairing_complete(struct bt_conn *conn, bool bonded)
 {
     LOG_INF("paired, bonded %d", bonded);
+    lr_log(LR_PAIRED, bonded, 0, 0);
 }
 
 static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
 {
     LOG_WRN("pairing failed: %d", reason);
+    lr_log(LR_PAIR_FAIL, reason, 0, 0);
 }
 
 /* A phone that lost its keys (app reinstalled, Bluetooth reset) cannot encrypt with ours: while pairing is open the
@@ -565,8 +573,10 @@ static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
 static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_security_err err)
 {
     LOG_INF("security level %d, err %d", level, err);
+    lr_log(LR_SECURITY, level, err, 0);
     if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING && lr_pairing_open()) {
         LOG_WRN("stale bond dropped");
+        lr_log(LR_FORGET, 1, 1, 0);
         bt_unpair(BT_ID_DEFAULT, bt_conn_get_dst(conn));
     }
 }
@@ -658,7 +668,7 @@ static void consume_tx_frame(void)
 
 // Thread
 K_THREAD_STACK_DEFINE(pusher_stack, 4096);
-static struct k_thread pusher_thread;
+struct k_thread pusher_thread;  // lr_log.c watches its stack
 static uint16_t packet_next_index = 0;
 static uint8_t pusher_temp_data[CODEC_OUTPUT_MAX_BYTES + NET_BUFFER_HEADER_SIZE];
 
@@ -820,6 +830,7 @@ int transport_start()
 
     // Configure callbacks
     bt_conn_cb_register(&_callback_references);
+    bt_gatt_cb_register(&gatt_cb);
 
     // Enable Bluetooth
     int err = bt_enable(NULL);

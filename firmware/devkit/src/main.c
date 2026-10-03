@@ -10,6 +10,7 @@
 #include "mic.h"
 #include "sdcard.h"
 #include "speaker.h"
+#include "lr_log.h"
 #include "lr_store.h"
 #include "transport.h"
 #include "usb.h"
@@ -44,10 +45,7 @@ void bt_ctlr_assert_handle(char *name, int type)
 
 static void print_reset_reason(void)
 {
-    uint32_t reas = NRF_POWER->RESETREAS;
-
-    // Clear the reset reason register
-    NRF_POWER->RESETREAS = reas;
+    uint32_t reas = NRF_POWER->RESETREAS;  // not cleared: lr_log and lr_store read it later, lr_store clears it
 
     if (reas & POWER_RESETREAS_DOG_Msk) {
         printk("Reset by WATCHDOG\n");
@@ -191,6 +189,8 @@ int main(void)
     }
     LOG_INF("Battery initialized");
 #endif
+
+    lr_log_init();  // after the battery (its voltage goes in the boot record), before the SD card (its mount tries)
 
     // Enable button
 #ifdef CONFIG_OMI_ENABLE_BUTTON

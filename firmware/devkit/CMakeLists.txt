@@ -16,6 +16,7 @@ target_sources(app PRIVATE
     src/speaker.c
     src/sdcard.c
     src/lr_store.c
+    src/lr_log.c
     src/usb.c
     src/wdog_facade.c
 	# src/nfc.c future release

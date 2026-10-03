@@ -1,4 +1,5 @@
 #include "sdcard.h"
+#include "lr_log.h"
 #include "wdog_facade.h"
 
 #include <ff.h>
@@ -74,6 +75,7 @@ static void sd_spi_reset(void)
     gpio_pin_set_dt(&sd_cs, 0);
     sd_byte(0xFF);
     LOG_INF("SD reset: CMD12 r1 0x%02x, CMD0 r1 0x%02x", r12, r0);
+    lr_log(LR_SD_RESET, 0, r12, r0);
 }
 
 int mount_sd_card(void)
@@ -106,6 +108,7 @@ int mount_sd_card(void)
         watchdog_feed();  // a card that never answers takes seconds per try; the watchdog allows 30 s for all of boot
         err = disk_access_init(disk_pdrv) ?: fs_mount(&mount_point);
         LOG_INF("SD mount try %d: %d", i + 1, err);
+        lr_log(LR_MOUNT, i + 1, err, 0);
     }
     sd_enabled = !err;
     return err;

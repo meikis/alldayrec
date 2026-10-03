@@ -30,6 +30,9 @@
  *               0x06 USB_DISK on:u8      -> 0x86 on:u32 status:i8: on a computer's USB, the card shows as a USB disk
  *                                           (recording to it pauses, TIME's store reads -16) or comes back (eject
  *                                           it on the computer first); unplugging also brings it back. -107: not on USB
+ *               0x07 LOG from:u32        -> DATA notifications seq:u32 + records (seq, seq+1, ...; 16 B each, lr_log.h)
+ *                                           for every logged event from seq `from` on, then 0x87 next:u32, the seq
+ *                                           the next event will get: ask from there next time
  * All but battery and device info need an encrypted (bonded) link; see pairing in transport.c.
  *   ...03 DATA  notify offset:u32 bytes...
  * file = boot << 16 | segment.

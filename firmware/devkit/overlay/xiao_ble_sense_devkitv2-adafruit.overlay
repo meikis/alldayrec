@@ -91,3 +91,16 @@
     status = "disabled";
 };
 
+/* The event log (src/lr_log.c) in the chip's flash, not on the SD card whose faults it records: the top 16 KB of the
+ * 32 KB settings area (settings keep the lower 16 KB; the bonds need a few hundred bytes). Just below the bootloader
+ * (0xF4000), in the 40 KB that it keeps through a DFU and that UF2 copies do not reach: an update leaves the log. */
+&storage_partition { reg = <0x000ec000 0x00004000>; };
+&flash0 {
+	partitions {
+		lr_log_partition: partition@f0000 {
+			label = "lr_log";
+			reg = <0x000f0000 0x00004000>;
+		};
+	};
+};
+

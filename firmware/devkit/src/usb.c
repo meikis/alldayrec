@@ -7,6 +7,7 @@
 #include <zephyr/sys/iterable_sections.h>
 #include <zephyr/usb/usbd.h>
 
+#include "lr_log.h"
 #include "lr_store.h"
 #include "usb.h"
 LOG_MODULE_REGISTER(usb, CONFIG_LOG_DEFAULT_LEVEL);
@@ -72,8 +73,7 @@ static struct disk_info lr_disk = {.name = "LR", .ops = &lr_disk_ops};
 static void to_bootloader(struct k_work *work)
 {
     lr_store_shutdown();
-    NRF_POWER->GPREGRET = 0x57;
-    NVIC_SystemReset();
+    lr_log_reset(0x57);
 }
 static K_WORK_DEFINE(to_bootloader_work, to_bootloader);
 

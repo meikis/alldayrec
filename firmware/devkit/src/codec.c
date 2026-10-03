@@ -49,7 +49,7 @@ int16_t codec_input_samples[CODEC_PACKAGE_SAMPLES];
 static struct hpf hpf[2];
 uint8_t codec_output_bytes[CODEC_OUTPUT_MAX_BYTES];
 K_THREAD_STACK_DEFINE(codec_stack, 32000);
-static struct k_thread codec_thread;
+struct k_thread codec_thread;  // lr_log.c watches its stack
 uint16_t execute_codec();
 
 #if CODEC_OPUS

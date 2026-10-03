@@ -11,6 +11,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
 
+#include "lr_log.h"
 #include "sdcard.h"
 #include "usb.h"
 #include "transport.h"
@@ -31,7 +32,8 @@ static int16_t store_err = -ENODEV;  // until lr_store_init succeeds: no card, o
 static uint16_t seg;
 static uint32_t seg_size;
 static char path[32];
-static uint32_t free_kb, total_kb;  // the card, as of the last statvfs, less what was written since
+uint32_t free_kb;  // the card, as of the last statvfs, less what was written since (lr_log.c heartbeat too)
+static uint32_t total_kb;
 
 static uint8_t rec[4096];
 static uint32_t rec_len, rec_next;  // bytes in rec; the frame that may extend it
@@ -54,10 +56,11 @@ static void count_free(void)
     if (store_err == -ENOSPC && free_kb >= 2 * RESERVE_KB) {
         store_err = 0;
         LOG_INF("card has room again: %u KB", free_kb);
+        lr_log(LR_CARD_FULL, 0, free_kb, 0);
     }
 }
 
-static uint32_t dropped;     // frames lost on the way to the card (gaps in the frame numbers it got)
+uint32_t dropped;            // frames lost on the way to the card (gaps in the frame numbers it got)
 static uint16_t append_max;  // the slowest append so far, ms
 
 static struct fs_file_t seg_file;  // the open segment, kept open: reopening walked its FAT chain on every append, slower
@@ -71,32 +74,44 @@ static void close_segment(void)
     }
 }
 
+static bool append_failed;  // only the first failure of a run goes to the event log
+
 static int append(const void *data, uint32_t len)
 {
     int64_t t0 = k_uptime_get();
     if (free_kb < RESERVE_KB) {
         if (store_err != -ENOSPC) {
             LOG_ERR("card full (%u KB free): not recording", free_kb);
+            lr_log(LR_CARD_FULL, 1, free_kb, 0);
         }
         store_err = -ENOSPC;
         return -ENOSPC;
     }
+    int err = 0;
     if (!seg_open) {
         fs_file_t_init(&seg_file);
-        int err = fs_open(&seg_file, path, FS_O_CREATE | FS_O_WRITE | FS_O_APPEND);
-        if (err) {
-            return err;
+        err = fs_open(&seg_file, path, FS_O_CREATE | FS_O_WRITE | FS_O_APPEND);
+        seg_open = !err;
+    }
+    if (!err) {
+        int n = fs_write(&seg_file, data, len);
+        fs_sync(&seg_file);  // on the card now (power can go any time); NCS 2.7 reports -EIO for a sync that worked
+        uint32_t ms = k_uptime_get() - t0;
+        append_max = MAX(append_max, (uint16_t) MIN(ms, UINT16_MAX));
+        if (ms > 200) {
+            lr_log(LR_SLOW, 0, ms, len);
         }
-        seg_open = true;
+        if (n > 0) {
+            seg_size += n;
+            free_kb -= MIN(free_kb, DIV_ROUND_UP(n, 1024));
+        }
+        err = n == len ? 0 : n < 0 ? n : -EIO;
     }
-    int n = fs_write(&seg_file, data, len);
-    fs_sync(&seg_file);  // on the card now (power can go any time); NCS 2.7 reports -EIO for a sync that worked
-    append_max = MAX(append_max, (uint16_t) MIN(k_uptime_get() - t0, UINT16_MAX));
-    if (n > 0) {
-        seg_size += n;
-        free_kb -= MIN(free_kb, DIV_ROUND_UP(n, 1024));
+    if (err && !append_failed) {
+        lr_log(LR_APPEND_ERR, 0, err, len);
     }
-    return n == len ? 0 : -EIO;
+    append_failed = err;
+    return err;
 }
 
 static void flush(void)
@@ -117,6 +132,7 @@ static void next_segment(void)
         close_segment();
         seg++;
         seg_size = 0;
+        lr_log(LR_SEGMENT, 0, (uint32_t) boot << 16 | seg, 0);
     }
     file_path(path, (uint32_t) boot << 16 | seg);
 }
@@ -128,6 +144,7 @@ void lr_store_frame(uint32_t frame_no, const uint8_t *data, uint16_t len)
     }
     if (rec_count && frame_no > rec_next) {
         dropped += frame_no - rec_next;
+        lr_log(LR_DROPPED, 0, frame_no - rec_next, dropped);
     }
     if (rec_count && (frame_no != rec_next || rec_count == REC_FRAMES || rec_len + 1 + len > sizeof(rec))) {
         flush();
@@ -150,7 +167,7 @@ void lr_store_frame(uint32_t frame_no, const uint8_t *data, uint16_t len)
 //
 // Commands, handled on the store's own thread: SD access and notifications may block, the BT RX thread must not
 //
-enum { LIST = 1, READ = 2, STOP = 3, DELETE = 4, FORGET = 5, USB_DISK = 6, SYNC = 0x10, ROTATE = 0x11, UNLEND = 0x12 };
+enum { LIST = 1, READ = 2, STOP = 3, DELETE = 4, FORGET = 5, USB_DISK = 6, LOG = 7, SYNC = 0x10, ROTATE = 0x11, UNLEND = 0x12 };
 struct cmd {
     uint8_t op;
     uint32_t file, offset;
@@ -166,6 +183,7 @@ static ssize_t time_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
     struct cmd c = {.op = SYNC, .epoch = sys_get_le64(buf), .frame = transport_frame_no};
+    lr_log(LR_TIME, 0, c.epoch, c.epoch >> 32);
     k_msgq_put(&cmds, &c, K_NO_WAIT);
     return len;
 }
@@ -296,6 +314,13 @@ static void list(struct bt_conn *conn)
 static uint8_t chunk[CHUNK];
 static uint8_t pkt[4 + 512];
 
+/* LOG: records seq.. are at pkt + 4 already (lr_log_read put them there) */
+static bool send_log(uint32_t seq, uint16_t n, void *conn)
+{
+    sys_put_le32(seq, pkt);
+    return notify(conn, DATA_ATTR, pkt, 4 + n * 16);
+}
+
 /* Send one file from offset; a newer command (STOP, another READ) ends it early. */
 static void send_file(struct bt_conn *conn, uint32_t file, uint32_t off)
 {
@@ -368,6 +393,7 @@ static int lend(bool on)
         store_err = -EBUSY;
         usb_disk_lent = true;
         LOG_INF("card lent to USB");
+        lr_log(LR_USB_DISK, 1, 0, 0);
         k_mutex_unlock(&write_sdcard_mutex);
         usb_reattach();
         return 0;
@@ -380,8 +406,10 @@ static int lend(bool on)
             seg_size = 0;
             file_path(path, (uint32_t) boot << 16 | seg);
             count_free();
+            lr_log(LR_SEGMENT, 0, (uint32_t) boot << 16 | seg, 0);
         }
         LOG_INF("card back from USB: %d", err);
+        lr_log(LR_USB_DISK, 0, err, 0);
     }
     k_mutex_unlock(&write_sdcard_mutex);
     return 0;
@@ -429,7 +457,11 @@ static void store_thread(void)
         } else if (c.op == FORGET) {
             int n = 0;
             bt_foreach_bond(BT_ID_DEFAULT, forget_bond, &(struct forget){conn, &n});
+            lr_log(LR_FORGET, 0, n, 0);
             reply(conn, 0x85, n, 0, 0);
+        } else if (c.op == LOG) {
+            uint16_t max = MIN(bt_gatt_get_mtu(conn) - 3 - 4, sizeof(pkt) - 4) / 16;
+            reply(conn, 0x87, lr_log_read(c.file, pkt + 4, max, send_log, conn), 0, 0);
         } else if (c.op == DELETE) {
             char p[32];
             int err = -EBUSY;
@@ -450,8 +482,8 @@ static void store_thread(void)
         bt_conn_unref(conn);
     }
 }
-K_THREAD_STACK_DEFINE(store_stack, 2048);
-static struct k_thread store_thread_data;
+K_THREAD_STACK_DEFINE(store_stack, 3072);  // 2048 left 752 B unused (event log STACKS, 10-04)
+struct k_thread store_thread_data;  // lr_log.c watches its stack
 
 void lr_store_shutdown(void)
 {
@@ -486,6 +518,7 @@ int lr_store_init(void)
         last_fault[0] = fault[1];
         last_fault[1] = fault[2];
         fault[0] = 0;
+        lr_log(LR_FAULT, 0, last_fault[0], last_fault[1]);
     }
     struct fs_file_t f;
     fs_file_t_init(&f);
@@ -524,6 +557,7 @@ int lr_store_init(void)
     store_err = 0;
     count_free();
     LOG_INF("boot %u, %u of %u KB free", boot, free_kb, total_kb);
+    lr_log(LR_STORE, 0, boot, free_kb);
     k_thread_create(&store_thread_data, store_stack, K_THREAD_STACK_SIZEOF(store_stack),
                     (k_thread_entry_t) store_thread, NULL, NULL, NULL,
                     K_PRIO_PREEMPT(9), 0, K_NO_WAIT);  // below the pusher (7): sending a file never starves recording
