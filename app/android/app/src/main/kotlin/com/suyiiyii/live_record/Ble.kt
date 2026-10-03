@@ -352,6 +352,8 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
                 if (r[0] == 0x81.toByte()) files += (le(r).getInt(1).toLong() and 0xffffffffL) to (le(r).getInt(5).toLong() and 0xffffffffL)
                 if (r[0] == 0x80.toByte()) break
             }
+            // a .part of a file the card no longer lists (taken by another phone) has nothing to go on with
+            raw.listFiles { x -> x.name.endsWith(".part") }?.filter { p -> files.none { "%08X.part".format(it.first) == p.name } }?.forEach { it.delete() }
             if (files.isEmpty()) break
             val total = files.sumOf { it.second }
             for ((f, size) in files) {
@@ -359,6 +361,7 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
                 state = "同步离线录音"
                 val b = take(g, f, size) { syncDoneKb = (bytes + it) / 1024 }
                 File(raw, "%08X.BIN".format(f)).writeBytes(b)
+                File(raw, "%08X.part".format(f)).delete()
                 write(g, Ble.STORE, Ble.CTRL, le(ByteArray(5)).put(4).putInt(f.toInt()).array())  // DELETE
                 while ((ctrl.poll(10, TimeUnit.SECONDS) ?: throw Exception("删除卡上文件超时"))[0] != 0x84.toByte()) {}
                 taken++; bytes += size
@@ -370,8 +373,15 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
     }
 
     /** One file from the card; a hole (a lost notify) is asked again from where it is. */
+    /** One file from the card, written as it comes to `raw`/<file>.part: a sync cut short (app killed, out of range)
+     *  goes on from the bytes already here, not from the start of a file that may be 10 MB. */
     private fun take(g: BluetoothGatt, f: Long, size: Long, progress: (Long) -> Unit): ByteArray {
+        val part = File(raw, "%08X.part".format(f))
         val b = ByteArrayOutputStream()
+        if (part.exists()) b.write(part.readBytes().let { it.copyOf(minOf(it.size.toLong(), size).toInt()) })
+        if (b.size() > 0) Log.i("live-record", "ble take %08X: going on from %d of %d B".format(f, b.size(), size))
+        progress(b.size().toLong())
+        val out = java.io.FileOutputStream(part).apply { write(b.toByteArray()) }
         var stalls = 0
         while (b.size() < size) {
             data.clear()
@@ -381,13 +391,17 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
                 val d = data.poll(5, TimeUnit.SECONDS)
                 if (d == null) break  // stalled
                 val off = le(d).getInt(0).toLong() and 0xffffffffL
-                if (off == b.size().toLong()) { b.write(d, 4, d.size - 4); if (b.size() % 32768 < d.size) progress(b.size().toLong()) }
+                if (off == b.size().toLong()) {
+                    b.write(d, 4, d.size - 4); out.write(d, 4, d.size - 4)
+                    if (b.size() % 32768 < d.size) progress(b.size().toLong())
+                }
                 else if (off > b.size()) break  // a hole: ask again from b.size()
                 if (b.size() >= size) break
             }
             ctrl.removeIf { it[0] == 0x82.toByte() }  // the end marks of this or an interrupted READ
-            if (b.size() == before && ++stalls > 3) throw Exception("读取卡上文件 %08X 失败".format(f))
+            if (b.size() == before && ++stalls > 3) { out.close(); throw Exception("读取卡上文件 %08X 失败".format(f)) }
         }
+        out.close()
         return b.toByteArray()
     }
 
