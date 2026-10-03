@@ -12,6 +12,7 @@
 #include <zephyr/sys/byteorder.h>
 
 #include "sdcard.h"
+#include "usb.h"
 #include "transport.h"
 
 LOG_MODULE_REGISTER(lr_store, CONFIG_LOG_DEFAULT_LEVEL);
@@ -352,6 +353,9 @@ static int lend(bool on)
         store_err = -EBUSY;
         usb_disk_lent = true;
         LOG_INF("card lent to USB");
+        k_mutex_unlock(&write_sdcard_mutex);
+        usb_reattach();
+        return 0;
     } else {
         usb_disk_lent = false;
         int err = mount_sd_card();

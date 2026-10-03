@@ -53,7 +53,9 @@ static int lr_disk_ioctl(struct disk_info *disk, uint8_t cmd, void *buf)
     if (!usb_disk_lent) {
         return -EIO;
     }
-    return disk_access_ioctl("SD", cmd, buf);
+    // NCS 2.7's SD driver answers every sync with -EIO (card_ioctl lacks a break); an SPI card has the data once a
+    // write returns, so sync is done: the error made macOS give up repairing the volume (10-04)
+    return cmd == DISK_IOCTL_CTRL_SYNC ? 0 : disk_access_ioctl("SD", cmd, buf);
 }
 
 static const struct disk_operations lr_disk_ops = {
@@ -118,6 +120,17 @@ static void start_usb(struct k_work *work)
     }
 }
 static K_WORK_DELAYABLE_DEFINE(usb_start, start_usb);
+
+/* The card has just been lent: a computer that ejected it before (macOS) no longer looks for a medium, so the board
+ * leaves the bus and comes back as if plugged in again. */
+void usb_reattach(void)
+{
+    if (usb_started && usb_charge) {
+        usbd_disable(&lr_usbd);
+        k_msleep(300);
+        usb_diag[1] = usbd_enable(&lr_usbd);
+    }
+}
 
 int init_usb()
 {

@@ -2,5 +2,6 @@
 #define USB_H
 
 int init_usb();
+void usb_reattach(void);
 
 #endif
