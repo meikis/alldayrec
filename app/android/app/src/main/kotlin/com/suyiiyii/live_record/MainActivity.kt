@@ -72,6 +72,11 @@ class MainActivity : FlutterActivity() {
                     result.success(mapOf("name" to p.getString("bleName", null), "model" to p.getString("bleModel", null),
                         "fw" to p.getString("bleFw", null), "bundled" to Dfu.bundled(this), "dfu" to Dfu.state))
                 }
+                "usbDisk" -> {  // the connected board's card to the computer's USB, or back
+                    val link = RecorderService.link
+                    if (link == null) result.error("none", "先开始录音，连上录音设备", null)
+                    else { link.usbDisk(call.argument<Boolean>("on")!!); result.success(null) }
+                }
                 "unbind" -> {  // the next scan takes the first recorder it sees
                     getSharedPreferences("recorder", MODE_PRIVATE).edit().remove("bleName").remove("bleAddress").remove("bleModel").remove("bleFw").apply()
                     result.success(null)

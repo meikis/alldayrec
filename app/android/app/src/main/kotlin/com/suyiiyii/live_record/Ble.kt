@@ -276,12 +276,15 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
             val now = System.currentTimeMillis()
             write(g, Ble.STORE, Ble.TIME, le(ByteArray(8)).putLong(now).array())  // the clock its offline audio is dated by
             val st = status(g, name)
+            subscribe(g, Ble.STORE, Ble.CTRL)  // replies to LIST/READ/DELETE and the app's USB disk switch
             if (st.store == 0 || st.store == -28) offline(g, name, Triple(st.boot, st.frame, now))
             subscribe(g, Ble.SERVICE, Ble.AUDIO)
             state = "已连接"
-            while (gatt === g && on) {  // battery and card, every minute while the audio runs
-                Thread.sleep(60_000)
-                if (gatt === g && on) status(g, name)
+            while (gatt === g && on) {  // battery and card every minute while the audio runs; the app's requests between
+                val job = jobs.poll(60, TimeUnit.SECONDS)
+                if (gatt !== g || !on) break
+                job?.invoke(g)
+                status(g, name)
             }
         } catch (e: Gone) {
         } catch (e: Exception) {
@@ -291,6 +294,32 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
     }
 
     private class Status(val boot: Int, val frame: Long, val store: Int)
+
+    /** What the app asks of the connected board, run on the session thread between status reads. */
+    private val jobs = LinkedBlockingQueue<(BluetoothGatt) -> Unit>()
+    @Volatile var usbNote: String? = null
+    @Volatile var syncNote: String? = null  // the last offline sync, for the app's recorder page
+    @Volatile var syncDoneKb = 0L           // the sync under way: taken of total (0 of 0: none)
+    @Volatile var syncTotalKb = 0L
+
+    /** The board's SD card as a USB disk on the computer it is plugged into (CTRL 0x06), or back. */
+    fun usbDisk(on: Boolean) {
+        if (gatt == null) { usbNote = "录音设备没连上"; return }
+        usbNote = if (on) "正在切换到 U 盘模式" else "正在切回录音"
+        jobs.put { g ->
+            ctrl.clear()
+            write(g, Ble.STORE, Ble.CTRL, byteArrayOf(6, if (on) 1 else 0))
+            val r = ctrl.poll(15, TimeUnit.SECONDS)
+            val err = r?.takeIf { it[0] == 0x86.toByte() }?.get(5)?.toInt()
+            usbNote = when {
+                err == null -> "录音设备没有回应"
+                err == -107 -> "录音设备没接在电脑的 USB 上"
+                err != 0 -> "切换失败 $err"
+                on -> "U 盘模式：电脑上出现 OMI 盘（约 20 秒）；用完先在电脑上推出，再切回"
+                else -> null
+            }
+        }
+    }
 
     /** The board's state, kept for the app's page and sent to the server under the board's name. */
     private fun status(g: BluetoothGatt, name: String): Status {
@@ -311,7 +340,6 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
      *  is deleted from the card once it is on the phone; files are turned into pieces when the card is empty. */
     private fun offline(g: BluetoothGatt, name: String, live: Triple<Int, Long, Long>) {
         ctrl.clear(); data.clear()
-        subscribe(g, Ble.STORE, Ble.CTRL)
         subscribe(g, Ble.STORE, Ble.DATA)
         var taken = 0; var bytes = 0L
         for (pass in 1..5) {  // the card fills again (slowly) while we take it
@@ -325,8 +353,9 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
             if (files.isEmpty()) break
             val total = files.sumOf { it.second }
             for ((f, size) in files) {
-                state = "同步离线录音 ${taken + 1} 个文件 · ${(bytes + total) / 1024} KB 中 ${bytes / 1024} KB"
-                val b = take(g, f, size) { state = "同步离线录音 · ${(bytes + it) / 1024} / ${(total + bytes) / 1024} KB" }
+                syncTotalKb = (total + bytes) / 1024; syncDoneKb = bytes / 1024
+                state = "同步离线录音"
+                val b = take(g, f, size) { syncDoneKb = (bytes + it) / 1024 }
                 File(raw, "%08X.BIN".format(f)).writeBytes(b)
                 write(g, Ble.STORE, Ble.CTRL, le(ByteArray(5)).put(4).putInt(f.toInt()).array())  // DELETE
                 while ((ctrl.poll(10, TimeUnit.SECONDS) ?: throw Exception("删除卡上文件超时"))[0] != 0x84.toByte()) {}
@@ -334,6 +363,7 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
             }
         }
         if (taken > 0) Log.i("live-record", "ble offline: $taken files, $bytes B")
+        syncDoneKb = 0; syncTotalKb = 0
         pieces(name, live)
     }
 
@@ -378,6 +408,8 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
         }
         raw.listFiles()?.forEach { it.delete() }
         Log.i("live-record", "ble offline: $n pieces, $lost undated runs")
+        syncNote = "${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())} 取回离线录音 " +
+            "${files.values.sumOf { it.size.toLong() } / 1024} KB，生成 $n 块待上传" + (if (lost > 0) "，$lost 段没有时间（存在手机 undated 目录）" else "")
     }
 
     private val cb = object : BluetoothGattCallback() {

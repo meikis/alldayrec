@@ -93,6 +93,7 @@ class Recorder {
   static Future<Map> recorder() async => (await _ch.invokeMethod('recorder')) as Map;
   static Future<void> unbind() => _ch.invokeMethod('unbind');
   static Future<void> dfu() => _ch.invokeMethod('dfu');
+  static Future<void> usbDisk(bool on) => _ch.invokeMethod('usbDisk', {'on': on});
 }
 
 /// A BLE recorder's battery and card in a few words.
@@ -114,14 +115,14 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   Map status = {};
   String note = '';
   bool stopping = false;
-  int page = 0;  // 0 字幕, 1 对话, 2 说话人, 3 上传, 4 设置
+  int page = 0;  // 0 字幕, 1 对话, 2 说话人, 3 上传, 4 录音设备, 5 设置
   final webs = <WebViewController?>[null, null, null];  // one per web page: each keeps its scroll while another is shown
   Timer? ticker;
   int ticks = 0;
 
-  static const titles = ['字幕', '对话', '说话人', '上传', '设置'];
+  static const titles = ['字幕', '对话', '说话人', '上传', '录音设备', '设置'];
   static const paths = ['/', '/conversations', '/speakers'];
-  static const uploadPage = 3, settingsPage = 4;
+  static const uploadPage = 3, recorderPage = 4, settingsPage = 5;
 
   @override
   void initState() {
@@ -245,6 +246,8 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           const NavigationDrawerDestination(
               icon: Icon(Icons.cloud_upload_outlined), selectedIcon: Icon(Icons.cloud_upload), label: Text('上传')),
           const NavigationDrawerDestination(
+              icon: Icon(Icons.bluetooth_outlined), selectedIcon: Icon(Icons.bluetooth), label: Text('录音设备')),
+          const NavigationDrawerDestination(
               icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: Text('设置')),
         ],
       ),
@@ -254,6 +257,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
               for (final w in webs)
                 w == null ? _Empty(onSetup: () => setState(() => page = settingsPage)) : WebViewWidget(controller: w),
               UploadPage(settings: settings!, status: status, visible: page == uploadPage),
+              RecorderPage(visible: page == recorderPage),
               SettingsPage(settings: settings!, onSaved: _saved),
             ]),
       bottomNavigationBar: page == 0 && settings != null ? _controlBar(cs) : null,
@@ -513,7 +517,6 @@ class _SettingsPageState extends State<SettingsPage> {
             onSelectionChanged: (v) => setState(() => source = v.first),
           ),
         ),
-      if (Platform.isAndroid && source == 'ble') const Padding(padding: EdgeInsets.only(bottom: 12), child: RecorderCard()),
       Card.outlined(
         margin: EdgeInsets.zero,
         child: Column(children: [
@@ -546,23 +549,26 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 }
 
-/// The bound BLE recorder: name, firmware, battery and card as last read, unbinding, and a firmware update when this
-/// build carries a newer one for its board.
-class RecorderCard extends StatefulWidget {
-  const RecorderCard({super.key});
+/// The BLE recorder (Android): which one is bound and, as last read over the link, its battery, card, offline sync
+/// and firmware; the card as a USB disk on a computer, a firmware update when this build carries a newer one, unbinding.
+class RecorderPage extends StatefulWidget {
+  final bool visible;
+  const RecorderPage({super.key, required this.visible});
   @override
-  State<RecorderCard> createState() => _RecorderCardState();
+  State<RecorderPage> createState() => _RecorderPageState();
 }
 
-class _RecorderCardState extends State<RecorderCard> {
+class _RecorderPageState extends State<RecorderPage> {
   Map r = {}, st = {};
   Timer? timer;
 
   @override
   void initState() {
     super.initState();
-    _load();
-    timer = Timer.periodic(const Duration(seconds: 2), (_) => _load());
+    if (Platform.isAndroid) {
+      _load();
+      timer = Timer.periodic(const Duration(seconds: 2), (_) => widget.visible ? _load() : null);
+    }
   }
 
   @override
@@ -585,34 +591,209 @@ class _RecorderCardState extends State<RecorderCard> {
     _load();
   }
 
+  static String _size(num kb) => kb >= 1048576 ? '${(kb / 1048576).toStringAsFixed(2)} GB' : kb >= 1024 ? '${(kb / 1024).toStringAsFixed(1)} MB' : '$kb KB';
+
+  static IconData _batteryIcon(int? p) {
+    if (p == null) return Icons.battery_unknown_rounded;
+    const icons = [Icons.battery_0_bar_rounded, Icons.battery_1_bar_rounded, Icons.battery_2_bar_rounded, Icons.battery_3_bar_rounded,
+      Icons.battery_4_bar_rounded, Icons.battery_5_bar_rounded, Icons.battery_6_bar_rounded, Icons.battery_full_rounded];
+    return icons[(p * 7 / 100).round().clamp(0, 7)];
+  }
+
   @override
   Widget build(BuildContext context) {
-    final t = Theme.of(context);
-    final name = r['name'] as String?, model = r['model'] as String?, fw = r['fw'] as String?;
+    final t = Theme.of(context), cs = t.colorScheme;
+    if (!Platform.isAndroid) return const Center(child: Text('BLE 录音硬件目前只支持 Android'));
+    final name = r['name'] as String?, model = r['model'] as String?;
+    final hw = (st['hw'] as Map?) ?? {};
+    final fw = (hw['fw'] ?? r['fw']) as String?;
     final bundled = (r['bundled'] as Map?)?[model] as String?;
-    final recording = st['running'] == true;
-    final hw = hwLine(st['hw'] as Map?);
+    // revisions are date-hash: a later date is newer; the same one is not an update
+    final newer = bundled != null && (fw == null || bundled.compareTo(fw) > 0);
+    final recording = st['running'] == true, linked = recording && hw.isNotEmpty;
+    final link = '${st['link'] ?? ''}';
+    final store = hw['store'] as int?, free = (hw['free_kb'] as num?) ?? 0, total = (hw['total_kb'] as num?) ?? 0;
+    final battery = hw['battery'] as int?;
+    final syncDone = (st['syncDone'] as num?) ?? 0, syncTotal = (st['syncTotal'] as num?) ?? 0;
+    final syncing = recording && syncTotal > 0;
+    final lent = store == -16;
     final dfu = (st['dfu'] ?? r['dfu']) as String?;
-    return Card.outlined(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('录音硬件', style: t.textTheme.titleSmall),
-          const SizedBox(height: 6),
-          Text(name == null ? '未绑定：开始录音时连上看到的第一台，之后只连它' : '已绑定 $name${model != null ? '（$model）' : ''}'),
-          if (fw != null) Text('固件 $fw${bundled != null && bundled != fw ? '，可升级到 $bundled' : ''}', style: TextStyle(color: t.colorScheme.onSurfaceVariant)),
-          if (recording && st['link'] != null) Text('${st['link']}${hw.isNotEmpty ? ' · $hw' : ''}', style: TextStyle(color: t.colorScheme.onSurfaceVariant)),
-          if (dfu != null) Text(dfu, style: TextStyle(color: t.colorScheme.primary)),
-          const Text('新手机配对时，录音设备需接着 USB 电源或刚重启 5 分钟内', style: TextStyle(fontSize: 12)),
-          Row(children: [
-            if (name != null)
-              TextButton(onPressed: recording ? null : () => _call(Recorder.unbind), child: const Text('解除绑定')),
-            if (bundled != null && bundled != fw)
-              TextButton(onPressed: recording ? null : () => _call(Recorder.dfu), child: const Text('升级固件')),
+
+    // connection chip: what the link is doing, in one colour
+    final (String chip, Color chipColor, IconData chipIcon) = !recording
+        ? ('未连接', cs.outline, Icons.bluetooth_disabled_rounded)
+        : syncing
+            ? ('同步中', cs.tertiary, Icons.sync_rounded)
+            : link == '已连接'
+                ? ('已连接', Colors.green.shade600, Icons.bluetooth_connected_rounded)
+                : ('连接中', cs.secondary, Icons.bluetooth_searching_rounded);
+
+    Widget section(String title, Widget child) => Card.filled(
+        margin: const EdgeInsets.only(top: 12),
+        color: cs.surfaceContainerLow,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: t.textTheme.labelLarge?.copyWith(color: cs.onSurfaceVariant)),
+            const SizedBox(height: 10),
+            child,
           ]),
-        ]),
-      ),
+        ));
+
+    Widget stat({required IconData icon, required Color color, required String label, required String value, String? sub, double? fraction}) =>
+        Expanded(
+          child: Card.filled(
+            margin: EdgeInsets.zero,
+            color: cs.surfaceContainerLow,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Icon(icon, color: color, size: 22),
+                  const SizedBox(width: 6),
+                  Text(label, style: t.textTheme.labelLarge?.copyWith(color: cs.onSurfaceVariant)),
+                ]),
+                const SizedBox(height: 10),
+                Text(value, style: t.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w600)),
+                if (sub != null) Text(sub, style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+                const SizedBox(height: 10),
+                LinearProgressIndicator(value: fraction ?? 0, color: color, backgroundColor: color.withValues(alpha: 0.15),
+                    minHeight: 6, borderRadius: BorderRadius.circular(3)),
+              ]),
+            ),
+          ),
+        );
+
+    final batteryColor = battery == null ? cs.outline : battery <= 20 ? cs.error : battery <= 50 ? Colors.orange.shade700 : Colors.green.shade600;
+    final cardColor = store == null || store == -16 ? cs.outline : store != 0 ? cs.error : free < total * 0.1 ? Colors.orange.shade700 : cs.primary;
+    final (String cardValue, String? cardSub) = !linked
+        ? ('—', null)
+        : store == -19
+            ? ('没有卡', '离线录音不可用')
+            : store == -28
+                ? ('已满', '离线录音已停止')
+                : lent
+                    ? ('U 盘中', '离线录音暂停')
+                    : store != 0
+                        ? ('出错', '错误 $store')
+                        : (_size(free), '可用，共 ${_size(total)}');
+
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 32), children: [
+        // the device
+        Card.filled(
+          margin: const EdgeInsets.only(top: 8),
+          color: cs.primaryContainer,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(children: [
+              CircleAvatar(radius: 28, backgroundColor: cs.primary, child: Icon(Icons.mic_external_on_rounded, color: cs.onPrimary, size: 30)),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(name ?? '未绑定', style: t.textTheme.titleLarge?.copyWith(color: cs.onPrimaryContainer, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 6),
+                  Wrap(spacing: 8, runSpacing: 6, children: [
+                    Chip(
+                      avatar: Icon(chipIcon, size: 18, color: chipColor),
+                      label: Text(chip),
+                      visualDensity: VisualDensity.compact,
+                      side: BorderSide(color: chipColor.withValues(alpha: 0.5)),
+                    ),
+                    if (model != null) Chip(label: Text(model), visualDensity: VisualDensity.compact),
+                  ]),
+                ]),
+              ),
+            ]),
+          ),
+        ),
+        if (name == null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text('开始录音时会连上看到的第一台录音设备，之后只连它', style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+          ),
+        // battery and card
+        const SizedBox(height: 12),
+        IntrinsicHeight(
+          child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            stat(icon: _batteryIcon(linked ? battery : null), color: batteryColor, label: '电量',
+                value: linked && battery != null ? '$battery%' : '—', fraction: linked && battery != null ? battery / 100 : 0),
+            const SizedBox(width: 12),
+            stat(icon: Icons.sd_card_rounded, color: cardColor, label: '存储卡', value: cardValue, sub: cardSub,
+                fraction: linked && total > 0 ? (total - free) / total : 0),
+          ]),
+        ),
+        // offline sync
+        section('离线录音同步', Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          if (syncing) ...[
+            Row(children: [
+              Icon(Icons.downloading_rounded, color: cs.tertiary),
+              const SizedBox(width: 8),
+              Expanded(child: Text('正在取回卡上的录音', style: t.textTheme.bodyLarge)),
+              Text('${_size(syncDone)} / ${_size(syncTotal)}', style: t.textTheme.bodyMedium?.copyWith(color: cs.onSurfaceVariant)),
+            ]),
+            const SizedBox(height: 10),
+            LinearProgressIndicator(value: syncTotal > 0 ? syncDone / syncTotal : null, minHeight: 8, borderRadius: BorderRadius.circular(4)),
+            const SizedBox(height: 6),
+            Text('取完再开始实时录音', style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+          ] else
+            Row(children: [
+              Icon(st['lastSync'] != null ? Icons.check_circle_rounded : Icons.cloud_sync_rounded,
+                  color: st['lastSync'] != null ? Colors.green.shade600 : cs.outline),
+              const SizedBox(width: 8),
+              Expanded(child: Text((st['lastSync'] as String?) ?? '连上录音设备时自动取回它离线录下的音频')),
+            ]),
+        ])),
+        // USB disk
+        section('U 盘模式', Column(children: [
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            secondary: Icon(Icons.usb_rounded, color: lent ? cs.primary : cs.onSurfaceVariant),
+            title: const Text('存储卡当 U 盘'),
+            subtitle: Text(st['usbNote'] as String? ?? '录音设备插在电脑上时可用，约 20 秒后出现 OMI 盘；期间离线录音暂停'),
+            value: lent,
+            onChanged: linked ? (v) => _call(() => Recorder.usbDisk(v)) : null,
+          ),
+          if (lent)
+            Row(children: [
+              Icon(Icons.warning_amber_rounded, size: 18, color: Colors.orange.shade700),
+              const SizedBox(width: 6),
+              const Expanded(child: Text('切回前先在电脑上推出 OMI 盘')),
+            ]),
+        ])),
+        // firmware and binding
+        section('设备管理', Column(children: [
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.memory_rounded, color: cs.onSurfaceVariant),
+            title: const Text('固件版本'),
+            subtitle: Text([fw ?? '—', if (newer) '可升级到 $bundled', ?dfu].join('\n')),
+            trailing: newer
+                ? FilledButton.tonalIcon(
+                    onPressed: !recording ? () => _call(Recorder.dfu) : null,
+                    icon: const Icon(Icons.system_update_alt_rounded, size: 18),
+                    label: const Text('升级'))
+                : null,
+          ),
+          if (newer)
+            Text('升级前先停止录音、拔掉录音设备的 USB', style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+          const Divider(height: 20),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.phonelink_lock_rounded, color: cs.onSurfaceVariant),
+            title: const Text('配对'),
+            subtitle: const Text('新手机配对时，录音设备需接着 USB 电源，或刚重启 5 分钟内'),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.link_off_rounded, color: name != null && !recording ? cs.error : cs.outline),
+            title: Text('解除绑定', style: TextStyle(color: name != null && !recording ? cs.error : cs.outline)),
+            subtitle: const Text('之后连上看到的第一台录音设备（需先停止录音）'),
+            onTap: name != null && !recording ? () => _call(Recorder.unbind) : null,
+          ),
+        ])),
+      ]),
     );
   }
 }

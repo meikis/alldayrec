@@ -43,7 +43,8 @@ class RecorderService : Service() {
                 "error" to slicer?.error, "sent" to uploader?.sent, "note" to uploader?.note,
                 "pending" to q.size, "pendingBytes" to q.sumOf { it.length() }, "oldest" to q.firstOrNull()?.let(Uploader::startMs),
                 "interruptedAt" to if (interruptedAt > 0) interruptedAt else null, "link" to link?.state, "tag" to slicer?.tag, "hw" to link?.hw,
-                "dfu" to Dfu.state)
+                "dfu" to Dfu.state, "usbNote" to link?.usbNote, "lastSync" to link?.syncNote,
+                "syncDone" to link?.syncDoneKb, "syncTotal" to link?.syncTotalKb)
         }
     }
 
