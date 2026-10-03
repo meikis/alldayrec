@@ -47,6 +47,14 @@ config LR_NAME_PREFIX
     string "Board name: the BLE name is this plus the last two address bytes, e.g. LR-X1-3F2A"
     default "LR-X1"
 
+config LR_STORE_RESERVE_KB
+    int "Offline store: stop recording when the SD card has less than this free (KB); resume at twice it"
+    default 1024
+
+config LR_PAIRING_WINDOW_S
+    int "A new phone may pair this many seconds after a reset (also while on USB power, or before the first bond)"
+    default 300
+
 config LR_BATTERY_VDDH
     bool "Battery on VDDH (nice!nano): read VDDH/5 inside the chip, no divider or charger pins"
     default n

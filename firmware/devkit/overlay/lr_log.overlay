@@ -1,0 +1,2 @@
+/* LR_LOG=1 builds: the log on the USB serial port (cu.usbmodem*), the port the 1200 bps touch also uses */
+/ { chosen { zephyr,console = &usb_cdc_acm_uart; }; };

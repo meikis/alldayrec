@@ -16,12 +16,15 @@
  *
  * GATT service 7c3e0000-1a2b-4c5d-8e9f-6c6976657265:
  *   ...01 TIME  write epoch_ms:u64 (phone's clock, on every connect); read -> boot:u16 frame:u32 (the frame now) store:i16
- *               (0: storing; else -errno, e.g. -19 no card)
+ *               (0: storing; else -errno: -19 no card, -28 card full) free_kb:u32 total_kb:u32
  *   ...02 CTRL  write commands, notify replies:
- *               0x01 LIST                -> 0x81 file:u32 size:u32 per closed file, then 0x80
+ *               0x01 LIST                -> 0x81 file:u32 size:u32 per closed file, then 0x80 err:i8; closes the open segment
+ *                                           first, so a phone that takes the files before it listens leaves none behind
  *               0x02 READ file:u32 offset:u32 -> DATA notifications, then 0x82 file:u32 end:u32
  *               0x03 STOP
  *               0x04 DELETE file:u32     -> 0x84 file:u32 status:i8 (the open file is refused: -16)
+ *               0x05 FORGET              -> 0x85 n:u32: every bonded phone but this one is forgotten
+ * All but battery and device info need an encrypted (bonded) link; see pairing in transport.c.
  *   ...03 DATA  notify offset:u32 bytes...
  * file = boot << 16 | segment.
  */

@@ -1,9 +1,13 @@
 """Reference client for the live-record offline store (src/lr_store.h): sync the clock, take the stored files,
-put every frame back on the wall clock, write one WAV per continuous run. The phone and browser clients do the same.
-    uv run --no-project --with bleak python lr_sync.py OUT_DIR [--delete]
+put every frame back on the wall clock, write one WAV per continuous run; with --server, send the dated runs as Ogg
+pieces to /api/chunks under the recorder's name, as the phone app does. --delete removes what was kept (sent, or
+written here when undated) from the card.
+    uv run --no-project --with bleak python lr_sync.py OUT_DIR [--delete] [--name LR-X1-567E] [--server URL --token T]
 """
 import asyncio
 import ctypes
+import random
+import urllib.request
 import datetime as dt
 import struct
 import sys
@@ -15,6 +19,7 @@ from bleak import BleakClient, BleakScanner
 
 U = lambda n: f"7c3e{n:04x}-1a2b-4c5d-8e9f-6c6976657265"
 TIME, CTRL, DATA = U(1), U(2), U(3)
+AUDIO_SVC = "19b10000-e8f2-537e-4f6c-d104768a1214"  # advertised; the store service is not
 FRAME_MS = 10
 
 
@@ -68,6 +73,55 @@ def cur_time(ts, frame):
     return e + (frame - f) * FRAME_MS
 
 
+_CRC = []
+for _i in range(256):
+    _r = _i << 24
+    for _ in range(8):
+        _r = ((_r << 1) ^ 0x04C11DB7 if _r & 0x80000000 else _r << 1) & 0xFFFFFFFF
+    _CRC.append(_r)
+
+
+def ogg_opus(frames, frame_ms=FRAME_MS, rate=16000) -> bytes:
+    """Opus packets into one Ogg Opus file (RFC 7845), as web/src/lib/ogg.ts and the app's muxer make them."""
+    serial = random.getrandbits(32)
+
+    def page(packets, flags, granule, seq):
+        lacing = []
+        for p in packets:
+            n = len(p)
+            while True:
+                lacing.append(min(n, 255))
+                if n < 255:
+                    break
+                n -= 255
+        out = bytearray(b"OggS\0" + bytes([flags]) + struct.pack("<qIII", granule, serial, seq, 0) + bytes([len(lacing)] + lacing))
+        out += b"".join(packets)
+        crc = 0
+        for b in out:
+            crc = ((crc << 8) & 0xFFFFFFFF) ^ _CRC[((crc >> 24) ^ b) & 0xFF]
+        struct.pack_into("<I", out, 22, crc)
+        return bytes(out)
+
+    head = b"OpusHead" + bytes([1, 1]) + struct.pack("<HIhB", 0, rate, 0, 0)
+    pages = [page([head], 2, 0, 0), page([b"OpusTags" + bytes(8)], 0, 0, 1)]
+    for i in range(0, len(frames), 50):
+        last = i + 50 >= len(frames)
+        pages.append(page(frames[i:i + 50], 4 if last else 0, min(i + 50, len(frames)) * frame_ms * 48, len(pages)))
+    return b"".join(pages)
+
+
+PIECE_S = 60  # an offline run goes up in pieces of this length
+
+
+def upload(server: str, token: str, device: str, start: int, frames) -> None:
+    """One run, cut into pieces; raises if the server does not take one."""
+    n = PIECE_S * 1000 // FRAME_MS
+    for i in range(0, len(frames), n):
+        req = urllib.request.Request(f"{server}/api/chunks?device={urllib.request.quote(device)}&start={start + i * FRAME_MS}",
+                                     ogg_opus(frames[i:i + n]), {"Content-Type": "audio/ogg", "Authorization": f"Bearer {token}"})
+        urllib.request.urlopen(req, timeout=60).read()
+
+
 def decode(frames) -> bytes:
     lib = ctypes.CDLL("/opt/homebrew/lib/libopus.dylib")
     lib.opus_decoder_create.restype = ctypes.c_void_p
@@ -80,20 +134,28 @@ def decode(frames) -> bytes:
     return bytes(out)
 
 
-async def main(out: Path, delete: bool):
-    dev = await BleakScanner.find_device_by_filter(lambda d, a: U(0) in a.service_uuids or (a.local_name or "").startswith("Omi"), 20)
+async def main(out: Path, delete: bool, name: str, server: str | None, token: str):
+    dev = await BleakScanner.find_device_by_filter(
+        lambda d, a: AUDIO_SVC in a.service_uuids and (a.local_name or "").startswith(name), 20)
     if not dev:
         sys.exit("no device")
     async with BleakClient(dev) as c:
         now = int(time.time() * 1000)
         await c.write_gatt_char(TIME, struct.pack("<Q", now), response=True)
-        boot, frame, store = struct.unpack("<HIh", await c.read_gatt_char(TIME))
-        print(f"boot {boot}, frame {frame} = {dt.datetime.fromtimestamp(now / 1000)}, store {store}")
+        boot, frame, store, free_kb, total_kb = struct.unpack("<HIhII", await c.read_gatt_char(TIME))
+        print(f"boot {boot}, frame {frame} = {dt.datetime.fromtimestamp(now / 1000)}, store {store}, "
+              f"card {free_kb / 1024:.0f} of {total_kb / 1024:.0f} MB free")
         if store:
             sys.exit(f"the device stores nothing (error {store})")
         replies, data = asyncio.Queue(), {}
         await c.start_notify(CTRL, lambda _, d: replies.put_nowait(bytes(d)))
-        await c.start_notify(DATA, lambda _, d: data.__setitem__(struct.unpack_from("<I", d)[0], bytes(d[4:])))
+        last = [time.time()]  # the last DATA notify: a file takes as long as it takes while bytes keep coming
+
+        def on_data(_, d):
+            data[struct.unpack_from("<I", d)[0]] = bytes(d[4:])
+            last[0] = time.time()
+
+        await c.start_notify(DATA, on_data)
         await c.write_gatt_char(CTRL, b"\x01", response=True)
         listing = []
         while (r := await asyncio.wait_for(replies.get(), 10))[0] != 0x80:
@@ -104,8 +166,13 @@ async def main(out: Path, delete: bool):
             data.clear()
             t = time.time()
             await c.write_gatt_char(CTRL, struct.pack("<BII", 2, f, 0), response=True)
-            while (r := await asyncio.wait_for(replies.get(), 120))[0] != 0x82:
-                pass
+            while True:
+                try:
+                    if (r := await asyncio.wait_for(replies.get(), 5))[0] == 0x82:
+                        break
+                except TimeoutError:
+                    if time.time() - last[0] > 15:
+                        sys.exit(f"{f:08X}: stalled")
             end = struct.unpack_from("<I", r, 5)[0]
             b, off = bytearray(), 0
             for o in sorted(data):
@@ -117,12 +184,17 @@ async def main(out: Path, delete: bool):
             print(f"{f:08X}: {len(b)} B of {size} in {time.time() - t:.1f} s, {len(b) / 1024 / (time.time() - t):.0f} KB/s{'' if ok else '  INCOMPLETE'}")
             if ok:
                 files[f] = bytes(b)
+                (out / f"{f:08X}.BIN").write_bytes(b)  # as on the card, for a second look
         for i, (start, frames) in enumerate(runs(files, (boot, frame, now))):
-            when = dt.datetime.fromtimestamp(start / 1000).strftime("%H%M%S.%f")[:-3] if start else "unknown"
+            when = dt.datetime.fromtimestamp(start / 1000).strftime("%m%d-%H%M%S.%f")[:-3] if start else "undated"
             p = out / f"{i:03d}-{when}.wav"
             with wave.open(str(p), "wb") as w:
                 w.setnchannels(1), w.setsampwidth(2), w.setframerate(16000), w.writeframes(decode(frames))
-            print(f"run {i}: {len(frames) * FRAME_MS / 1000:.2f} s from {when} -> {p.name}")
+            sent = ""
+            if server and start:
+                upload(server, token, dev.name, start, frames)  # a failure stops here: nothing is deleted
+                sent = f", sent as {dev.name}"
+            print(f"run {i}: {len(frames) * FRAME_MS / 1000:.2f} s from {when} -> {p.name}{sent}")
         if delete:
             for f in files:
                 await c.write_gatt_char(CTRL, struct.pack("<BI", 4, f), response=True)
@@ -137,6 +209,8 @@ def selftest():
     boot2 = {2 << 16: a(0, 2)}  # rebooted, never synced, not the live boot: time unknown
     got = list(runs({**boot1, **boot2}, (3, 50, 99_000)))
     assert [(s, len(f)) for s, f in got] == [(9_980, 5), (10_070, 1), (None, 2)], got
+    ogg = ogg_opus([bytes([0xF8, 0xFF, 0xFE])] * 120)  # 120 silent 10 ms Opus frames
+    assert ogg[:4] == b"OggS" and ogg.count(b"OggS") == 5, ogg.count(b"OggS")
     print("selftest ok")
 
 
@@ -145,4 +219,5 @@ if __name__ == "__main__":
         sys.exit(selftest())
     d = Path(sys.argv[1])
     d.mkdir(parents=True, exist_ok=True)
-    asyncio.run(main(d, "--delete" in sys.argv))
+    arg = lambda k, default=None: sys.argv[sys.argv.index(k) + 1] if k in sys.argv else default
+    asyncio.run(main(d, "--delete" in sys.argv, arg("--name", "LR-"), arg("--server"), arg("--token", "")))

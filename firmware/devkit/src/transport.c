@@ -1,7 +1,9 @@
 #include "transport.h"
 
 #include <string.h>
+#include <hal/nrf_power.h>
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/l2cap.h>
@@ -11,6 +13,7 @@
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/ring_buffer.h>
@@ -90,14 +93,14 @@ static struct bt_gatt_attr audio_service_attr[] = {
     BT_GATT_PRIMARY_SERVICE(&audio_service_uuid),
     BT_GATT_CHARACTERISTIC(&audio_characteristic_data_uuid.uuid,
                            BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
-                           BT_GATT_PERM_READ,
+                           BT_GATT_PERM_READ_ENCRYPT,
                            audio_data_read_characteristic,
                            NULL,
                            NULL),
-    BT_GATT_CCC(audio_ccc_config_changed_handler, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+    BT_GATT_CCC(audio_ccc_config_changed_handler, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT),
     BT_GATT_CHARACTERISTIC(&audio_characteristic_format_uuid.uuid,
                            BT_GATT_CHRC_READ,
-                           BT_GATT_PERM_READ,
+                           BT_GATT_PERM_READ_ENCRYPT,  // the clients' first read: an unpaired phone pairs here
                            audio_codec_read_characteristic,
                            NULL,
                            NULL),
@@ -122,16 +125,35 @@ static struct bt_uuid_128 dfu_service_uuid =
     BT_UUID_INIT_128(BT_UUID_128_ENCODE(0x00001530, 0x1212, 0xEFDE, 0x1523, 0x785FEABCD123));
 static struct bt_uuid_128 dfu_control_point_uuid =
     BT_UUID_INIT_128(BT_UUID_128_ENCODE(0x00001531, 0x1212, 0xEFDE, 0x1523, 0x785FEABCD123));
+// packet and revision as the Adafruit app-side DFU service has them: Nordic's Android DFU library looks for both, and
+// revision 1 tells it this is the application, to be sent into the bootloader first
+static struct bt_uuid_128 dfu_packet_uuid =
+    BT_UUID_INIT_128(BT_UUID_128_ENCODE(0x00001532, 0x1212, 0xEFDE, 0x1523, 0x785FEABCD123));
+static struct bt_uuid_128 dfu_revision_uuid =
+    BT_UUID_INIT_128(BT_UUID_128_ENCODE(0x00001534, 0x1212, 0xEFDE, 0x1523, 0x785FEABCD123));
+static ssize_t dfu_ignore(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf, uint16_t len,
+                          uint16_t offset, uint8_t flags)
+{
+    return len;
+}
+static ssize_t dfu_revision(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset)
+{
+    uint8_t v[2] = {1, 0};
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, v, sizeof(v));
+}
 
 static struct bt_gatt_attr dfu_service_attr[] = {
     BT_GATT_PRIMARY_SERVICE(&dfu_service_uuid),
     BT_GATT_CHARACTERISTIC(&dfu_control_point_uuid.uuid,
                            BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY,
-                           BT_GATT_PERM_WRITE,
+                           BT_GATT_PERM_WRITE_ENCRYPT,  // only a bonded phone sends the recorder into its bootloader
                            NULL,
                            dfu_control_point_write_handler,
                            NULL),
-    BT_GATT_CCC(dfu_ccc_config_changed_handler, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+    BT_GATT_CCC(dfu_ccc_config_changed_handler, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT),
+    BT_GATT_CHARACTERISTIC(&dfu_packet_uuid.uuid, BT_GATT_CHRC_WRITE_WITHOUT_RESP, BT_GATT_PERM_WRITE_ENCRYPT, NULL,
+                           dfu_ignore, NULL),
+    BT_GATT_CHARACTERISTIC(&dfu_revision_uuid.uuid, BT_GATT_CHRC_READ, BT_GATT_PERM_READ, dfu_revision, NULL, NULL),
 };
 
 static struct bt_gatt_service dfu_service = BT_GATT_SERVICE(dfu_service_attr);
@@ -440,6 +462,9 @@ static void _transport_connected(struct bt_conn *conn, uint8_t err)
             info.le.data_len->rx_max_time);
 
     k_work_schedule(&battery_work, K_MSEC(100)); // run immediately
+    // ask for encryption at once: a bonded phone starts it with its keys, a new one pairs (if pairing is open). macOS
+    // does not pair on its own when a read fails for want of encryption (10-03)
+    bt_conn_set_security(conn, BT_SECURITY_L2);
 
     is_connected = true;
     lr_store_rotate();  // what was recorded offline becomes closed files the phone can take
@@ -494,6 +519,57 @@ static void _le_data_length_updated(struct bt_conn *conn, struct bt_conn_le_data
     k_sem_give(&pusher_wake_sem);
 }
 
+//
+// Pairing: a stranger nearby must not listen in or take the recordings. Every characteristic but battery and device
+// info needs an encrypted link; a phone pairs (LESC, Just Works) only while the recorder is on USB power, in its first
+// CONFIG_LR_PAIRING_WINDOW_S after a reset, or while it has no bond yet: having the recorder in hand is the
+// permission. Bonded phones reconnect with their keys, no pairing.
+//
+
+static void count_bond(const struct bt_bond_info *info, void *n)
+{
+    (*(int *) n)++;
+}
+
+bool lr_pairing_open(void)
+{
+    int bonds = 0;
+    bt_foreach_bond(BT_ID_DEFAULT, count_bond, &bonds);
+    return !bonds || nrf_power_usbregstatus_vbusdet_get(NRF_POWER) ||
+           k_uptime_get() < CONFIG_LR_PAIRING_WINDOW_S * 1000LL;
+}
+
+static enum bt_security_err pairing_accept(struct bt_conn *conn, const struct bt_conn_pairing_feat *const feat)
+{
+    bool open = lr_pairing_open();
+    LOG_INF("pairing request: %s", open ? "accepted" : "refused (plug in USB or reset the recorder)");
+    return open ? BT_SECURITY_ERR_SUCCESS : BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
+}
+
+static void pairing_complete(struct bt_conn *conn, bool bonded)
+{
+    LOG_INF("paired, bonded %d", bonded);
+}
+
+static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
+{
+    LOG_WRN("pairing failed: %d", reason);
+}
+
+/* A phone that lost its keys (app reinstalled, Bluetooth reset) cannot encrypt with ours: while pairing is open the
+ * old bond goes, so it pairs afresh on its next connection (10-03: the Mac stuck at "PIN or key missing") */
+static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_security_err err)
+{
+    LOG_INF("security level %d, err %d", level, err);
+    if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING && lr_pairing_open()) {
+        LOG_WRN("stale bond dropped");
+        bt_unpair(BT_ID_DEFAULT, bt_conn_get_dst(conn));
+    }
+}
+
+static struct bt_conn_auth_cb auth_cb = {.pairing_accept = pairing_accept};
+static struct bt_conn_auth_info_cb auth_info_cb = {.pairing_complete = pairing_complete, .pairing_failed = pairing_failed};
+
 static struct bt_conn_cb _callback_references = {
     .connected = _transport_connected,
     .disconnected = _transport_disconnected,
@@ -501,6 +577,7 @@ static struct bt_conn_cb _callback_references = {
     .le_param_updated = _le_param_updated,
     .le_phy_updated = _le_phy_updated,
     .le_data_len_updated = _le_data_length_updated,
+    .security_changed = security_changed,
 };
 
 //
@@ -751,6 +828,9 @@ int transport_start()
         return err;
     }
     LOG_INF("Transport bluetooth initialized");
+    settings_load();  // the bonds and the identity
+    bt_conn_auth_cb_register(&auth_cb);
+    bt_conn_auth_info_cb_register(&auth_info_cb);
     lr_set_name();
 
     //  Enable button

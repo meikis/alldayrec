@@ -23,12 +23,14 @@ extern uint32_t transport_frame_no;        // transport.c: frames the codec has 
 #define REC_FRAMES 100       // one record a second
 #define SEG_MAX (16u << 20)  // a long offline stretch still ends in files a phone can take one by one
 #define CHUNK 4096           // SD read size while sending a file
+#define RESERVE_KB CONFIG_LR_STORE_RESERVE_KB  // recording stops (-ENOSPC) below this much free space, resumes at twice it
 
 static uint16_t boot;
 static int16_t store_err = -ENODEV;  // until lr_store_init succeeds: no card, or it failed
 static uint16_t seg;
 static uint32_t seg_size;
 static char path[32];
+static uint32_t free_kb, total_kb;  // the card, as of the last statvfs, less what was written since
 
 static uint8_t rec[4096];
 static uint32_t rec_len, rec_next;  // bytes in rec; the frame that may extend it
@@ -40,8 +42,29 @@ static const char *file_path(char *buf, uint32_t file)
     return buf;
 }
 
+/* The card's free space; a full card stops recording until a phone deletes what it took. Store thread or SD mutex. */
+static void count_free(void)
+{
+    struct fs_statvfs v;
+    if (fs_statvfs("/SD:", &v) == 0) {
+        free_kb = (uint64_t) v.f_bfree * v.f_frsize / 1024;
+        total_kb = (uint64_t) v.f_blocks * v.f_frsize / 1024;
+    }
+    if (store_err == -ENOSPC && free_kb >= 2 * RESERVE_KB) {
+        store_err = 0;
+        LOG_INF("card has room again: %u KB", free_kb);
+    }
+}
+
 static int append(const void *data, uint32_t len)
 {
+    if (free_kb < RESERVE_KB) {
+        if (store_err != -ENOSPC) {
+            LOG_ERR("card full (%u KB free): not recording", free_kb);
+        }
+        store_err = -ENOSPC;
+        return -ENOSPC;
+    }
     struct fs_file_t f;
     fs_file_t_init(&f);
     int err = fs_open(&f, path, FS_O_CREATE | FS_O_WRITE | FS_O_APPEND);
@@ -52,6 +75,7 @@ static int append(const void *data, uint32_t len)
     fs_close(&f);
     if (n > 0) {
         seg_size += n;
+        free_kb -= MIN(free_kb, DIV_ROUND_UP(n, 1024));
     }
     return n == len ? 0 : -EIO;
 }
@@ -79,8 +103,8 @@ static void next_segment(void)
 
 void lr_store_frame(uint32_t frame_no, const uint8_t *data, uint16_t len)
 {
-    if (len > 255) {
-        return;
+    if (len > 255 || (store_err && store_err != -ENOSPC)) {
+        return;  // no card; a full one still takes the frames to the record, which append() then drops
     }
     if (rec_count && (frame_no != rec_next || rec_count == REC_FRAMES || rec_len + 1 + len > sizeof(rec))) {
         flush();
@@ -103,7 +127,7 @@ void lr_store_frame(uint32_t frame_no, const uint8_t *data, uint16_t len)
 //
 // Commands, handled on the store's own thread: SD access and notifications may block, the BT RX thread must not
 //
-enum { LIST = 1, READ = 2, STOP = 3, DELETE = 4, SYNC = 0x10, ROTATE = 0x11 };
+enum { LIST = 1, READ = 2, STOP = 3, DELETE = 4, FORGET = 5, SYNC = 0x10, ROTATE = 0x11 };
 struct cmd {
     uint8_t op;
     uint32_t file, offset;
@@ -126,10 +150,12 @@ static ssize_t time_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 static ssize_t time_read(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len,
                          uint16_t offset)
 {
-    uint8_t v[8];
+    uint8_t v[16];
     sys_put_le16(boot, v);
     sys_put_le32(transport_frame_no, v + 2);
     sys_put_le16(store_err, v + 6);
+    sys_put_le32(free_kb, v + 8);
+    sys_put_le32(total_kb, v + 12);
     return bt_gatt_attr_read(conn, attr, buf, len, offset, v, sizeof(v));
 }
 
@@ -154,19 +180,19 @@ BT_GATT_SERVICE_DEFINE(lr_svc,
                        BT_GATT_PRIMARY_SERVICE(LR_UUID(0)),
                        BT_GATT_CHARACTERISTIC(LR_UUID(1),
                                               BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
-                                              BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+                                              BT_GATT_PERM_READ_ENCRYPT | BT_GATT_PERM_WRITE_ENCRYPT,
                                               time_read,
                                               time_write,
                                               NULL),
                        BT_GATT_CHARACTERISTIC(LR_UUID(2),
                                               BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY,
-                                              BT_GATT_PERM_WRITE,
+                                              BT_GATT_PERM_WRITE_ENCRYPT,
                                               NULL,
                                               ctrl_write,
                                               NULL),
-                       BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+                       BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT),
                        BT_GATT_CHARACTERISTIC(LR_UUID(3), BT_GATT_CHRC_NOTIFY, BT_GATT_PERM_NONE, NULL, NULL, NULL),
-                       BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE), );
+                       BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT), );
 #define CTRL_ATTR (&lr_svc.attrs[4])
 #define DATA_ATTR (&lr_svc.attrs[7])
 
@@ -199,23 +225,23 @@ static void list(struct bt_conn *conn)
     struct fs_dirent e;
     fs_dir_t_init(&d);
     k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
-    int err = fs_opendir(&d, DIR);
-    while (!err && n < ARRAY_SIZE(files) && fs_readdir(&d, &e) == 0 && e.name[0]) {
+    int err = fs_opendir(&d, DIR), opened = !err;
+    while (!err && n < ARRAY_SIZE(files) && !(err = fs_readdir(&d, &e)) && e.name[0]) {
         uint32_t file = strtoul(e.name, NULL, 16);
         if (e.type == FS_DIR_ENTRY_FILE && strlen(e.name) == 12 && file != ((uint32_t) boot << 16 | seg)) {
             files[n][0] = file;
             files[n++][1] = e.size;
         }
     }
-    if (!err) {
+    if (opened) {
         fs_closedir(&d);
     }
     k_mutex_unlock(&write_sdcard_mutex);
     for (int i = 0; i < n; i++) {
         reply(conn, 0x81, files[i][0], files[i][1], 4);
     }
-    uint8_t end = 0x80;
-    notify(conn, CTRL_ATTR, &end, 1);
+    uint8_t end[2] = {0x80, (uint8_t) err};
+    notify(conn, CTRL_ATTR, end, 2);
 }
 
 static uint8_t chunk[CHUNK];
@@ -257,6 +283,21 @@ static void send_file(struct bt_conn *conn, uint32_t file, uint32_t off)
     bt_conn_le_param_update(conn, BT_LE_CONN_PARAM(24, 40, 0, 42));
 }
 
+struct forget {
+    struct bt_conn *keep;
+    int *n;
+};
+
+/* Every bond but the asking phone's: a lost or replaced phone can no longer connect */
+static void forget_bond(const struct bt_bond_info *info, void *arg)
+{
+    struct forget *f = arg;
+    if (!bt_addr_le_eq(&info->addr, bt_conn_get_dst(f->keep))) {
+        bt_unpair(BT_ID_DEFAULT, &info->addr);
+        (*f->n)++;
+    }
+}
+
 static void store_thread(void)
 {
     struct cmd c;
@@ -281,9 +322,18 @@ static void store_thread(void)
         }
         conn = bt_conn_ref(conn);
         if (c.op == LIST) {
+            // what was recorded since the connection (while the phone took the files, before it listens) is listed too
+            k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+            next_segment();
+            count_free();
+            k_mutex_unlock(&write_sdcard_mutex);
             list(conn);
         } else if (c.op == READ) {
             send_file(conn, c.file, c.offset);
+        } else if (c.op == FORGET) {
+            int n = 0;
+            bt_foreach_bond(BT_ID_DEFAULT, forget_bond, &(struct forget){conn, &n});
+            reply(conn, 0x85, n, 0, 0);
         } else if (c.op == DELETE) {
             char p[32];
             int err = -EBUSY;
@@ -296,6 +346,7 @@ static void store_thread(void)
                 if (err == -EIO && fs_stat(p, &e) == -ENOENT) {
                     err = 0;
                 }
+                count_free();
                 k_mutex_unlock(&write_sdcard_mutex);
             }
             reply(conn, 0x84, c.file, (uint8_t) err, 1);
@@ -347,8 +398,9 @@ int lr_store_init(void)
     fs_write(&f, b, 2);
     fs_close(&f);
     file_path(path, (uint32_t) boot << 16);
-    LOG_INF("boot %u", boot);
     store_err = 0;
+    count_free();
+    LOG_INF("boot %u, %u of %u KB free", boot, free_kb, total_kb);
     k_thread_create(&store_thread_data, store_stack, K_THREAD_STACK_SIZEOF(store_stack),
                     (k_thread_entry_t) store_thread, NULL, NULL, NULL,
                     K_PRIO_PREEMPT(9), 0, K_NO_WAIT);  // below the pusher (7): sending a file never starves recording
