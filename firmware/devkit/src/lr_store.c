@@ -60,6 +60,17 @@ static void count_free(void)
 static uint32_t dropped;     // frames lost on the way to the card (gaps in the frame numbers it got)
 static uint16_t append_max;  // the slowest append so far, ms
 
+static struct fs_file_t seg_file;  // the open segment, kept open: reopening walked its FAT chain on every append, slower
+static bool seg_open;              // as the file grew (4 KB clusters): ~0.5 s per append at 6 MB, boot 6 of 10-03
+
+static void close_segment(void)
+{
+    if (seg_open) {
+        fs_close(&seg_file);
+        seg_open = false;
+    }
+}
+
 static int append(const void *data, uint32_t len)
 {
     int64_t t0 = k_uptime_get();
@@ -70,14 +81,16 @@ static int append(const void *data, uint32_t len)
         store_err = -ENOSPC;
         return -ENOSPC;
     }
-    struct fs_file_t f;
-    fs_file_t_init(&f);
-    int err = fs_open(&f, path, FS_O_CREATE | FS_O_WRITE | FS_O_APPEND);
-    if (err) {
-        return err;
+    if (!seg_open) {
+        fs_file_t_init(&seg_file);
+        int err = fs_open(&seg_file, path, FS_O_CREATE | FS_O_WRITE | FS_O_APPEND);
+        if (err) {
+            return err;
+        }
+        seg_open = true;
     }
-    int n = fs_write(&f, data, len);
-    fs_close(&f);
+    int n = fs_write(&seg_file, data, len);
+    fs_sync(&seg_file);  // on the card now (power can go any time); NCS 2.7 reports -EIO for a sync that worked
     append_max = MAX(append_max, (uint16_t) MIN(k_uptime_get() - t0, UINT16_MAX));
     if (n > 0) {
         seg_size += n;
@@ -101,6 +114,7 @@ static void next_segment(void)
 {
     flush();
     if (seg_size) {  // an empty segment stays the open one
+        close_segment();
         seg++;
         seg_size = 0;
     }
@@ -349,6 +363,7 @@ static int lend(bool on)
     k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
     if (on) {
         flush();
+        close_segment();
         unmount_sd_card();
         store_err = -EBUSY;
         usb_disk_lent = true;
@@ -443,6 +458,7 @@ void lr_store_shutdown(void)
     k_mutex_lock(&write_sdcard_mutex, K_FOREVER);  // kept: nothing writes the card after this
     if (!store_err) {
         flush();
+        close_segment();
         unmount_sd_card();
     }
 }

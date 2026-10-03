@@ -591,7 +591,10 @@ static struct bt_conn_cb _callback_references = {
 #define NET_BUFFER_HEADER_SIZE 3
 #define RING_BUFFER_HEADER_SIZE 6  // size:u16, frame number:u32
 uint32_t transport_frame_no;  // frames the codec has made since boot, the offline store's clock
-static uint32_t tx_frame_no;static uint8_t tx_queue[NETWORK_RING_BUF_SIZE * (CODEC_OUTPUT_MAX_BYTES + RING_BUFFER_HEADER_SIZE)];
+static uint32_t tx_frame_no;
+// Frames queued by their real size (header + Opus, ~46 B), not in fixed 326 B slots: the same 16 KB hold ~3.5 s, so a
+// card that stalls for most of a second (769 ms seen, 10-04) loses nothing; fixed slots held 320 ms
+static uint8_t tx_queue[16384];
 static uint8_t tx_buffer[CODEC_OUTPUT_MAX_BYTES + RING_BUFFER_HEADER_SIZE];
 static uint8_t tx_buffer_2[CODEC_OUTPUT_MAX_BYTES + RING_BUFFER_HEADER_SIZE];
 static uint32_t tx_buffer_size = 0;
@@ -612,17 +615,13 @@ static bool write_to_tx_queue(uint8_t *data, size_t size)
     sys_put_le32(transport_frame_no++, tx_buffer_2 + 2);  // counted even if the queue is full: a gap, not a shift
     memcpy(tx_buffer_2 + RING_BUFFER_HEADER_SIZE, data, size);
 
-    // Write to ring buffer
-    int written =
-        ring_buf_put(&ring_buf,
-                     tx_buffer_2,
-                     (CODEC_OUTPUT_MAX_BYTES + RING_BUFFER_HEADER_SIZE)); // It always fits completely or not at all
-    if (written != CODEC_OUTPUT_MAX_BYTES + RING_BUFFER_HEADER_SIZE) {
+    // Write to ring buffer: whole or not at all
+    if (ring_buf_space_get(&ring_buf) < RING_BUFFER_HEADER_SIZE + size) {
         return false;
-    } else {
-        k_sem_give(&pusher_wake_sem);
-        return true;
     }
+    ring_buf_put(&ring_buf, tx_buffer_2, RING_BUFFER_HEADER_SIZE + size);
+    k_sem_give(&pusher_wake_sem);
+    return true;
 }
 
 static bool load_tx_frame(void)
@@ -631,14 +630,11 @@ static bool load_tx_frame(void)
         return true;
     }
 
-    uint32_t raw_size =
-        ring_buf_get(&ring_buf,
-                     tx_buffer,
-                     (CODEC_OUTPUT_MAX_BYTES + RING_BUFFER_HEADER_SIZE)); // It always fits completely or not at all
-    if (raw_size != (CODEC_OUTPUT_MAX_BYTES + RING_BUFFER_HEADER_SIZE)) {
-        LOG_ERR("Failed to read from ring buffer. not enough data %d", raw_size);
+    if (ring_buf_size_get(&ring_buf) < RING_BUFFER_HEADER_SIZE) {
         return false;
     }
+    ring_buf_get(&ring_buf, tx_buffer, RING_BUFFER_HEADER_SIZE);  // a frame is put whole: its data follows
+    ring_buf_get(&ring_buf, tx_buffer + RING_BUFFER_HEADER_SIZE, tx_buffer[0] + (tx_buffer[1] << 8));
 
     tx_buffer_size = tx_buffer[0] + (tx_buffer[1] << 8);
     tx_frame_no = sys_get_le32(tx_buffer + 2);
