@@ -25,14 +25,15 @@ void main() {
 }
 
 class Settings {
-  String server = 'https://lr.example.com', token = '', device = 'phone';
+  String server = 'https://lr.example.com', token = '';
+  String device = 'phone';  // the phone's own name from the system settings, not set here (BLE audio goes up as the board's name)
   String source = 'mic';  // 'mic' or 'ble' (the BLE recorder; Android only)
   bool archive = true;
   static Future<Settings> load() async {
     final p = await SharedPreferences.getInstance(), s = Settings();
     s.server = p.getString('server') ?? s.server;
     s.token = p.getString('token') ?? '';
-    s.device = p.getString('device') ?? s.device;
+    s.device = (await Recorder.deviceName()).replaceAll(RegExp(r'[^\p{L}\p{N}._-]+', unicode: true), '_');
     s.archive = p.getBool('archive') ?? true;
     s.source = Platform.isAndroid ? p.getString('source') ?? 'mic' : 'mic';
     return s;
@@ -42,7 +43,6 @@ class Settings {
     final p = await SharedPreferences.getInstance();
     await p.setString('server', server);
     await p.setString('token', token);
-    await p.setString('device', device);
     await p.setBool('archive', archive);
     await p.setString('source', source);
   }
@@ -88,6 +88,7 @@ class Recorder {
   static Future<void> upload() => _ch.invokeMethod('upload');  // pieces left and not recording: send them anyway
   static Future<void> foreground(bool on) => _ch.invokeMethod('foreground', {'on': on});
   static Future<Map> status() async => (await _ch.invokeMethod('status')) as Map;
+  static Future<String> deviceName() async => (await _ch.invokeMethod('deviceName')) as String;
 }
 
 class Home extends StatefulWidget {
@@ -336,8 +337,9 @@ class _UploadPageState extends State<UploadPage> {
       final res = await req.close().timeout(const Duration(seconds: 15));
       final body = jsonDecode(await res.transform(utf8.decoder).join()) as Map;
       c.close();
-      final mine = (body['devices'] as List? ?? []).cast<Map>().where((d) => d['device'] == s.device).firstOrNull;
-      if (mounted) setState(() { server = mine; serverNote = mine == null ? '服务端还没有 ${s.device} 的处理任务' : ''; });
+      final dev = widget.status['tag'] ?? s.device;  // recording from the BLE recorder: its audio goes up as the board
+      final mine = (body['devices'] as List? ?? []).cast<Map>().where((d) => d['device'] == dev).firstOrNull;
+      if (mounted) setState(() { server = mine; serverNote = mine == null ? '服务端还没有 $dev 的处理任务' : ''; });
     } catch (e) {
       if (mounted) setState(() => serverNote = '取不到服务端状态：$e');
     }
@@ -380,7 +382,7 @@ class _UploadPageState extends State<UploadPage> {
     return RefreshIndicator(
       onRefresh: _fetch,
       child: ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 32), children: [
-        card('本机（${widget.settings.device}）', [
+        card('本机（${st['tag'] ?? widget.settings.device}）', [
           row('状态', state),
           row('待传', pending == 0 ? '无' : '$pending 块 · ${bytes < 1048576 ? '${(bytes / 1024).round()} KB' : '${(bytes / 1048576).toStringAsFixed(1)} MB'}'),
           row('最早一块', pending == 0 ? '—' : '录于 ${_at(st['oldest'])}'),
@@ -440,8 +442,7 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   late final server = TextEditingController(text: widget.settings.server),
-      token = TextEditingController(text: widget.settings.token),
-      device = TextEditingController(text: widget.settings.device);
+      token = TextEditingController(text: widget.settings.token);
   late bool archive = widget.settings.archive;
   late String source = widget.settings.source;
   bool showToken = false;
@@ -451,7 +452,6 @@ class _SettingsPageState extends State<SettingsPage> {
     final s = widget.settings;
     s.server = server.text.trim().replaceFirst(RegExp(r'/$'), '');
     s.token = token.text.trim();
-    s.device = device.text.trim().isEmpty ? 'phone' : device.text.trim();
     s.archive = archive;
     s.source = source;
     await widget.onSaved();
@@ -480,8 +480,10 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
       ),
       const SizedBox(height: 12),
-      TextField(controller: device,
-          decoration: const InputDecoration(labelText: '设备名', helperText: '服务端按设备名区分录音来源', border: OutlineInputBorder())),
+      InputDecorator(
+          decoration: const InputDecoration(labelText: '设备名', helperText: '取自系统设置里的手机名称；BLE 录音硬件的音频按硬件名上传',
+              border: OutlineInputBorder()),
+          child: Text(widget.settings.device)),
       section('录音'),
       if (Platform.isAndroid)
         Padding(

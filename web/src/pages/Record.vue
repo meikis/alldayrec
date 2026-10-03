@@ -14,7 +14,8 @@ const SVC = "19b10000-e8f2-537e-4f6c-d104768a1214",
   CODEC = "19b10002-e8f2-537e-4f6c-d104768a1214",
   OPUS_16K = 20,
   FRAME_MS = 10;
-const device = ref(localStorage.device || "phone"),
+// typed by hand, else a name of its own for this browser, kept from the first visit
+const device = ref((localStorage.device ||= `web-recorder-${crypto.randomUUID().slice(0, 8)}`)),
   source = ref<"mic" | "ble">(localStorage.source === "ble" ? "ble" : "mic"),
   upload = ref(localStorage.upload !== "0"),
   log = ref(""),

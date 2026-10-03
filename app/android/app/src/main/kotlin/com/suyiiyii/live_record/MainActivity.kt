@@ -10,6 +10,7 @@ import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaRecorder
 import android.os.Build
+import android.provider.Settings
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -65,6 +66,7 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
                 "status" -> result.success(RecorderService.status(File(filesDir, "chunks")))
+                "deviceName" -> result.success(Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME) ?: Build.MODEL)  // the name in the system settings
                 else -> result.notImplemented()
             }
         }

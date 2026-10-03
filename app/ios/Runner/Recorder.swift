@@ -31,6 +31,7 @@ enum Recorder {
         slicer?.setSlices(fg: a["foreground"] as? Int ?? 1, bg: a["background"] as? Int ?? 20)
         result(nil)
       case "status": result(status())
+      case "deviceName": result(UIDevice.current.name)  // "iPhone" since iOS 16 without the user-assigned-device-name entitlement
       case "upload": if Uploader.pending(dir) > 0 { upload() }; result(nil)
       default: result(FlutterMethodNotImplemented)
       }

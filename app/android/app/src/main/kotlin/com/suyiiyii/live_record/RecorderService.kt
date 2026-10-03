@@ -42,7 +42,7 @@ class RecorderService : Service() {
                 "running" to (slicer != null), "uploading" to (uploader != null), "files" to slicer?.files, "slice" to slicer?.sliceS(),
                 "error" to slicer?.error, "sent" to uploader?.sent, "note" to uploader?.note,
                 "pending" to q.size, "pendingBytes" to q.sumOf { it.length() }, "oldest" to q.firstOrNull()?.let(Uploader::startMs),
-                "interruptedAt" to if (interruptedAt > 0) interruptedAt else null, "link" to link?.state)
+                "interruptedAt" to if (interruptedAt > 0) interruptedAt else null, "link" to link?.state, "tag" to slicer?.tag)
         }
     }
 
