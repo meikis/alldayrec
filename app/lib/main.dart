@@ -329,7 +329,7 @@ class UploadPage extends StatefulWidget {
 
 class _UploadPageState extends State<UploadPage> {
   Map? server;  // this device's entry of /api/status
-  String serverNote = '';
+  String serverNote = '', dev = '';  // dev: the name its audio goes up as (the BLE recorder's own, or the setting)
   Timer? timer;
 
   @override
@@ -357,7 +357,7 @@ class _UploadPageState extends State<UploadPage> {
       c.close();
       // the BLE recorder's audio goes up under its own name (LR-P1-BDAE), not the device setting
       final ble = s.source == 'ble' ? (await Recorder.recorder())['name'] as String? : null;
-      final dev = ble?.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_') ?? s.device;
+      dev = ble?.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_') ?? s.device;
       final mine = (body['devices'] as List? ?? []).cast<Map>().where((d) => d['device'] == dev).firstOrNull;
       if (mounted) setState(() { server = mine; serverNote = mine == null ? '服务端还没有 $dev 的处理任务' : ''; });
     } catch (e) {
@@ -378,54 +378,176 @@ class _UploadPageState extends State<UploadPage> {
     return m >= 60 ? '${m ~/ 60} 小时 ${m % 60} 分' : '$m 分钟';
   }
 
+  static String _size(num b) => b < 1048576 ? '${(b / 1024).round()} KB' : '${(b / 1048576).toStringAsFixed(1)} MB';
+
   @override
   Widget build(BuildContext context) {
-    final t = Theme.of(context), st = widget.status, srv = server;
+    final t = Theme.of(context), cs = t.colorScheme, st = widget.status, srv = server;
     final pending = (st['pending'] ?? 0) as int, bytes = (st['pendingBytes'] ?? 0) as num;
-    final state = st['running'] == true ? '录音中，边录边传' : st['uploading'] == true ? '正在上传' : pending > 0 ? '等待上传' : '空闲，已全部上传';
-    Widget row(String k, String v, {bool bad = false}) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          SizedBox(width: 88, child: Text(k, style: TextStyle(color: t.colorScheme.onSurfaceVariant))),
-          Expanded(child: Text(v, style: bad ? TextStyle(color: t.colorScheme.error) : null)),
-        ]));
-    Widget card(String title, List<Widget> rows) => Card.outlined(
-        margin: const EdgeInsets.only(top: 12),
-        child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(title, style: t.textTheme.titleSmall),
-              const SizedBox(height: 6),
-              ...rows,
-            ])));
+    final running = st['running'] == true, uploading = st['uploading'] == true;
+    final (String chip, Color chipColor, IconData chipIcon) = running
+        ? ('录音中，边录边传', Colors.red.shade600, Icons.fiber_manual_record_rounded)
+        : uploading
+            ? ('正在上传', cs.tertiary, Icons.cloud_upload_rounded)
+            : pending > 0
+                ? ('等待上传', Colors.orange.shade700, Icons.schedule_rounded)
+                : ('已全部上传', Colors.green.shade600, Icons.cloud_done_rounded);
     final left = (srv?['left_s'] ?? 0) as num, eta = srv?['eta_s'] as num?;
+    final caughtUp = left < 30;
+    final name = dev.isEmpty ? widget.settings.device : dev;
     return RefreshIndicator(
       onRefresh: _fetch,
-      child: ListView(padding: const EdgeInsets.fromLTRB(16, 0, 16, 32), children: [
-        card('本机（${st['tag'] ?? widget.settings.device}）', [
-          row('状态', state),
-          row('待传', pending == 0 ? '无' : '$pending 块 · ${bytes < 1048576 ? '${(bytes / 1024).round()} KB' : '${(bytes / 1048576).toStringAsFixed(1)} MB'}'),
-          row('最早一块', pending == 0 ? '—' : '录于 ${_at(st['oldest'])}'),
-          row('本次已传', '${st['sent'] ?? 0} 块'),
-          if (st['note'] != null) row('提示', '${st['note']}', bad: true),
-        ]),
-        if (pending > 0 && st['running'] != true && st['uploading'] != true)
+      child: ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 32), children: [
+        heroCard(context,
+            icon: widget.settings.source == 'ble' ? Icons.mic_external_on_rounded : Icons.smartphone_rounded,
+            title: name,
+            chips: [stateChip(chip, chipColor, chipIcon)]),
+        const SizedBox(height: 12),
+        IntrinsicHeight(
+          child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            statTile(context,
+                icon: Icons.inventory_2_rounded,
+                color: pending > 0 ? Colors.orange.shade700 : Colors.green.shade600,
+                label: '待传',
+                value: pending == 0 ? '0' : '$pending 块',
+                sub: pending == 0 ? '没有积压' : '${_size(bytes)} · 最早录于 ${_at(st['oldest'])}'),
+            const SizedBox(width: 12),
+            statTile(context,
+                icon: Icons.cloud_done_rounded, color: cs.primary, label: '本次已传', value: '${st['sent'] ?? 0} 块', sub: '这次开机以来'),
+          ]),
+        ),
+        if (st['note'] != null)
+          Card.filled(
+            margin: const EdgeInsets.only(top: 12),
+            color: cs.errorContainer,
+            child: ListTile(
+                leading: Icon(Icons.error_outline_rounded, color: cs.onErrorContainer),
+                title: Text('${st['note']}', style: TextStyle(color: cs.onErrorContainer))),
+          ),
+        if (pending > 0 && !running && !uploading)
           Padding(
               padding: const EdgeInsets.only(top: 12),
-              child: FilledButton.icon(onPressed: Recorder.upload, icon: const Icon(Icons.cloud_upload), label: const Text('立即上传'))),
-        card('服务端处理', [
-          if (srv == null) row('状态', serverNote.isEmpty ? '加载中…' : serverNote, bad: serverNote.startsWith('取不到'))
-          else ...[
-            row('已收到', _at(srv['received_to'])),
-            row('已定稿', _at(srv['done_to'])),
-            row('待处理', left < 30 ? '已追上' : '${_span(left)} 录音 · 排队 ${srv['queued']} 块'),
-            if (left >= 30) row('预计完成', eta == null ? '—' : '约 ${_span(eta)}'),
-          ],
-        ]),
+              child: FilledButton.icon(onPressed: Recorder.upload, icon: const Icon(Icons.cloud_upload_rounded), label: const Text('立即上传'))),
+        sectionCard(
+            context,
+            '服务端处理',
+            srv == null
+                ? Row(children: [
+                    Icon(serverNote.startsWith('取不到') ? Icons.cloud_off_rounded : Icons.hourglass_empty_rounded,
+                        color: serverNote.startsWith('取不到') ? cs.error : cs.outline),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(serverNote.isEmpty ? '加载中…' : serverNote)),
+                  ])
+                : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(children: [
+                      Icon(caughtUp ? Icons.check_circle_rounded : Icons.autorenew_rounded,
+                          color: caughtUp ? Colors.green.shade600 : cs.tertiary),
+                      const SizedBox(width: 8),
+                      Expanded(
+                          child: Text(caughtUp ? '已追上，录音都已转写' : '还有 ${_span(left)} 录音待处理 · 排队 ${srv['queued']} 块',
+                              style: t.textTheme.bodyLarge)),
+                    ]),
+                    if (!caughtUp) ...[
+                      const SizedBox(height: 10),
+                      const LinearProgressIndicator(minHeight: 6),
+                      const SizedBox(height: 6),
+                      Text(eta == null ? '' : '预计约 ${_span(eta)} 后完成', style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+                    ],
+                    const Divider(height: 24),
+                    ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        leading: const Icon(Icons.download_done_rounded),
+                        title: const Text('已收到'),
+                        trailing: Text(_at(srv['received_to']))),
+                    ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        leading: const Icon(Icons.task_alt_rounded),
+                        title: const Text('已定稿'),
+                        trailing: Text(_at(srv['done_to']))),
+                  ])),
       ]),
     );
   }
 }
+
+/// A titled block of a native page (recorder, upload).
+Widget sectionCard(BuildContext context, String title, Widget child) {
+  final t = Theme.of(context), cs = t.colorScheme;
+  return Card.filled(
+      margin: const EdgeInsets.only(top: 12),
+      color: cs.surfaceContainerLow,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(title, style: t.textTheme.labelLarge?.copyWith(color: cs.onSurfaceVariant)),
+          const SizedBox(height: 10),
+          child,
+        ]),
+      ));
+}
+
+/// One number with its icon, a line under it and, given a fraction, a bar (battery, card, queue).
+Widget statTile(BuildContext context,
+    {required IconData icon, required Color color, required String label, required String value, String? sub, double? fraction}) {
+  final t = Theme.of(context), cs = t.colorScheme;
+  return Expanded(
+    child: Card.filled(
+      margin: EdgeInsets.zero,
+      color: cs.surfaceContainerLow,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(icon, color: color, size: 22),
+            const SizedBox(width: 6),
+            Text(label, style: t.textTheme.labelLarge?.copyWith(color: cs.onSurfaceVariant)),
+          ]),
+          const SizedBox(height: 10),
+          Text(value, style: t.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w600)),
+          if (sub != null) Text(sub, style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+          if (fraction != null) ...[
+            const SizedBox(height: 10),
+            LinearProgressIndicator(value: fraction, color: color, backgroundColor: color.withValues(alpha: 0.15),
+                minHeight: 6, borderRadius: BorderRadius.circular(3)),
+          ],
+        ]),
+      ),
+    ),
+  );
+}
+
+/// The header of a native page: an icon, a name, and chips saying what is going on.
+Widget heroCard(BuildContext context, {required IconData icon, required String title, required List<Widget> chips}) {
+  final t = Theme.of(context), cs = t.colorScheme;
+  return Card.filled(
+    margin: const EdgeInsets.only(top: 8),
+    color: cs.primaryContainer,
+    child: Padding(
+      padding: const EdgeInsets.all(16),
+      child: Row(children: [
+        CircleAvatar(radius: 28, backgroundColor: cs.primary, child: Icon(icon, color: cs.onPrimary, size: 30)),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: t.textTheme.titleLarge?.copyWith(color: cs.onPrimaryContainer, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 6),
+            Wrap(spacing: 8, runSpacing: 6, children: chips),
+          ]),
+        ),
+      ]),
+    ),
+  );
+}
+
+/// A status chip in one colour.
+Widget stateChip(String label, Color color, IconData icon) => Chip(
+      avatar: Icon(icon, size: 18, color: color),
+      label: Text(label),
+      visualDensity: VisualDensity.compact,
+      side: BorderSide(color: color.withValues(alpha: 0.5)),
+    );
 
 class _Live extends StatelessWidget {
   const _Live();
@@ -628,41 +750,9 @@ class _RecorderPageState extends State<RecorderPage> {
                 ? ('已连接', Colors.green.shade600, Icons.bluetooth_connected_rounded)
                 : ('连接中', cs.secondary, Icons.bluetooth_searching_rounded);
 
-    Widget section(String title, Widget child) => Card.filled(
-        margin: const EdgeInsets.only(top: 12),
-        color: cs.surfaceContainerLow,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(title, style: t.textTheme.labelLarge?.copyWith(color: cs.onSurfaceVariant)),
-            const SizedBox(height: 10),
-            child,
-          ]),
-        ));
-
+    Widget section(String title, Widget child) => sectionCard(context, title, child);
     Widget stat({required IconData icon, required Color color, required String label, required String value, String? sub, double? fraction}) =>
-        Expanded(
-          child: Card.filled(
-            margin: EdgeInsets.zero,
-            color: cs.surfaceContainerLow,
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Row(children: [
-                  Icon(icon, color: color, size: 22),
-                  const SizedBox(width: 6),
-                  Text(label, style: t.textTheme.labelLarge?.copyWith(color: cs.onSurfaceVariant)),
-                ]),
-                const SizedBox(height: 10),
-                Text(value, style: t.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w600)),
-                if (sub != null) Text(sub, style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
-                const SizedBox(height: 10),
-                LinearProgressIndicator(value: fraction ?? 0, color: color, backgroundColor: color.withValues(alpha: 0.15),
-                    minHeight: 6, borderRadius: BorderRadius.circular(3)),
-              ]),
-            ),
-          ),
-        );
+        statTile(context, icon: icon, color: color, label: label, value: value, sub: sub, fraction: fraction ?? 0);
 
     final batteryColor = battery == null ? cs.outline : battery <= 20 ? cs.error : battery <= 50 ? Colors.orange.shade700 : Colors.green.shade600;
     final cardColor = store == null || store == -16 ? cs.outline : store != 0 ? cs.error : free < total * 0.1 ? Colors.orange.shade700 : cs.primary;
@@ -682,32 +772,10 @@ class _RecorderPageState extends State<RecorderPage> {
       onRefresh: _load,
       child: ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 32), children: [
         // the device
-        Card.filled(
-          margin: const EdgeInsets.only(top: 8),
-          color: cs.primaryContainer,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(children: [
-              CircleAvatar(radius: 28, backgroundColor: cs.primary, child: Icon(Icons.mic_external_on_rounded, color: cs.onPrimary, size: 30)),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(name ?? '未绑定', style: t.textTheme.titleLarge?.copyWith(color: cs.onPrimaryContainer, fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 6),
-                  Wrap(spacing: 8, runSpacing: 6, children: [
-                    Chip(
-                      avatar: Icon(chipIcon, size: 18, color: chipColor),
-                      label: Text(chip),
-                      visualDensity: VisualDensity.compact,
-                      side: BorderSide(color: chipColor.withValues(alpha: 0.5)),
-                    ),
-                    if (model != null) Chip(label: Text(model), visualDensity: VisualDensity.compact),
-                  ]),
-                ]),
-              ),
-            ]),
-          ),
-        ),
+        heroCard(context, icon: Icons.mic_external_on_rounded, title: name ?? '未绑定', chips: [
+          stateChip(chip, chipColor, chipIcon),
+          if (model != null) Chip(label: Text(model), visualDensity: VisualDensity.compact),
+        ]),
         if (name == null)
           Padding(
             padding: const EdgeInsets.only(top: 8),
