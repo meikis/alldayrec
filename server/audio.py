@@ -44,7 +44,7 @@ def decode(body: bytes, aac: bool = False, n: int | None = None) -> np.ndarray |
     """One piece's bytes as 16 kHz mono int16; None when ffmpeg cannot read them. aac: an ADTS piece, cut to the n
     samples its client wrote (exact), or unpadded when it did not say (older apps, a piece cut short by a kill)."""
     out = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "s16le", "-ac", "1", "-ar", str(SR), "pipe:1"], input=body, capture_output=True)
-    if out.returncode or len(out.stdout) < 2 * SR // 10:
+    if out.returncode or len(out.stdout) < 2:  # an Opus piece can be one 20 ms packet (the last one of a run)
         return None
     x = np.frombuffer(out.stdout[:len(out.stdout) // 2 * 2], np.int16)
     if aac and n:
@@ -178,6 +178,8 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     for m in (0, 1, 5):  # 10:00, 10:01, a gap, 10:05
         assert save("phone", T(m), tone(60), "audio/ogg") > 59
     assert save("phone", T(9), b"not audio", "audio/ogg") is None
+    assert 0 < save("phone", T(8), tone(0.02), "audio/ogg") < 0.1, "a 20 ms piece is audio too"
+    db.conn().execute("DELETE FROM pieces WHERE start_ms = ?", (T(8),))
     files = [p.relative_to(DIR).as_posix() for p in DIR.rglob("*.ogg")]
     assert files == ["chunks/phone/2026-10-02/10.ogg"], files
     size = (DIR / files[0]).stat().st_size

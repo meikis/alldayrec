@@ -1,5 +1,5 @@
 // iOS counterpart of RecorderService.kt + Slicer: the microphone stays open under the `audio` background mode,
-// the stream is cut into ADTS AAC pieces (a piece cut short by a kill still decodes) and uploaded in order.
+// the stream is cut into Ogg Opus pieces (a piece cut short by a kill still decodes) and uploaded in order.
 // iOS has no START_STICKY: after a kill, the next launch uploads what was left and the owner restarts by hand.
 import AVFoundation
 import Flutter
@@ -26,6 +26,7 @@ enum Recorder {
       case "foreground":
         foregroundApp = a["on"] as? Bool ?? true
         slicer?.foreground = foregroundApp
+        if foregroundApp { slicer?.resume() }  // a recording the system stopped and did not give back (from the background iOS may refuse)
         result(nil)
       case "slices":  // new lengths from the server: the running slicer cuts its next piece with them
         slicer?.setSlices(fg: a["foreground"] as? Int ?? 1, bg: a["background"] as? Int ?? 20)
@@ -65,9 +66,10 @@ enum Recorder {
   }
 
   private static func stop() {
-    let at = now()
     defaults.set(false, forKey: "active")
-    defaults.set(at, forKey: "endAt")  // sent after the last piece, also by a later launch if this one is killed first
+    if defaults.object(forKey: "endAt") == nil {  // set already: the recording stopped earlier, at a gap (gap(from:))
+      defaults.set(now(), forKey: "endAt")  // sent after the last piece, also by a later launch if this one is killed first
+    }
     UIApplication.shared.isIdleTimerDisabled = false
     slicer?.stop(); slicer = nil
     // iOS gives about 30 s after the app leaves the screen; what is not sent by then goes on the next launch
@@ -81,25 +83,38 @@ enum Recorder {
     endAfterQueue(release)
   }
 
-  /// Once every piece is up (however long that takes, across suspensions) and nothing records again, the saved end.
+  /// Once every piece is up (however long that takes, across suspensions), the saved end, unless recording started
+  /// or resumed meanwhile (which removes it).
   private static func endAfterQueue(_ done: @escaping () -> Void = {}) {
     Thread.detachNewThread {
-      while Uploader.pending(dir) > 0 && slicer == nil { Thread.sleep(forTimeInterval: 0.5) }
-      let at = defaults.object(forKey: "endAt") as? Int64
-      if slicer == nil, let at { uploader?.end(at); defaults.removeObject(forKey: "endAt") }  // the server may close the conversation now
+      while Uploader.pending(dir) > 0 && defaults.object(forKey: "endAt") != nil { Thread.sleep(forTimeInterval: 0.5) }
+      if let at = defaults.object(forKey: "endAt") as? Int64 { uploader?.end(at); defaults.removeObject(forKey: "endAt") }  // the server may close the conversation now
       done()
     }
   }
 
-  /// At launch: a piece being written when the process died is still valid ADTS; send what is left over.
+  /// The system stopped the recording at `at` and it could not resume: the server gets `at` as the recording's end
+  /// once the pieces before it are up, so its conversation closes instead of waiting for audio that is not coming.
+  static func gap(from at: Int64) {
+    guard defaults.object(forKey: "endAt") == nil else { return }
+    defaults.set(at, forKey: "endAt")
+    endAfterQueue()
+  }
+
+  static func resumed(after at: Int64) {
+    interruptedAt = at
+    defaults.removeObject(forKey: "endAt")
+  }
+
+  /// At launch: a piece being written when the process died still decodes up to its last page; send what is left over.
   private static func resume() {
     let fm = FileManager.default
     var last: Int64 = 0
     for f in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
       let m = (try? f.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate).map { Int64($0.timeIntervalSince1970 * 1000) } ?? 0
       last = max(last, m)
-      if f.lastPathComponent.hasSuffix(".part.aac") {
-        try? fm.moveItem(at: f, to: dir.appendingPathComponent(f.lastPathComponent.replacingOccurrences(of: ".part.aac", with: ".aac")))
+      if f.lastPathComponent.contains(".part.") {  // no sample count: <start>.ogg (or .aac from the app before)
+        try? fm.moveItem(at: f, to: dir.appendingPathComponent(f.lastPathComponent.replacingOccurrences(of: ".part.", with: ".")))
       }
     }
     guard defaults.bool(forKey: "active") || Uploader.pending(dir) > 0 || defaults.object(forKey: "endAt") != nil else { return }
@@ -126,24 +141,31 @@ enum Recorder {
   }
 
   static func now() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+
+  static func clock(_ ms: Int64) -> String {
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm:ss"
+    return f.string(from: Date(timeIntervalSince1970: Double(ms) / 1000))
+  }
 }
 
-/// The input node's stream, resampled to 16 kHz mono, written as AAC files whose length follows the app state and
-/// named by the wall time of their first sample. An interruption (a call) or a route change (AirPods) ends the
-/// piece and re-anchors the wall time when recording resumes.
+/// The input node's stream, resampled to 16 kHz mono and encoded as Ogg Opus pieces (OggOpus.swift) whose length
+/// follows the app state, each named by the wall time of its first sample and its sample count. A run is one
+/// encoder over continuous audio; an interruption (a call), a route change (AirPods) or a media services reset ends
+/// it, and the next run re-anchors the wall time. Everything that starts or stops the engine runs on the main
+/// thread; the run and the files belong to `q`.
 final class Slicer {
   var foreground = true
   private(set) var files = 0
   private(set) var error: String?
   private let dir: URL
   private var fgS: Int, bgS: Int  // set on q
-  private let engine = AVAudioEngine()
-  private let out = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
-  private let q = DispatchQueue(label: "slicer")  // owns everything below
-  private var converter: AVAudioConverter?
-  private var file: AVAudioFile?, part: URL?
-  private var running = false
-  private var anchorMs: Int64 = 0, samples: Int64 = 0, fileStart: Int64 = 0, fileSlice = 0
+  private var engine = AVAudioEngine()  // new after a media services reset
+  private let out = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: OpusPieces.rate, channels: 1, interleaved: false)!
+  private let q = DispatchQueue(label: "slicer")  // owns run, anchorMs, fileSlice
+  private var run: OpusPieces?
+  private var anchorMs: Int64 = 0, fileSlice = 0
+  private var gapFrom: Int64?  // main: the system stopped the recording at this time and it has not resumed yet
   private var observers: [NSObjectProtocol] = []
 
   init(dir: URL, fgS: Int, bgS: Int) { self.dir = dir; self.fgS = fgS; self.bgS = bgS }
@@ -153,24 +175,24 @@ final class Slicer {
   func setSlices(fg: Int, bg: Int) { q.async { self.fgS = fg; self.bgS = bg } }
 
   func start() throws {
-    let session = AVAudioSession.sharedInstance()
-    try session.setCategory(.record, mode: .measurement)  // no voice processing, like Android's MIC source
-    try session.setActive(true)
-    q.sync { running = true }
+    try activate()
     try restart()
-    let nc = NotificationCenter.default
+    let nc = NotificationCenter.default, session = AVAudioSession.sharedInstance()
     observers = [
-      nc.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: nil) { [weak self] n in
+      nc.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] n in
         guard let self, let raw = n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt else { return }
-        if AVAudioSession.InterruptionType(rawValue: raw) == .began {
-          self.q.async { self.closeFile() }
-        } else {
-          do { try session.setActive(true); try self.restart(); Recorder.interruptedAt = Recorder.now() }
-          catch { self.error = "中断后恢复失败 \(error)" }
-        }
+        // ended: resume whether or not it says shouldResume. It may never come; then the app coming to the front resumes
+        if AVAudioSession.InterruptionType(rawValue: raw) == .began { self.pause() } else { self.resume() }
       },
-      nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
-        do { try self?.restart() } catch { self?.error = "切换输入后恢复失败 \(error)" }
+      nc.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: .main) { [weak self] _ in
+        guard let self else { return }
+        self.pause()
+        self.engine = AVAudioEngine()  // every audio object of before is dead; the session is set up again in resume
+        self.resume()
+      },
+      nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] n in
+        guard let self, n.object as AnyObject === self.engine, self.gapFrom == nil else { return }
+        do { try self.restart() } catch { self.pause(); self.failed("切换输入后恢复失败", error) }
       },
     ]
   }
@@ -179,66 +201,94 @@ final class Slicer {
     observers.forEach(NotificationCenter.default.removeObserver)
     engine.inputNode.removeTap(onBus: 0)
     engine.stop()
-    q.sync { running = false; closeFile() }
+    q.sync { finishRun() }
     try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
   }
 
-  /// (Re)attach the tap with the input's current format and start a new piece at the current wall time.
+  /// Mixable, so playing a video or a podcast neither silences it nor interrupts the recording (.record did both);
+  /// .defaultToSpeaker keeps the other apps' sound on the speaker, not the earpiece playAndRecord would pick. No
+  /// .allowBluetooth: the input would move to the AirPods' call microphone. .measurement: no voice processing.
+  private func activate() throws {
+    let session = AVAudioSession.sharedInstance()
+    try session.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers, .defaultToSpeaker])
+    if #available(iOS 14.5, *) { try session.setPrefersNoInterruptionsFromSystemAlerts(true) }  // a call as a banner: only answering it interrupts
+    try session.setActive(true)
+  }
+
+  /// The system took the microphone: the piece being written ends here and the gap starts.
+  private func pause() {
+    if gapFrom == nil { gapFrom = Recorder.now() }
+    error = "\(Recorder.clock(gapFrom!)) 起被系统中断，等待恢复"
+    q.sync { finishRun() }
+  }
+
+  /// Records again after a pause (interruption over, media services back, the app back in front). iOS may refuse
+  /// to start recording from the background: then the gap stays open, the page says since when and the server
+  /// gets its start as the end of the recording, and the next try is when the app comes to the front.
+  func resume() {
+    guard let from = gapFrom else { return }
+    do {
+      try activate()
+      try restart()
+      gapFrom = nil
+      error = nil
+      Recorder.resumed(after: from)
+    } catch { failed("中断后恢复失败", error) }
+  }
+
+  private func failed(_ what: String, _ e: Error) {
+    error = "\(Recorder.clock(gapFrom ?? Recorder.now())) 起没有录音：\(what)（\(e.localizedDescription)），回到前台时重试"
+    Recorder.gap(from: gapFrom ?? Recorder.now())
+  }
+
+  /// (Re)attach the tap with the input's current format and start a new run at the current wall time. Each tap
+  /// has its own resampler and run, so a buffer of the old tap still on its way cannot reach the new ones.
   private func restart() throws {
     let input = engine.inputNode
     input.removeTap(onBus: 0)
     engine.stop()
     let format = input.outputFormat(forBus: 0)
-    converter = AVAudioConverter(from: format, to: out)
-    q.sync { closeFile(); anchorMs = Recorder.now(); samples = 0 }
-    input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in self?.convert(buf) }
+    guard let resampler = AVAudioConverter(from: format, to: out) else { throw NSError(domain: "Slicer", code: 1, userInfo: [NSLocalizedDescriptionKey: "no input (\(format))"]) }
+    let run = try q.sync { () throws -> OpusPieces in
+      finishRun()
+      anchorMs = Recorder.now()
+      let r = try OpusPieces(open: { [unowned self] first in
+        fileSlice = sliceS()
+        return dir.appendingPathComponent("\(anchorMs + first * 1000 / Int64(OpusPieces.rate)).part.ogg")
+      }, full: { [unowned self] n in  // the slice length is up, or the state changed to a shorter slice that is already over
+        let sr = Int64(OpusPieces.rate), state = sliceS()
+        return n >= Int64(fileSlice) * sr || (state < fileSlice && n >= Int64(state) * sr)
+      }, closed: { [unowned self] url, _, n in  // <start>.part.ogg becomes <start>_<n>.ogg
+        try? FileManager.default.moveItem(at: url, to: url.deletingLastPathComponent().appendingPathComponent(url.lastPathComponent.replacingOccurrences(of: ".part.ogg", with: "_\(n).ogg")))
+        files += 1
+      })
+      self.run = r
+      return r
+    }
+    input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buf, _ in self?.convert(buf, resampler, run) }
     engine.prepare()
     try engine.start()
   }
 
-  private func convert(_ buf: AVAudioPCMBuffer) {
-    guard let converter,
-          let o = AVAudioPCMBuffer(pcmFormat: out, frameCapacity: AVAudioFrameCount(Double(buf.frameLength) * out.sampleRate / buf.format.sampleRate) + 16)
+  private func convert(_ buf: AVAudioPCMBuffer, _ resampler: AVAudioConverter, _ run: OpusPieces) {
+    guard let o = AVAudioPCMBuffer(pcmFormat: out, frameCapacity: AVAudioFrameCount(Double(buf.frameLength) * out.sampleRate / buf.format.sampleRate) + 16)
     else { return }
     var fed = false, err: NSError?
-    converter.convert(to: o, error: &err) { _, status in
+    resampler.convert(to: o, error: &err) { _, status in
       if fed { status.pointee = .noDataNow; return nil }
       fed = true; status.pointee = .haveData; return buf
     }
     if let err { error = "\(err)"; return }
-    if o.frameLength > 0 { q.async { self.write(o) } }
+    if o.frameLength > 0 { q.async { do { try run.write(o) } catch { self.error = "\(error)" } } }
   }
 
-  private func write(_ b: AVAudioPCMBuffer) {
-    guard running else { return }
-    let sr = Int64(out.sampleRate), state = sliceS(), at = samples - fileStart
-    // rotate: the slice length is up, or the state changed to a shorter slice that is already over
-    if file != nil && (at >= Int64(fileSlice) * sr || (state < fileSlice && at >= Int64(state) * sr)) { closeFile() }
-    do {
-      if file == nil {
-        let url = dir.appendingPathComponent("\(anchorMs + samples * 1000 / sr).part.aac")  // .aac picks the ADTS container
-        file = try AVAudioFile(forWriting: url, settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: out.sampleRate,
-                                                           AVNumberOfChannelsKey: 1, AVEncoderBitRateKey: 24000],
-                               commonFormat: .pcmFormatFloat32, interleaved: false)
-        part = url; fileStart = samples; fileSlice = state
-      }
-      try file!.write(from: b)
-    } catch { self.error = "\(error)" }
-    samples += Int64(b.frameLength)
-  }
-
-  /// <start>.part.aac becomes <start>_<n>.aac, n the samples written into it: the server cuts the decoded piece to
-  /// exactly those (AAC adds 2112 in front and pads the end to whole frames; ADTS has no room to say so).
-  private func closeFile() {
-    guard let p = part else { return }
-    file = nil  // releasing the AVAudioFile flushes and closes it
-    part = nil
-    try? FileManager.default.moveItem(at: p, to: p.deletingLastPathComponent().appendingPathComponent(p.lastPathComponent.replacingOccurrences(of: ".part.aac", with: "_\(samples - fileStart).aac")))
-    files += 1
+  private func finishRun() {  // on q
+    do { try run?.finish() } catch { self.error = "\(error)" }
+    run = nil
   }
 }
 
-/// Uploads the .aac files in start order, one at a time, retrying forever; a file is archived or deleted once the
+/// Uploads the .ogg files (.aac from the app before) in start order, one at a time, retrying forever; a file is archived or deleted once the
 /// server has it, so the directory is the offline queue.
 final class Uploader: Thread {
   var server = "", token = "", device = "phone", archive: URL?
@@ -249,10 +299,10 @@ final class Uploader: Thread {
 
   init(dir: URL) { self.dir = dir }
 
-  /// A queued file's start (unix ms) and sample count: <start>_<n>.aac, or <start>.aac for a piece a kill cut short.
+  /// A queued file's start (unix ms) and sample count: <start>_<n>.ogg, or <start>.ogg for a piece a kill cut short.
   static func piece(_ f: URL) -> (start: Int64, n: Int64?)? {
     let p = f.deletingPathExtension().lastPathComponent.split(separator: "_").map { Int64($0) }
-    guard f.pathExtension == "aac", (1...2).contains(p.count), let start = p[0] else { return nil }
+    guard ["ogg", "aac"].contains(f.pathExtension), (1...2).contains(p.count), let start = p[0] else { return nil }
     return (start, p.count == 2 ? p[1] : nil)
   }
 
@@ -269,7 +319,7 @@ final class Uploader: Thread {
       guard let f = Uploader.files(dir).first, let p = Uploader.piece(f) else { Thread.sleep(forTimeInterval: 1); continue }
       do {
         let code = try post("\(server)/api/chunks?device=\(enc(device))&start=\(p.start)" + (p.n.map { "&n=\($0)" } ?? ""),
-                            try Data(contentsOf: f), "audio/aac")
+                            try Data(contentsOf: f), f.pathExtension == "ogg" ? "audio/ogg" : "audio/aac")
         switch code {
         case 200: keep(f); sent += 1; fails = 0; note = nil
         case 400: try? FileManager.default.removeItem(at: f); note = "服务端无法解码一块，已丢弃"
