@@ -939,7 +939,7 @@ async def auth(request: Request, call_next):
 NO_CACHE = {"Cache-Control": "no-cache"}  # pages change with deploys; revalidate by etag instead of heuristic caching
 
 
-DIST = HERE / "static/dist"  # the web app (web/, built by web/deploy.sh)
+DIST = HERE / "static/dist"  # the web app (web/, built by deploy.sh)
 
 
 @app.get("/")
@@ -1444,8 +1444,9 @@ def main():
     args.dir.mkdir(parents=True, exist_ok=True)
     audio.DIR = args.dir
     db.open_db(DATA / "live.db")
-    state["commit"] = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--short", "HEAD"],
-                                     capture_output=True, text=True).stdout.strip()
+    commit = HERE / "COMMIT"  # written by deploy.sh: the server has no git checkout
+    state["commit"] = commit.read_text().strip() if commit.exists() else \
+        subprocess.run(["git", "-C", str(HERE), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
 
     @app.on_event("startup")
     async def start():
