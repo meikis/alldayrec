@@ -40,12 +40,15 @@ def unpad(x: np.ndarray) -> np.ndarray:
     return x[AAC_DELAY:len(x) - AAC_FRAME // 2] if len(x) > AAC_DELAY + AAC_FRAME else x
 
 
-def decode(body: bytes, aac: bool = False) -> np.ndarray | None:
-    """One piece's bytes as 16 kHz mono int16; None when ffmpeg cannot read them. aac: an ADTS piece, unpadded."""
+def decode(body: bytes, aac: bool = False, n: int | None = None) -> np.ndarray | None:
+    """One piece's bytes as 16 kHz mono int16; None when ffmpeg cannot read them. aac: an ADTS piece, cut to the n
+    samples its client wrote (exact), or unpadded when it did not say (older apps, a piece cut short by a kill)."""
     out = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "s16le", "-ac", "1", "-ar", str(SR), "pipe:1"], input=body, capture_output=True)
     if out.returncode or len(out.stdout) < 2 * SR // 10:
         return None
     x = np.frombuffer(out.stdout[:len(out.stdout) // 2 * 2], np.int16)
+    if aac and n:
+        return x[AAC_DELAY:AAC_DELAY + n]
     return unpad(x) if aac else x
 
 
@@ -72,19 +75,25 @@ def append(path: Path, body: bytes) -> int:
     return pos
 
 
-def save(device: str, start_ms: int, body: bytes, content_type: str) -> float | None:
-    """Keeps one uploaded piece (start_ms: its device time); returns its seconds, None when it is not audio.
-    It is on disk and in the index before this returns, so the client may delete its copy once told so. A piece sent
-    again replaces the row; its first copy stays in the hour file, unread."""
-    x = decode(body, aac=content_type.split(";")[0] == "audio/aac")
+def save(device: str, start_ms: int, body: bytes, content_type: str, n: int | None = None) -> float | None:
+    """Keeps one uploaded piece (start_ms: its device time, n: the samples its client wrote, when it says); returns
+    its seconds, None when it is not audio. It is on disk and in the index before this returns, so the client may
+    delete its copy once told so. A piece sent again (same device and start) is stored once: the first copy stays,
+    the resend only gets its seconds back."""
+    stored = lambda: db.conn().execute("SELECT seconds FROM pieces WHERE device = ? AND start_ms = ?", (device, start_ms)).fetchone()
+    if r := stored():
+        return r[0]
+    x = decode(body, aac=content_type.split(";")[0] == "audio/aac", n=n)
     if x is None:
         return None
     ext = {"audio/ogg": "ogg", "audio/webm": "webm", "audio/aac": "aac"}.get(content_type.split(";")[0], "bin")
     path = hour_file(device, start_ms, ext)
     with _append:
+        if r := stored():  # the same piece in two requests at once
+            return r[0]
         pos = append(path, body)
-        db.conn().execute("INSERT OR REPLACE INTO pieces VALUES (?, ?, ?, ?, ?, ?)",
-                          (device, start_ms, round(len(x) / SR, 3), str(path), pos, len(body)))
+        db.conn().execute("INSERT INTO pieces VALUES (?, ?, ?, ?, ?, ?, ?)",
+                          (device, start_ms, round(len(x) / SR, 3), str(path), pos, len(body), n))
     return len(x) / SR
 
 
@@ -93,7 +102,7 @@ def samples(p) -> np.ndarray | None:
     with open(DIR / p["path"], "rb") as f:
         f.seek(p["pos"])
         body = f.read(p["size"])
-    return decode(body, aac=p["path"].endswith(".aac"))
+    return decode(body, aac=p["path"].endswith(".aac"), n=p["n"])
 
 
 def queued(device: str) -> int:
@@ -172,12 +181,20 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     files = [p.relative_to(DIR).as_posix() for p in DIR.rglob("*.ogg")]
     assert files == ["chunks/phone/2026-10-02/10.ogg"], files
     size = (DIR / files[0]).stat().st_size
-    assert save("phone", T(1), tone(60), "audio/ogg") > 59, "sent again"
-    assert (DIR / files[0]).stat().st_size > size and db.conn().execute("SELECT count(*) FROM pieces").fetchone()[0] == 3, \
-        "a piece sent again is appended once more and replaces its row"
+    assert save("phone", T(1), tone(30), "audio/ogg") > 59, "sent again: the first copy's seconds"
+    assert (DIR / files[0]).stat().st_size == size and db.conn().execute("SELECT count(*) FROM pieces").fetchone()[0] == 3, \
+        "a piece sent again is stored once: the hour file does not grow, the row stays"
     x = np.arange(16000, dtype=np.int16)
     assert len(unpad(x)) == 16000 - AAC_DELAY - AAC_FRAME // 2 and unpad(x)[0] == AAC_DELAY, "AAC: the encoder's delay and half a frame go"
     assert len(unpad(x[:3000])) == 3000, "too short to hold both: left alone"
+    # an iPhone piece of n = 16333 samples (not whole frames). Apple's encoder puts 2112 samples before them; ffmpeg's
+    # puts 1024, so 1088 of silence in front stand in for the rest (aac_at, Apple's own, exists only on a Mac)
+    aac = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=f=440:r=16000", "-af", "atrim=end_sample=16333,adelay=1088S",
+                          "-c:a", "aac", "-b:a", "24k", "-f", "adts", "pipe:1"], capture_output=True, check=True).stdout
+    assert len(decode(aac)) == 19 * AAC_FRAME, len(decode(aac))  # 2112 + 16333, padded to whole frames
+    assert save("iphone", T(20), aac, "audio/aac", n=16333) == 16333 / SR
+    assert len(samples(db.conn().execute("SELECT * FROM pieces WHERE start_ms = ?", (T(20),)).fetchone())) == 16333
+    assert len(decode(aac, aac=True)) == len(decode(aac)) - AAC_DELAY - AAC_FRAME // 2, "no n: unpadded as before"
 
     async def take(after, n, device="phone"):
         out, s = [], stream(device, after)

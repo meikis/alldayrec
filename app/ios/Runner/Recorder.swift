@@ -44,7 +44,7 @@ enum Recorder {
     let bytes = q.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
     return ["running": slicer != nil, "uploading": uploader != nil && !q.isEmpty, "files": slicer?.files ?? NSNull(),
             "slice": slicer?.sliceS() ?? NSNull(), "error": slicer?.error ?? NSNull(), "sent": uploader?.sent ?? NSNull(),
-            "pending": q.count, "pendingBytes": bytes, "oldest": q.first.flatMap { Int64($0.deletingPathExtension().lastPathComponent) } ?? NSNull(),
+            "pending": q.count, "pendingBytes": bytes, "oldest": q.first.flatMap { Uploader.piece($0)?.start } ?? NSNull(),
             "note": uploader?.note ?? NSNull(), "interruptedAt": interruptedAt ?? NSNull()]
   }
 
@@ -227,11 +227,13 @@ final class Slicer {
     samples += Int64(b.frameLength)
   }
 
+  /// <start>.part.aac becomes <start>_<n>.aac, n the samples written into it: the server cuts the decoded piece to
+  /// exactly those (AAC adds 2112 in front and pads the end to whole frames; ADTS has no room to say so).
   private func closeFile() {
     guard let p = part else { return }
     file = nil  // releasing the AVAudioFile flushes and closes it
     part = nil
-    try? FileManager.default.moveItem(at: p, to: p.deletingLastPathComponent().appendingPathComponent(p.lastPathComponent.replacingOccurrences(of: ".part.aac", with: ".aac")))
+    try? FileManager.default.moveItem(at: p, to: p.deletingLastPathComponent().appendingPathComponent(p.lastPathComponent.replacingOccurrences(of: ".part.aac", with: "_\(samples - fileStart).aac")))
     files += 1
   }
 }
@@ -247,19 +249,26 @@ final class Uploader: Thread {
 
   init(dir: URL) { self.dir = dir }
 
+  /// A queued file's start (unix ms) and sample count: <start>_<n>.aac, or <start>.aac for a piece a kill cut short.
+  static func piece(_ f: URL) -> (start: Int64, n: Int64?)? {
+    let p = f.deletingPathExtension().lastPathComponent.split(separator: "_").map { Int64($0) }
+    guard f.pathExtension == "aac", (1...2).contains(p.count), let start = p[0] else { return nil }
+    return (start, p.count == 2 ? p[1] : nil)
+  }
+
   static func files(_ dir: URL) -> [URL] {
     ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
-      .filter { $0.pathExtension == "aac" && Int64($0.deletingPathExtension().lastPathComponent) != nil }
-      .sorted { $0.lastPathComponent < $1.lastPathComponent }
+      .compactMap { f in piece(f).map { (f, $0.start) } }
+      .sorted { $0.1 < $1.1 }.map { $0.0 }
   }
 
   static func pending(_ dir: URL) -> Int { files(dir).count }
 
   override func main() {
     while true {
-      guard let f = Uploader.files(dir).first else { Thread.sleep(forTimeInterval: 1); continue }
+      guard let f = Uploader.files(dir).first, let p = Uploader.piece(f) else { Thread.sleep(forTimeInterval: 1); continue }
       do {
-        let code = try post("\(server)/api/chunks?device=\(enc(device))&start=\(f.deletingPathExtension().lastPathComponent)",
+        let code = try post("\(server)/api/chunks?device=\(enc(device))&start=\(p.start)" + (p.n.map { "&n=\($0)" } ?? ""),
                             try Data(contentsOf: f), "audio/aac")
         switch code {
         case 200: keep(f); sent += 1; fails = 0; note = nil
@@ -283,7 +292,7 @@ final class Uploader: Thread {
     guard let archive else { try? fm.removeItem(at: f); return }
     let fmt = DateFormatter()
     fmt.locale = Locale(identifier: "en_US_POSIX"); fmt.dateFormat = "yyyy-MM-dd"
-    let day = archive.appendingPathComponent(fmt.string(from: Date(timeIntervalSince1970: Double(f.deletingPathExtension().lastPathComponent)! / 1000)))
+    let day = archive.appendingPathComponent(fmt.string(from: Date(timeIntervalSince1970: Double(Uploader.piece(f)!.start) / 1000)))
     do {
       try fm.createDirectory(at: day, withIntermediateDirectories: true)
       try? fm.removeItem(at: day.appendingPathComponent(f.lastPathComponent))

@@ -973,11 +973,12 @@ async def apk():
 
 
 @app.post("/api/chunks")
-async def chunk(request: Request, device: str, start: int):
-    """One self-contained audio file (the apps' Opus or AAC pieces), `start` its device time in unix ms. Kept on disk (also
+async def chunk(request: Request, device: str, start: int, n: int | None = None):
+    """One self-contained audio file (the apps' Opus or AAC pieces), `start` its device time in unix ms, `n` the 16 kHz
+    samples the client wrote into it (the iPhone's AAC: the decoder adds some at both ends). Kept on disk (also
     for playback) and queued; the device's pipeline takes its pieces in time order at the pace finalization keeps up
     with, so a client back from an outage sends its whole backlog at once, whatever other devices are doing."""
-    seconds = await asyncio.to_thread(audio.save, device, start, await request.body(), request.headers.get("content-type", ""))
+    seconds = await asyncio.to_thread(audio.save, device, start, await request.body(), request.headers.get("content-type", ""), n)
     if seconds is None:
         raise HTTPException(400, "could not decode")
     state["chunks"] = {"device": device, "at": time.time()}
