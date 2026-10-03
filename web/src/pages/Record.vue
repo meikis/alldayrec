@@ -27,7 +27,7 @@ let rec: MediaRecorder | null = null,
   stream: MediaStream | null = null,
   sending = false,
   fails = 0;
-const queue: { blob: Blob; start: number }[] = [];
+const queue: { blob: Blob; start: number; device: string }[] = [];
 const stat = computed(() =>
   recording.value
     ? `录音中 · ${source.value === "ble" ? `收到 ${packets.value} 包 · ` : ""}已传 ${sent.value} 块 · 待传 ${queued.value}`
@@ -56,10 +56,10 @@ async function drain() {
   if (sending) return;
   sending = true;
   while (queue.length) {
-    const { blob, start } = queue[0];
+    const { blob, start, device: dev } = queue[0];
     try {
       await send(
-        `/api/chunks?device=${encodeURIComponent(device.value)}&start=${start}`,
+        `/api/chunks?device=${encodeURIComponent(dev)}&start=${start}`,
         blob,
         blob.type.split(";")[0],
       );
@@ -79,10 +79,12 @@ function enqueue(blob: Blob, start: number) {
   if (lastPiece.value) URL.revokeObjectURL(lastPiece.value);
   lastPiece.value = URL.createObjectURL(blob); // the newest piece, to listen to on the page
   if (!upload.value) return;
-  queue.push({ blob, start });
+  queue.push({ blob, start, device: target() });
   queued.value = queue.length;
   void drain();
 }
+// the BLE recorder's audio goes up as the board's own name (LR-P1-BDAE), whatever the device field says; cleaned as the app does
+const target = () => (source.value === "ble" && ble?.name?.replace(/[^A-Za-z0-9._-]/g, "_")) || device.value;
 function piece(): MediaRecorder {
   const r = new MediaRecorder(stream!, {
       mimeType: "audio/webm;codecs=opus",
@@ -161,7 +163,7 @@ async function connect() {
   ch.oncharacteristicvaluechanged = onPacket; // assigned, not added: a reconnect hands back the same object
   await ch.startNotifications();
   lastSeq = -1;
-  note(`已连上 ${ble!.name}，Opus 16 kHz`);
+  note(`已连上 ${ble!.name}，Opus 16 kHz，按设备名 ${target()} 上传`);
 }
 async function onDrop() {
   cut();
@@ -199,7 +201,8 @@ async function start() {
   }
 }
 async function stop() {
-  const at = Date.now();
+  const at = Date.now(),
+    dev = target();
   recording.value = false;
   if (rec) {
     const r = rec;
@@ -216,7 +219,7 @@ async function stop() {
   await sleep(500);
   while (queue.length || sending) await sleep(500);
   if (upload.value)
-    await send(`/api/chunks/end?device=${encodeURIComponent(device.value)}&t=${at}`).catch((e) =>
+    await send(`/api/chunks/end?device=${encodeURIComponent(dev)}&t=${at}`).catch((e) =>
       note("结束信号失败 " + e.message),
     );
   note("已停止");

@@ -80,6 +80,8 @@ class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: I
     @Volatile private var running = false
     @Volatile var files = 0
     @Volatile var error: String? = null
+    /** The BLE recorder's name: pieces carry it in their file name (start@name.ogg) and go up as that device. */
+    @Volatile var tag: String? = null
     private lateinit var thread: Thread
     private val sr = 16000
 
@@ -112,7 +114,7 @@ class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: I
                 (state != lastState && state < fileSlice && ptsUs - fileStartUs >= state * 1_000_000L))) closeFile()
         lastState = state
         if (muxer == null) {
-            part = File(dir, "${wallMs + ptsUs / 1000}.part")
+            part = File(dir, "${wallMs + ptsUs / 1000}${tag?.let { "@$it" } ?: ""}.part")
             muxer = MediaMuxer(part!!.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_OGG).also {
                 track = it.addTrack(format!!)
                 it.start()

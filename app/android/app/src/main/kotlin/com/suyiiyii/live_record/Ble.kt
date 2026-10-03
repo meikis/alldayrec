@@ -55,7 +55,7 @@ object Ble {
  *  puts every notify on `out`. A dropped link is reconnected with autoConnect, which waits for the device to come back
  *  in range; each drop puts a null packet so the slicer ends the run. Permissions are checked before the service starts. */
 @SuppressLint("MissingPermission")
-class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packet>) {
+class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packet>, private val onName: (String) -> Unit) {
     @Volatile var state = "正在找录音设备"
     @Volatile private var on = true
     private val adapter = ctx.getSystemService(BluetoothManager::class.java).adapter
@@ -104,6 +104,11 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
         override fun onScanResult(type: Int, r: ScanResult) {
             adapter.bluetoothLeScanner?.stopScan(this)
             Log.i("live-record", "ble found ${r.device.address} ${r.scanRecord?.deviceName} rssi=${r.rssi}")
+            // LR-P1-BDAE: the board's own name is the device its audio goes up as; the advertisement alone has only LR-P1,
+            // the full name comes in the scan response (or the cached GAP name). Made file-name safe here, once: the pieces and
+            // the end signal go up under the same name (the web gateway cleans it the same way)
+            listOfNotNull(r.scanRecord?.deviceName, r.device.name).maxByOrNull { it.length }
+                ?.let { onName(it.replace(Regex("[^A-Za-z0-9._-]"), "_")) }
             if (on) connect(r.device, false)
         }
         override fun onScanFailed(code: Int) = retry("扫描失败 $code") { scan() }

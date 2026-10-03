@@ -41,7 +41,7 @@ class RecorderService : Service() {
             return mapOf(
                 "running" to (slicer != null), "uploading" to (uploader != null), "files" to slicer?.files, "slice" to slicer?.sliceS(),
                 "error" to slicer?.error, "sent" to uploader?.sent, "note" to uploader?.note,
-                "pending" to q.size, "pendingBytes" to q.sumOf { it.length() }, "oldest" to q.firstOrNull()?.nameWithoutExtension?.toLongOrNull(),
+                "pending" to q.size, "pendingBytes" to q.sumOf { it.length() }, "oldest" to q.firstOrNull()?.let(Uploader::startMs),
                 "interruptedAt" to if (interruptedAt > 0) interruptedAt else null, "link" to link?.state)
         }
     }
@@ -103,8 +103,8 @@ class RecorderService : Service() {
                 it.screenOff = !(getSystemService(POWER_SERVICE) as PowerManager).isInteractive
                 it.start()
             }
-            if (packets != null) link = BleLink(this, packets).also { it.start() }
-            prefs.edit().remove("endAt").apply()  // a new recording carries on the conversation: no end for the old stop
+            if (packets != null) link = BleLink(this, packets) { slicer?.tag = it }.also { it.start() }
+            prefs.edit().remove("endAt").remove("endDevice").apply()  // a new recording carries on the conversation: no end for the old stop
             ensureUploader(prefs, dir)
         }
         return START_STICKY
@@ -120,7 +120,7 @@ class RecorderService : Service() {
     /** The microphone goes now; the queue keeps uploading, the end signal goes after its last piece. */
     private fun stopRecording(prefs: android.content.SharedPreferences, dir: File) {
         val at = System.currentTimeMillis()
-        prefs.edit().putBoolean("active", false).putLong("endAt", at).apply()  // kept: a kill before the queue empties still ends it
+        prefs.edit().putBoolean("active", false).putLong("endAt", at).putString("endDevice", slicer?.tag).apply()  // kept: a kill before the queue empties still ends it
         link?.stop(); link = null
         slicer?.stop(); slicer = null
         uploadOnly(prefs, dir, at)
@@ -141,8 +141,8 @@ class RecorderService : Service() {
             }
             draining = false
             if (slicer != null) return@Thread  // recording again: the service carries on as before
-            endAt?.let { u.end(it) }  // the server may close the conversation now
-            prefs.edit().remove("endAt").apply()
+            endAt?.let { u.end(it, prefs.getString("endDevice", null)) }  // the server may close the conversation now
+            prefs.edit().remove("endAt").remove("endDevice").apply()
             u.running = false; uploader = null
             stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
         }.start()
@@ -185,15 +185,18 @@ class Uploader(private val dir: File, private val server: String, private val to
         const val BATCH_GAP_MS = 1500L  // starts further apart than this are not one stretch (only 1 s pieces get batched)
         /** The pieces waiting, oldest first: the directory is the queue. */
         fun queue(dir: File) = dir.listFiles { f -> f.name.endsWith(".ogg") }?.sortedBy { it.name } ?: emptyList()
+        /** A piece's file name is its start (ms) and, for the BLE recorder, @ its name: start@LR-P1-BDAE.ogg */
+        fun startMs(f: File) = f.nameWithoutExtension.substringBefore('@').toLong()
+        fun deviceOf(f: File) = f.nameWithoutExtension.substringAfter('@', "")
     }
 
     private fun files() = queue(dir)
 
-    /** The oldest pieces that follow each other without a gap (a stop or a kill leaves one), at most MAX_BATCH. */
+    /** The oldest pieces of one device that follow each other without a gap (a stop or a kill leaves one), at most MAX_BATCH. */
     private fun batch(q: List<File>): List<File> {
         val out = mutableListOf(q[0])
         for (f in q.drop(1)) {
-            if (out.size >= MAX_BATCH || f.nameWithoutExtension.toLong() - out.last().nameWithoutExtension.toLong() > BATCH_GAP_MS) break
+            if (out.size >= MAX_BATCH || startMs(f) - startMs(out.last()) > BATCH_GAP_MS || deviceOf(f) != deviceOf(out[0])) break
             out += f
         }
         return out
@@ -205,7 +208,7 @@ class Uploader(private val dir: File, private val server: String, private val to
             if (q.isEmpty()) { sleep(200); continue }
             val b = batch(q)
             try {
-                val code = post("$server/api/chunks?device=${enc(device)}&start=${b[0].nameWithoutExtension}",
+                val code = post("$server/api/chunks?device=${enc(deviceOf(b[0]).ifEmpty { device })}&start=${startMs(b[0])}",
                                 b.fold(ByteArray(0)) { acc, f -> acc + f.readBytes() }, "audio/ogg")
                 when {
                     code == 200 -> { b.forEach(::keep); sent += b.size; fails = 0; note = null }
@@ -220,13 +223,13 @@ class Uploader(private val dir: File, private val server: String, private val to
         }
     }
 
-    fun end(atMs: Long) {
-        try { post("$server/api/chunks/end?device=${enc(device)}&t=$atMs", ByteArray(0), null) } catch (e: Exception) { note = "结束信号失败 ${e.message}" }
+    fun end(atMs: Long, bleName: String? = null) {
+        try { post("$server/api/chunks/end?device=${enc(bleName ?: device)}&t=$atMs", ByteArray(0), null) } catch (e: Exception) { note = "结束信号失败 ${e.message}" }
     }
 
     private fun keep(f: File) {
         if (archive == null) { f.delete(); return }
-        val day = File(archive, SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(f.nameWithoutExtension.toLong()))).apply { mkdirs() }
+        val day = File(archive, SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(startMs(f)))).apply { mkdirs() }
         try { f.copyTo(File(day, f.name), overwrite = true) } catch (e: Exception) { note = "归档失败 ${e.message}" }  // internal -> external: no rename
         f.delete()
     }
