@@ -4,8 +4,8 @@
 #                                     Expansion Board Base for XIAO, SD CS on D2 (tests only)
 #   ./lr.sh build promicro            ProMicro nRF52840 (nice!nano clone) + external PDM mic and SD module
 #   ./lr.sh flash [sdmod|expansion|promicro]   a running firmware is sent to the UF2 bootloader by a 1200 bps touch
-#   ./lr.sh pkg [sdmod|promicro]      the build as a DFU package (build/lr-V/lr-V.zip) for lr_dfu.py, copied into the
-#                                     Android app's assets as <model>.zip
+#   ./lr.sh pkg [sdmod|promicro]      the build as a DFU package (build/lr-V/lr-V.zip) for lr_dfu.py; lr_release.py
+#                                     builds, packs and uploads it to the server, where the app finds it
 set -euo pipefail
 D="$(cd "$(dirname "$0")" && pwd)"
 V=${2:-sdmod}
@@ -28,8 +28,9 @@ if [ "${LR_LOG:-}" = 1 ]; then
   V="$V-log"
 fi
 UF2="$D/build/lr-$V/zephyr/zephyr.uf2"
-# the firmware revision clients read (DIS) and compare with the package they carry: commit date and hash, + if dirty
-FWV="$(git -C "$D" log -1 --format=%cd --date=format:%Y%m%d)-$(git -C "$D" rev-parse --short HEAD)$(git -C "$D" diff --quiet HEAD -- . || echo +)"
+# the firmware revision clients read (DIS) and compare with the server's newest package: commit time and hash, + if
+# dirty; a later commit sorts later as text (the older date-only form sorts before a same-day one)
+FWV="$(git -C "$D" log -1 --format=%cd --date=format:%Y%m%d.%H%M%S)-$(git -C "$D" rev-parse --short HEAD)$(git -C "$D" diff --quiet HEAD -- . || echo +)"
 EXTRA+=("-DCONFIG_BT_DIS_FW_REV_STR=\"$FWV\"")
 
 case ${1:-} in
@@ -45,11 +46,6 @@ pkg)
   [ -f "$UF2" ] || { echo "build first: $UF2 missing" >&2; exit 1; }
   # sd-req 0xFFFE: any SoftDevice (the XIAO's S140 7.3.0, the ProMicro's 6.1.1); the app does not use it
   uvx adafruit-nrfutil dfu genpkg --dev-type 0x0052 --sd-req 0xFFFE --application "${UF2%.uf2}.hex" "$D/build/lr-$V/lr-$V.zip"
-  # the Android app carries it (assets/firmware, not in git): build the app after this to ship this firmware
-  M=$(sed -n 's/^CONFIG_BT_DIS_MODEL="\(.*\)"/\1/p' "$D/build/lr-$V/zephyr/.config")
-  A="$D/../../app/android/app/src/main/assets/firmware"
-  R=$(sed -n 's/^CONFIG_BT_DIS_FW_REV_STR="\(.*\)"/\1/p' "$D/build/lr-$V/zephyr/.config")  # as built, not as now
-  mkdir -p "$A" && cp "$D/build/lr-$V/lr-$V.zip" "$A/$M.zip" && echo "$R" > "$A/$M.txt" && echo "app: $A/$M.zip ($R)"
   ;;
 flash)
   [ -f "$UF2" ] || { echo "build first: $UF2 missing" >&2; exit 1; }

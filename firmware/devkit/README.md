@@ -25,6 +25,17 @@ nrfutil install sdk-manager && nrfutil sdk-manager install --ncs-version v2.7.0 
 
 固件第一次刷进（或卡死）时才需要双击 reset 进 bootloader。
 
+## 发布到 App 在线升级
+
+```bash
+LR_TOKEN=<服务器 AUTH_TOKEN> LR_FIRMWARE_TOKEN=<服务器 FIRMWARE_TOKEN> \
+  uv run --no-project python lr_release.py sdmod promicro --server https://lr.example.com --notes "改了什么"
+```
+
+逐个变体构建、打包、上传；型号取自那次构建自己的 `.config`（`CONFIG_BT_DIS_MODEL`），只收 sdmod→LR-X1、promicro→LR-P1。
+只发布已在 origin/main 上、本目录无未提交改动的提交。App 录音设备页「检查更新」按型号取服务器上最新的一个，用户点了才升级。
+固件版本号（DIS Firmware Revision）是 `YYYYMMDD.HHMMSS-<短哈希>`，取提交时间，按文本比较即新旧；本目录有未提交改动时末尾加 `+`，这种构建服务器不收。
+
 ## 接线（sdmod）
 
 模块（3.3V CS MOSI CLK MISO GND）沿 XIAO 右排对齐：3V3–3.3V、D10–CS、D9–MOSI、D8–CLK、D7–MISO，GND 飞线回右排 GND。

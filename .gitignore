@@ -4,4 +4,3 @@ __pycache__/
 *.pyc
 data/
 server/static/dist/
-app/android/app/src/main/assets/firmware/

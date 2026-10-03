@@ -12,6 +12,8 @@ import 'package:record/record.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import 'firmware.dart';
+
 // piece seconds per app state; the server's /api/client-config overrides these (kept from its last answer)
 const defaultSlices = {'foreground': 1, 'background': 20, 'screenOff': 60};
 const recordingRed = Color(0xffc62828);
@@ -90,10 +92,9 @@ class Recorder {
   static Future<void> foreground(bool on) => _ch.invokeMethod('foreground', {'on': on});
   static Future<Map> status() async => (await _ch.invokeMethod('status')) as Map;
   static Future<String> deviceName() async => (await _ch.invokeMethod('deviceName')) as String;
-  // the BLE recorder (Android): which one is bound, what it last said, the firmware this build carries
+  // the BLE recorder (Android): which one is bound, what it last said, how a firmware update goes (firmware.dart)
   static Future<Map> recorder() async => (await _ch.invokeMethod('recorder')) as Map;
   static Future<void> unbind() => _ch.invokeMethod('unbind');
-  static Future<void> dfu() => _ch.invokeMethod('dfu');
   static Future<void> usbDisk(bool on) => _ch.invokeMethod('usbDisk', {'on': on});
   static bool hold = false;  // the link is taken down on purpose (unbind, firmware update): do not bring it back meanwhile
 
@@ -802,7 +803,7 @@ class _QrScanPageState extends State<QrScanPage> {
 }
 
 /// The BLE recorder (Android): which one is bound and, as last read over the link, its battery, card, offline sync
-/// and firmware; the card as a USB disk on a computer, a firmware update when this build carries a newer one, unbinding.
+/// and firmware; the card as a USB disk on a computer, a firmware update from the server (firmware.dart), unbinding.
 class RecorderPage extends StatefulWidget {
   final bool visible;
   const RecorderPage({super.key, required this.visible});
@@ -859,9 +860,6 @@ class _RecorderPageState extends State<RecorderPage> {
     final name = r['name'] as String?, model = r['model'] as String?;
     final hw = (st['hw'] as Map?) ?? {};
     final fw = (hw['fw'] ?? r['fw']) as String?;
-    final bundled = (r['bundled'] as Map?)?[model] as String?;
-    // revisions are date-hash: a later date is newer; the same one is not an update
-    final newer = bundled != null && (fw == null || bundled.compareTo(fw) > 0);
     final recording = st['running'] == true, linked = recording && hw.isNotEmpty;
     final link = '${st['link'] ?? ''}';
     final store = hw['store'] as int?, free = (hw['free_kb'] as num?) ?? 0, total = (hw['total_kb'] as num?) ?? 0;
@@ -967,20 +965,7 @@ class _RecorderPageState extends State<RecorderPage> {
         ])),
         // firmware and binding
         section('设备管理', Column(children: [
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.memory_rounded, color: cs.onSurfaceVariant),
-            title: const Text('固件版本'),
-            subtitle: Text([fw ?? '—', if (newer) '可升级到 $bundled', ?dfu].join('\n')),
-            trailing: newer
-                ? FilledButton.tonalIcon(
-                    onPressed: () => _call(() => Recorder.withoutLink(Recorder.dfu)),
-                    icon: const Icon(Icons.system_update_alt_rounded, size: 18),
-                    label: const Text('升级'))
-                : null,
-          ),
-          if (newer)
-            Text('升级时先拔掉录音设备的 USB；升级期间暂停同步', style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+          FirmwareTile(model: model, fw: fw, dfu: dfu, dfuBusy: st['dfuBusy'] == true, battery: linked ? battery : null),
           const Divider(height: 20),
           ListTile(
             contentPadding: EdgeInsets.zero,

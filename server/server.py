@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 
 import audio
 import db
+import firmware
 import live
 import speakers
 import summary
@@ -318,6 +319,8 @@ def merge_drafts(finals: list[dict], drafts: list[dict], final_to: dict[str, str
 
 
 app = FastAPI()
+firmware.DIR = DATA / "firmware"
+app.include_router(firmware.router)  # the recorders' firmware packages
 clients: set[WebSocket] = set()
 state = {"chunks": None, "events": [], "commit": "", "devices": {}, "embed": None, "dias": [],
          "watch_until": 0.0, "wake_at": 0.0}  # devices: one pipeline's state each; watch: a page in front wants the live analysis

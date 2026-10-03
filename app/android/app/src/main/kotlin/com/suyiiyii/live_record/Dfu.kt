@@ -9,21 +9,14 @@ import no.nordicsemi.android.dfu.DfuServiceListenerHelper
 import java.io.File
 
 /** Firmware updates over Bluetooth with Nordic's DFU library: the app asks the running firmware to reboot into the
- *  Adafruit bootloader (legacy DFU, as firmware/devkit/lr_dfu.py does) and sends the package for its board, which
- *  ships in the app (assets/firmware/<model>.zip, version in <model>.txt, from `lr.sh pkg`). Only while not recording:
- *  the recorder takes one connection at a time. */
+ *  Adafruit bootloader (legacy DFU, as firmware/devkit/lr_dfu.py does) and sends the package for its model, which
+ *  the recorder page downloaded from the server (firmware.dart, server/firmware.py). Only while not recording: the
+ *  recorder takes one connection at a time. */
 object Dfu {
     @Volatile var state: String? = null
     @Volatile var busy = false  // from start until done, aborted or failed: the app keeps the recorder link down
 
-    /** The packages this build carries: model (LR-X1, LR-P1) -> firmware revision. */
-    fun bundled(ctx: Context): Map<String, String> =
-        (ctx.assets.list("firmware") ?: emptyArray()).filter { it.endsWith(".txt") }
-            .associate { it.removeSuffix(".txt") to ctx.assets.open("firmware/$it").bufferedReader().readText().trim() }
-
-    fun start(ctx: Context, address: String, name: String, model: String) {
-        val zip = File(ctx.cacheDir, "$model.zip")
-        ctx.assets.open("firmware/$model.zip").use { i -> zip.outputStream().use { i.copyTo(it) } }
+    fun start(ctx: Context, address: String, name: String, zip: File) {
         DfuServiceInitiator.createDfuNotificationChannel(ctx)
         DfuServiceListenerHelper.registerProgressListener(ctx, object : DfuProgressListenerAdapter() {
             override fun onDeviceConnecting(a: String) { state = "正在连接录音设备" }
@@ -41,7 +34,7 @@ object Dfu {
             }
         })
         state = "准备升级"; busy = true
-        android.util.Log.i("live-record", "dfu $model to $address")
+        android.util.Log.i("live-record", "dfu ${zip.name} to $address")
         DfuServiceInitiator(address).setDeviceName(name).setKeepBond(true)
             .setForceDfu(false)
             .setForceScanningForNewAddressInLegacyDfu(true)  // the bootloader advertises as AdaDFU on another address

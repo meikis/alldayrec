@@ -67,10 +67,10 @@ class MainActivity : FlutterActivity() {
                 }
                 "status" -> result.success(RecorderService.status(File(filesDir, "chunks")))
                 "deviceName" -> result.success(Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME) ?: Build.MODEL)  // the name in the system settings
-                "recorder" -> {  // the bound BLE recorder, what it last said, and the firmware this app carries
+                "recorder" -> {  // the bound BLE recorder, what it last said, and how a firmware update goes
                     val p = getSharedPreferences("recorder", MODE_PRIVATE)
                     result.success(mapOf("name" to p.getString("bleName", null), "model" to p.getString("bleModel", null),
-                        "fw" to p.getString("bleFw", null), "bundled" to Dfu.bundled(this), "dfu" to Dfu.state))
+                        "fw" to p.getString("bleFw", null), "dfu" to Dfu.state))
                 }
                 "usbDisk" -> {  // the connected board's card to the computer's USB, or back
                     val link = RecorderService.link
@@ -81,12 +81,20 @@ class MainActivity : FlutterActivity() {
                     getSharedPreferences("recorder", MODE_PRIVATE).edit().remove("bleName").remove("bleAddress").remove("bleModel").remove("bleFw").apply()
                     result.success(null)
                 }
-                "dfu" -> {
+                "dfu" -> {  // a package from the server for `model`: only onto a recorder that said it is that model
                     val p = getSharedPreferences("recorder", MODE_PRIVATE)
                     val addr = p.getString("bleAddress", null); val model = p.getString("bleModel", null)
-                    if (RecorderService.slicer != null) result.error("busy", "录音设备的连接还没断开，稍后再试", null)
-                    else if (addr == null || model == null || model !in Dfu.bundled(this)) result.error("none", "还没连过录音设备，或没有它的固件", null)
-                    else { Dfu.start(this, addr, p.getString("bleName", null) ?: model, model); result.success(null) }
+                    val want = call.argument<String>("model"); val zip = call.argument<ByteArray>("zip")!!
+                    val sha = java.security.MessageDigest.getInstance("SHA-256").digest(zip).joinToString("") { "%02x".format(it) }
+                    if (Dfu.busy) result.error("busy", "正在升级", null)
+                    else if (RecorderService.slicer != null) result.error("busy", "录音设备的连接还没断开，稍后再试", null)
+                    else if (addr == null || model == null) result.error("none", "还没连上过录音设备，不知道它的型号", null)
+                    else if (want != model) result.error("model", "这个固件是 $want 的，录音设备是 $model，不能刷", null)
+                    else if (sha != call.argument<String>("sha256")) result.error("sha256", "固件下载不完整，再试一次", null)
+                    else {
+                        val f = File(cacheDir, "$model.zip").apply { writeBytes(zip) }
+                        Dfu.start(this, addr, p.getString("bleName", null) ?: model, f); result.success(null)
+                    }
                 }
                 else -> result.notImplemented()
             }
