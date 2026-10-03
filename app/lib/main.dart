@@ -26,6 +26,7 @@ void main() {
 
 class Settings {
   String server = 'https://lr.example.com', token = '', device = 'phone';
+  String source = 'mic';  // 'mic' or 'ble' (the BLE recorder; Android only)
   bool archive = true;
   static Future<Settings> load() async {
     final p = await SharedPreferences.getInstance(), s = Settings();
@@ -33,6 +34,7 @@ class Settings {
     s.token = p.getString('token') ?? '';
     s.device = p.getString('device') ?? s.device;
     s.archive = p.getBool('archive') ?? true;
+    s.source = Platform.isAndroid ? p.getString('source') ?? 'mic' : 'mic';
     return s;
   }
 
@@ -42,6 +44,7 @@ class Settings {
     await p.setString('token', token);
     await p.setString('device', device);
     await p.setBool('archive', archive);
+    await p.setString('source', source);
   }
 }
 
@@ -79,7 +82,7 @@ class Slices {
 class Recorder {
   static const _ch = MethodChannel('live_record/recorder');
   static Future<void> start(Settings s, Map<String, int> slices) => _ch.invokeMethod('start', {
-        'server': s.server, 'token': s.token, 'device': s.device, 'archive': s.archive, ...slices});
+        'server': s.server, 'token': s.token, 'device': s.device, 'archive': s.archive, 'source': s.source, ...slices});
   static Future<void> slices(Map<String, int> slices) => _ch.invokeMethod('slices', slices);  // a running recorder takes them at once
   static Future<void> stop() => _ch.invokeMethod('stop');
   static Future<void> upload() => _ch.invokeMethod('upload');  // pieces left and not recording: send them anyway
@@ -174,7 +177,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   }
 
   Future<void> _start() async {
-    if (!await AudioRecorder().hasPermission()) return setState(() => note = '没有麦克风权限');
+    if (settings!.source == 'mic' && !await AudioRecorder().hasPermission()) return setState(() => note = '没有麦克风权限');
     note = '';
     try {
       await Recorder.start(settings!, await Slices.fetch(settings!) ?? await Slices.cached());
@@ -253,6 +256,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
       detail = '等最后 ${s['pending'] ?? 0} 块传完';
     } else if (running) {
       headline = '录音中 · ${s['slice']} 秒一块';
+      if (s['link'] != null) headline += ' · ${s['link']}';
       detail = '已传 ${s['sent']} · 待传 ${s['pending']}';
     } else {
       headline = note.isEmpty ? '未在录音' : note;
@@ -439,6 +443,7 @@ class _SettingsPageState extends State<SettingsPage> {
       token = TextEditingController(text: widget.settings.token),
       device = TextEditingController(text: widget.settings.device);
   late bool archive = widget.settings.archive;
+  late String source = widget.settings.source;
   bool showToken = false;
 
   Future<void> _save() async {
@@ -448,6 +453,7 @@ class _SettingsPageState extends State<SettingsPage> {
     s.token = token.text.trim();
     s.device = device.text.trim().isEmpty ? 'phone' : device.text.trim();
     s.archive = archive;
+    s.source = source;
     await widget.onSaved();
   }
 
@@ -477,6 +483,18 @@ class _SettingsPageState extends State<SettingsPage> {
       TextField(controller: device,
           decoration: const InputDecoration(labelText: '设备名', helperText: '服务端按设备名区分录音来源', border: OutlineInputBorder())),
       section('录音'),
+      if (Platform.isAndroid)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value: 'mic', icon: Icon(Icons.mic_none), label: Text('手机麦克风')),
+              ButtonSegment(value: 'ble', icon: Icon(Icons.bluetooth), label: Text('BLE 录音硬件')),
+            ],
+            selected: {source},
+            onSelectionChanged: (v) => setState(() => source = v.first),
+          ),
+        ),
       Card.outlined(
         margin: EdgeInsets.zero,
         child: Column(children: [

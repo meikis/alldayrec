@@ -21,6 +21,7 @@ import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.LinkedBlockingQueue
 
 /** Foreground service that owns recording and uploading, so neither needs the Flutter UI alive. Uploading does not
  *  depend on recording: after a stop (or a launch, or a kill, with pieces left) the service stays up as a dataSync
@@ -32,6 +33,7 @@ class RecorderService : Service() {
         const val CHANNEL = "live_record"
         @Volatile var slicer: Slicer? = null
         @Volatile var uploader: Uploader? = null
+        @Volatile var link: BleLink? = null  // the BLE recorder, when it is the source instead of the microphone
         @Volatile var interruptedAt: Long = 0
         @Volatile var foregroundApp = true
         fun status(dir: File): Map<String, Any?> {
@@ -40,7 +42,7 @@ class RecorderService : Service() {
                 "running" to (slicer != null), "uploading" to (uploader != null), "files" to slicer?.files, "slice" to slicer?.sliceS(),
                 "error" to slicer?.error, "sent" to uploader?.sent, "note" to uploader?.note,
                 "pending" to q.size, "pendingBytes" to q.sumOf { it.length() }, "oldest" to q.firstOrNull()?.nameWithoutExtension?.toLongOrNull(),
-                "interruptedAt" to if (interruptedAt > 0) interruptedAt else null)
+                "interruptedAt" to if (interruptedAt > 0) interruptedAt else null, "link" to link?.state)
         }
     }
 
@@ -81,7 +83,7 @@ class RecorderService : Service() {
         }
         if (intent?.extras != null) {
             prefs.edit().apply {
-                for (k in listOf("server", "token", "device")) putString(k, intent.getStringExtra(k))
+                for (k in listOf("server", "token", "device", "source")) putString(k, intent.getStringExtra(k))
                 for (k in listOf("foreground", "background", "screenOff")) putInt(k, intent.getIntExtra(k, 20))
                 putBoolean("archive", intent.getBooleanExtra("archive", true))
             }.apply()
@@ -90,15 +92,18 @@ class RecorderService : Service() {
             return START_STICKY
         }
         prefs.edit().putBoolean("active", true).putInt("pid", Process.myPid()).apply()
-        startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        val ble = prefs.getString("source", "mic") == "ble"
+        startForeground(1, notification(), if (ble) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         if (slicer == null) {
             dir.listFiles { f -> f.name.endsWith(".part") }?.forEach { it.renameTo(File(it.path.removeSuffix(".part") + ".ogg")) }  // cut short by a kill: still valid Ogg
             Log.i("live-record", "starting slicer")
-            slicer = Slicer(dir, prefs.getInt("foreground", 5), prefs.getInt("background", 20), prefs.getInt("screenOff", 60)).also {
+            val packets = if (ble) LinkedBlockingQueue<Ble.Packet>() else null
+            slicer = Slicer(dir, prefs.getInt("foreground", 5), prefs.getInt("background", 20), prefs.getInt("screenOff", 60), packets).also {
                 it.foreground = foregroundApp
                 it.screenOff = !(getSystemService(POWER_SERVICE) as PowerManager).isInteractive
                 it.start()
             }
+            if (packets != null) link = BleLink(this, packets).also { it.start() }
             prefs.edit().remove("endAt").apply()  // a new recording carries on the conversation: no end for the old stop
             ensureUploader(prefs, dir)
         }
@@ -116,6 +121,7 @@ class RecorderService : Service() {
     private fun stopRecording(prefs: android.content.SharedPreferences, dir: File) {
         val at = System.currentTimeMillis()
         prefs.edit().putBoolean("active", false).putLong("endAt", at).apply()  // kept: a kill before the queue empties still ends it
+        link?.stop(); link = null
         slicer?.stop(); slicer = null
         uploadOnly(prefs, dir, at)
     }
@@ -156,6 +162,7 @@ class RecorderService : Service() {
     override fun onDestroy() {
         Log.w("live-record", "onDestroy slicer=${slicer != null}")
         unregisterReceiver(screen)
+        link?.stop(); link = null
         slicer?.stop(); slicer = null
         uploader?.running = false; uploader = null
         super.onDestroy()
