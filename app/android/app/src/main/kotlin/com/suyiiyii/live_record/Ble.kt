@@ -41,11 +41,12 @@ object Ble {
     /** One notify and when it arrived; `data` null = the link went down. */
     class Packet(val at: Long, val data: ByteArray?)
 
-    /** What the Ogg muxer needs for frames it did not encode itself: OpusHead (pre-skip 0), codec delay, seek pre-roll. */
-    fun opusFormat(): MediaFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 16000, 1).apply {
+    /** What the Ogg muxer needs for 16 kHz mono Opus: OpusHead, codec delay, seek pre-roll. The muxer writes csd-0
+     *  into the file as is, so `preSkip` (48 kHz samples, RFC 7845 §5.1) is what the decoder drops at the start. */
+    fun opusFormat(preSkip: Int = 0): MediaFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 16000, 1).apply {
         fun le(n: Int, fill: ByteBuffer.() -> Unit) = ByteBuffer.allocate(n).order(ByteOrder.LITTLE_ENDIAN).apply { fill(); flip() }
-        setByteBuffer("csd-0", le(19) { put("OpusHead".toByteArray()); put(1); put(1); putShort(0); putInt(16000); putShort(0); put(0) })
-        setByteBuffer("csd-1", le(8) { putLong(0) })
+        setByteBuffer("csd-0", le(19) { put("OpusHead".toByteArray()); put(1); put(1); putShort(preSkip.toShort()); putInt(16000); putShort(0); put(0) })
+        setByteBuffer("csd-1", le(8) { putLong(preSkip * 1_000_000_000L / 48000) })
         setByteBuffer("csd-2", le(8) { putLong(80_000_000) })
     }
 }

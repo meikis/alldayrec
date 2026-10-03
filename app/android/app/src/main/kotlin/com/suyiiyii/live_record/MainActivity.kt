@@ -145,6 +145,11 @@ class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: I
         }, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         codec.start()
         rec.startRecording()
+        // The encoder's own header says pre-skip 104: its 6.5 ms lookahead counted at 16 kHz, in a 48 kHz field
+        // (AOSP C2SoftOpusEnc), and every piece repeated it, cutting 2.2 ms of real audio at each seam (#45). The
+        // encoder runs on across pieces, so only the run's first piece has the delay to skip: 6.5 ms = 312 at 48 kHz.
+        val rest = Ble.opusFormat(0)
+        format = Ble.opusFormat(312)
         val pcm = ByteArray(sr * 2 / 50)  // 20 ms
         var samples = 0L                  // fed to the encoder
         val info = MediaCodec.BufferInfo()
@@ -152,10 +157,12 @@ class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: I
         fun drain(eos: Boolean) {
             while (true) {
                 val i = codec.dequeueOutputBuffer(info, if (eos) 10000 else 0)
-                if (i == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) { format = codec.outputFormat; continue }
+                if (i == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) continue
                 if (i < 0) { if (eos && i == MediaCodec.INFO_TRY_AGAIN_LATER) continue else break }
-                if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0)
+                if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
                     write(codec.getOutputBuffer(i)!!, info.offset, info.size, info.flags, startWall, info.presentationTimeUs)
+                    format = rest
+                }
                 codec.releaseOutputBuffer(i, false)
                 if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
             }
