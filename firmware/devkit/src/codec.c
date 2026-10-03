@@ -4,6 +4,7 @@
 #include <zephyr/sys/ring_buffer.h>
 
 #include "config.h"
+#include "hpf.h"
 #include "utils.h"
 #ifdef CODEC_OPUS
 #include "lib/opus-1.2.1/opus.h"
@@ -45,6 +46,7 @@ int codec_receive_pcm(int16_t *data, size_t len) // this gets called after mic d
 //
 
 int16_t codec_input_samples[CODEC_PACKAGE_SAMPLES];
+static struct hpf hpf[2];
 uint8_t codec_output_bytes[CODEC_OUTPUT_MAX_BYTES];
 K_THREAD_STACK_DEFINE(codec_stack, 32000);
 static struct k_thread codec_thread;
@@ -77,6 +79,9 @@ void codec_entry()
         // Read package
         ring_buf_get(&codec_ring_buf, (uint8_t *) codec_input_samples, CODEC_PACKAGE_SAMPLES * 2);
 
+        // High-pass here, not in the PDM interrupt: the BLE stream and the SD store both take what this encodes
+        hpf_run(hpf, codec_input_samples, CODEC_PACKAGE_SAMPLES);
+
         // Run Codec
         output_size = execute_codec();
 
@@ -107,6 +112,8 @@ int codec_start()
     ASSERT_TRUE(opus_encoder_ctl(m_opus_state, OPUS_SET_INBAND_FEC(0)) == OPUS_OK);
     ASSERT_TRUE(opus_encoder_ctl(m_opus_state, OPUS_SET_PACKET_LOSS_PERC(0)) == OPUS_OK);
 #endif
+
+    hpf_init(hpf, MIC_HPF_HZ, 16000);
 
     // Thread
     ring_buf_init(&codec_ring_buf, sizeof(codec_ring_buffer_data), codec_ring_buffer_data);

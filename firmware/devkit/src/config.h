@@ -2,6 +2,7 @@
 
 // #define SAMPLE_RATE 16000
 #define MIC_GAIN 64
+#define MIC_HPF_HZ 80              // 4th-order Butterworth high-pass before the codec: the PDM path carries 2-20 Hz at up to -8 dBFS
 #define MIC_IRC_PRIORITY 7
 #define MIC_BUFFER_SAMPLES 1600    // 100ms
 #define AUDIO_BUFFER_SAMPLES 16000 // 1s
