@@ -84,7 +84,7 @@ class MainActivity : FlutterActivity() {
                 "dfu" -> {
                     val p = getSharedPreferences("recorder", MODE_PRIVATE)
                     val addr = p.getString("bleAddress", null); val model = p.getString("bleModel", null)
-                    if (RecorderService.slicer != null) result.error("busy", "先停止录音再升级", null)
+                    if (RecorderService.slicer != null) result.error("busy", "录音设备的连接还没断开，稍后再试", null)
                     else if (addr == null || model == null || model !in Dfu.bundled(this)) result.error("none", "还没连过录音设备，或没有它的固件", null)
                     else { Dfu.start(this, addr, p.getString("bleName", null) ?: model, model); result.success(null) }
                 }

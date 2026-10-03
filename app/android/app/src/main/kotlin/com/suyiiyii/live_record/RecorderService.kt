@@ -43,7 +43,7 @@ class RecorderService : Service() {
                 "error" to slicer?.error, "sent" to uploader?.sent, "note" to uploader?.note,
                 "pending" to q.size, "pendingBytes" to q.sumOf { it.length() }, "oldest" to q.firstOrNull()?.let(Uploader::startMs),
                 "interruptedAt" to if (interruptedAt > 0) interruptedAt else null, "link" to link?.state, "tag" to slicer?.tag, "hw" to link?.hw,
-                "dfu" to Dfu.state, "usbNote" to link?.usbNote, "lastSync" to link?.syncNote,
+                "dfu" to Dfu.state, "dfuBusy" to Dfu.busy, "source" to (if (slicer == null) null else if (link != null) "ble" else "mic"), "usbNote" to link?.usbNote, "lastSync" to link?.syncNote,
                 "syncDone" to link?.syncDoneKb, "syncTotal" to link?.syncTotalKb)
         }
     }
@@ -157,7 +157,7 @@ class RecorderService : Service() {
 
     private fun notification(uploading: Int? = null): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        val title = if (uploading != null) "live-record 正在上传 · 剩 $uploading 块" else "live-record 正在录音"
+        val title = if (uploading != null) "live-record 正在上传 · 剩 $uploading 块" else if (link != null) "live-record 正在同步录音设备" else "live-record 正在录音"
         val text = if (uploading == null && interruptedAt > 0) "曾在 ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(interruptedAt))} 被系统中断，已自动恢复" else ""
         return Notification.Builder(this, CHANNEL).setContentTitle(title).setContentText(text)
             .setSmallIcon(if (uploading != null) android.R.drawable.stat_sys_upload else android.R.drawable.ic_btn_speak_now)

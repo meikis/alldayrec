@@ -188,11 +188,13 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
 
     /** The first try connects directly (quick); after a drop autoConnect waits for the device without a timeout. */
     private fun connect(d: BluetoothDevice, auto: Boolean) {
-        state = if (auto) "录音设备已断开，等待重连" else "正在连接录音设备"
+        state = if (auto) "录音设备不在附近，它在离线录音" + (lastSeen?.let { "（最后连接 $it）" } ?: "") + "，回来后自动补传"
+                else "正在连接录音设备"
         gatt = d.connectGatt(ctx, auto, cb, BluetoothDevice.TRANSPORT_LE) ?: return retry("连接失败") { connect(d, true) }
     }
 
     @Volatile private var pairingRefused = false
+    @Volatile private var lastSeen: String? = null  // HH:mm the link last went down
 
     //
     // One GATT operation at a time: the session thread starts one and waits for its callback
@@ -279,7 +281,7 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
             subscribe(g, Ble.STORE, Ble.CTRL)  // replies to LIST/READ/DELETE and the app's USB disk switch
             if (st.store == 0 || st.store == -28) offline(g, name, Triple(st.boot, st.frame, now))
             subscribe(g, Ble.SERVICE, Ble.AUDIO)
-            state = "已连接"
+            state = "已连接 · 实时上传"
             while (gatt === g && on) {  // battery and card every minute while the audio runs; the app's requests between
                 val job = jobs.poll(60, TimeUnit.SECONDS)
                 if (gatt !== g || !on) break
@@ -422,6 +424,7 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
                 g.close()
                 if (gatt !== g) return  // an old link, already given up (Bluetooth turned off)
                 gatt = null
+                lastSeen = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())
                 out.put(Ble.Packet(System.currentTimeMillis(), null))
                 // a refused pairing waits longer: the person has to plug the recorder in first
                 val wait = if (pairingRefused) 30_000L else 0L

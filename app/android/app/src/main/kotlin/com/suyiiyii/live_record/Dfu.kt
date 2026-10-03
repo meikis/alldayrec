@@ -14,6 +14,7 @@ import java.io.File
  *  the recorder takes one connection at a time. */
 object Dfu {
     @Volatile var state: String? = null
+    @Volatile var busy = false  // from start until done, aborted or failed: the app keeps the recorder link down
 
     /** The packages this build carries: model (LR-X1, LR-P1) -> firmware revision. */
     fun bundled(ctx: Context): Map<String, String> =
@@ -31,14 +32,14 @@ object Dfu {
             override fun onProgressChanged(a: String, percent: Int, speed: Float, avgSpeed: Float, part: Int, parts: Int) {
                 state = "升级中 $percent% · ${"%.1f".format(avgSpeed)} KB/s"
             }
-            override fun onDfuCompleted(a: String) { state = "升级完成，录音设备已重启"; DfuServiceListenerHelper.unregisterProgressListener(ctx, this) }
-            override fun onDfuAborted(a: String) { state = "升级已取消"; DfuServiceListenerHelper.unregisterProgressListener(ctx, this) }
+            override fun onDfuCompleted(a: String) { state = "升级完成，录音设备已重启"; busy = false; DfuServiceListenerHelper.unregisterProgressListener(ctx, this) }
+            override fun onDfuAborted(a: String) { state = "升级已取消"; busy = false; DfuServiceListenerHelper.unregisterProgressListener(ctx, this) }
             override fun onError(a: String, error: Int, errorType: Int, message: String?) {
-                state = "升级失败：$message（录音设备留在升级模式时再点一次升级，或插 USB 刷）"
+                state = "升级失败：$message（录音设备留在升级模式时再点一次升级，或插 USB 刷）"; busy = false
                 DfuServiceListenerHelper.unregisterProgressListener(ctx, this)
             }
         })
-        state = "准备升级"
+        state = "准备升级"; busy = true
         DfuServiceInitiator(address).setDeviceName(name).setKeepBond(true)
             .setForceDfu(false)
             .setForceScanningForNewAddressInLegacyDfu(true)  // the bootloader advertises as AdaDFU on another address

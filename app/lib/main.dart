@@ -94,6 +94,21 @@ class Recorder {
   static Future<void> unbind() => _ch.invokeMethod('unbind');
   static Future<void> dfu() => _ch.invokeMethod('dfu');
   static Future<void> usbDisk(bool on) => _ch.invokeMethod('usbDisk', {'on': on});
+  static bool hold = false;  // the link is taken down on purpose (unbind, firmware update): do not bring it back meanwhile
+
+  /// Takes the BLE link down, runs `f`, and lets it come back (the home page's ticker restarts it).
+  static Future<void> withoutLink(Future<void> Function() f) async {
+    hold = true;
+    try {
+      await stop();
+      while ((await status())['running'] == true) {
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+      await f();
+    } finally {
+      hold = false;
+    }
+  }
 }
 
 /// A BLE recorder's battery and card in a few words.
@@ -143,8 +158,18 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
         await Recorder.upload();
       }
       if (mounted) setState(() => status = s);
+      // the BLE recorder records by itself: with it as the source the link just runs, no start/stop (a failed start,
+      // e.g. a permission still to grant, is tried again every 30 s)
+      if (ble && !Recorder.hold && s['dfuBusy'] != true && s['running'] != true && settings!.token.isNotEmpty &&
+          DateTime.now().difference(autoStarted).inSeconds >= 30) {
+        autoStarted = DateTime.now();
+        await _start();
+      }
     });
   }
+
+  DateTime autoStarted = DateTime(2000);
+  bool get ble => Platform.isAndroid && settings?.source == 'ble';
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -177,9 +202,13 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   Future<void> _saved() async {
     await settings!.save();
     _loadWeb();
+    // the source changed under a running recorder: stop it; with the BLE recorder as the new source the ticker starts it
+    final changed = running && status['source'] != settings!.source;
+    if (changed) await _stop();
+    autoStarted = DateTime(2000);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(running ? '已保存，下次开始录音时生效' : '已保存'), behavior: SnackBarBehavior.floating));
+        content: Text(running && !changed ? '已保存，下次开始录音时生效' : '已保存'), behavior: SnackBarBehavior.floating));
     setState(() => page = 0);
   }
 
@@ -264,7 +293,56 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     ));
   }
 
+  /// The BLE recorder as the source: nothing to start or stop, only where its audio is.
+  Widget _bleBar(ColorScheme cs) {
+    final s = status, hw = (s['hw'] as Map?) ?? {};
+    final link = '${s['link'] ?? '正在启动'}';
+    final syncDone = (s['syncDone'] as num?) ?? 0, syncTotal = (s['syncTotal'] as num?) ?? 0;
+    final connected = link.startsWith('已连接'), syncing = syncTotal > 0;
+    final (IconData icon, Color color) = syncing
+        ? (Icons.sync_rounded, cs.tertiary)
+        : connected
+            ? (Icons.bluetooth_connected_rounded, Colors.green.shade600)
+            : (Icons.bluetooth_searching_rounded, Colors.orange.shade700);
+    final small = TextStyle(fontSize: 12, color: cs.onSurfaceVariant);
+    final detail = [
+      hwLine(hw),
+      if ((s['pending'] ?? 0) > 0) '待传 ${s['pending']} 块',
+    ].where((x) => x.isNotEmpty).join(' · ');
+    return Material(
+      color: cs.surfaceContainer,
+      child: SafeArea(
+        top: false,
+        child: InkWell(
+          onTap: () => setState(() => page = recorderPage),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 16, 12),
+            child: Row(children: [
+              Icon(icon, color: color),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                  Text(syncing ? '补传离线录音 ${(syncDone / 1024).toStringAsFixed(1)} / ${(syncTotal / 1024).toStringAsFixed(1)} MB' : link,
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500), maxLines: 2, overflow: TextOverflow.ellipsis),
+                  if (syncing) ...[
+                    const SizedBox(height: 6),
+                    LinearProgressIndicator(value: syncDone / syncTotal, borderRadius: BorderRadius.circular(2)),
+                  ],
+                  if (detail.isNotEmpty) Text(detail, style: small),
+                  if (s['note'] != null) Text('${s['note']}', style: small.copyWith(color: cs.error), maxLines: 2, overflow: TextOverflow.ellipsis),
+                  if (note.isNotEmpty) Text(note, style: small.copyWith(color: cs.error)),
+                ]),
+              ),
+              Icon(Icons.chevron_right_rounded, color: cs.onSurfaceVariant),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _controlBar(ColorScheme cs) {
+    if (ble) return _bleBar(cs);
     final s = status;
     final small = TextStyle(fontSize: 12, color: cs.onSurfaceVariant);
     String headline, detail = '';
@@ -746,7 +824,7 @@ class _RecorderPageState extends State<RecorderPage> {
         ? ('未连接', cs.outline, Icons.bluetooth_disabled_rounded)
         : syncing
             ? ('同步中', cs.tertiary, Icons.sync_rounded)
-            : link == '已连接'
+            : link.startsWith('已连接')
                 ? ('已连接', Colors.green.shade600, Icons.bluetooth_connected_rounded)
                 : ('连接中', cs.secondary, Icons.bluetooth_searching_rounded);
 
@@ -779,8 +857,13 @@ class _RecorderPageState extends State<RecorderPage> {
         if (name == null)
           Padding(
             padding: const EdgeInsets.only(top: 8),
-            child: Text('开始录音时会连上看到的第一台录音设备，之后只连它', style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+            child: Text('会连上看到的第一台录音设备，之后只连它', style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
           ),
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Text('录音设备开着就一直在录：手机在附近时实时上传，不在时存进它的卡里，回来后自动补传。要停止录音，关掉它的电源。',
+              style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+        ),
         // battery and card
         const SizedBox(height: 12),
         IntrinsicHeight(
@@ -839,13 +922,13 @@ class _RecorderPageState extends State<RecorderPage> {
             subtitle: Text([fw ?? '—', if (newer) '可升级到 $bundled', ?dfu].join('\n')),
             trailing: newer
                 ? FilledButton.tonalIcon(
-                    onPressed: !recording ? () => _call(Recorder.dfu) : null,
+                    onPressed: () => _call(() => Recorder.withoutLink(Recorder.dfu)),
                     icon: const Icon(Icons.system_update_alt_rounded, size: 18),
                     label: const Text('升级'))
                 : null,
           ),
           if (newer)
-            Text('升级前先停止录音、拔掉录音设备的 USB', style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+            Text('升级时先拔掉录音设备的 USB；升级期间暂停同步', style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
           const Divider(height: 20),
           ListTile(
             contentPadding: EdgeInsets.zero,
@@ -855,10 +938,10 @@ class _RecorderPageState extends State<RecorderPage> {
           ),
           ListTile(
             contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.link_off_rounded, color: name != null && !recording ? cs.error : cs.outline),
-            title: Text('解除绑定', style: TextStyle(color: name != null && !recording ? cs.error : cs.outline)),
-            subtitle: const Text('之后连上看到的第一台录音设备（需先停止录音）'),
-            onTap: name != null && !recording ? () => _call(Recorder.unbind) : null,
+            leading: Icon(Icons.link_off_rounded, color: name != null ? cs.error : cs.outline),
+            title: Text('解除绑定', style: TextStyle(color: name != null ? cs.error : cs.outline)),
+            subtitle: const Text('之后连上看到的第一台录音设备'),
+            onTap: name != null ? () => _call(() => Recorder.withoutLink(Recorder.unbind)) : null,
           ),
         ])),
       ]),
