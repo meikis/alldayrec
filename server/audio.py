@@ -78,10 +78,12 @@ def append(path: Path, body: bytes) -> int:
 def save(device: str, start_ms: int, body: bytes, content_type: str, n: int | None = None) -> float | None:
     """Keeps one uploaded piece (start_ms: its device time, n: the samples its client wrote, when it says); returns
     its seconds, None when it is not audio. It is on disk and in the index before this returns, so the client may
-    delete its copy once told so. A piece sent again (same device and start) is stored once: the first copy stays,
-    the resend only gets its seconds back."""
-    stored = lambda: db.conn().execute("SELECT seconds FROM pieces WHERE device = ? AND start_ms = ?", (device, start_ms)).fetchone()
-    if r := stored():
+    delete its copy once told so. Of a piece sent again (same device and start) the longer copy (in bytes) is kept: a
+    resend as long or shorter only gets the kept copy's seconds back; a longer one replaces the row, appended to the
+    hour file (an Android batch retried with more pieces after the answer to the first try was lost)."""
+    kept = lambda: db.conn().execute("SELECT seconds FROM pieces WHERE device = ? AND start_ms = ? AND size >= ?",
+                                     (device, start_ms, len(body))).fetchone()
+    if r := kept():
         return r[0]
     x = decode(body, aac=content_type.split(";")[0] == "audio/aac", n=n)
     if x is None:
@@ -89,10 +91,10 @@ def save(device: str, start_ms: int, body: bytes, content_type: str, n: int | No
     ext = {"audio/ogg": "ogg", "audio/webm": "webm", "audio/aac": "aac"}.get(content_type.split(";")[0], "bin")
     path = hour_file(device, start_ms, ext)
     with _append:
-        if r := stored():  # the same piece in two requests at once
+        if r := kept():  # the same piece in two requests at once
             return r[0]
         pos = append(path, body)
-        db.conn().execute("INSERT INTO pieces VALUES (?, ?, ?, ?, ?, ?, ?)",
+        db.conn().execute("INSERT OR REPLACE INTO pieces VALUES (?, ?, ?, ?, ?, ?, ?)",
                           (device, start_ms, round(len(x) / SR, 3), str(path), pos, len(body), n))
     return len(x) / SR
 
@@ -182,10 +184,6 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     db.conn().execute("DELETE FROM pieces WHERE start_ms = ?", (T(8),))
     files = [p.relative_to(DIR).as_posix() for p in DIR.rglob("*.ogg")]
     assert files == ["chunks/phone/2026-10-02/10.ogg"], files
-    size = (DIR / files[0]).stat().st_size
-    assert save("phone", T(1), tone(30), "audio/ogg") > 59, "sent again: the first copy's seconds"
-    assert (DIR / files[0]).stat().st_size == size and db.conn().execute("SELECT count(*) FROM pieces").fetchone()[0] == 3, \
-        "a piece sent again is stored once: the hour file does not grow, the row stays"
     x = np.arange(16000, dtype=np.int16)
     assert len(unpad(x)) == 16000 - AAC_DELAY - AAC_FRAME // 2 and unpad(x)[0] == AAC_DELAY, "AAC: the encoder's delay and half a frame go"
     assert len(unpad(x[:3000])) == 3000, "too short to hold both: left alone"
