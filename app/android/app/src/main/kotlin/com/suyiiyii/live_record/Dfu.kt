@@ -1,0 +1,53 @@
+package com.suyiiyii.live_record
+
+import android.content.Context
+import android.net.Uri
+import no.nordicsemi.android.dfu.DfuBaseService
+import no.nordicsemi.android.dfu.DfuProgressListenerAdapter
+import no.nordicsemi.android.dfu.DfuServiceInitiator
+import no.nordicsemi.android.dfu.DfuServiceListenerHelper
+import java.io.File
+
+/** Firmware updates over Bluetooth with Nordic's DFU library: the app asks the running firmware to reboot into the
+ *  Adafruit bootloader (legacy DFU, as firmware/devkit/lr_dfu.py does) and sends the package for its board, which
+ *  ships in the app (assets/firmware/<model>.zip, version in <model>.txt, from `lr.sh pkg`). Only while not recording:
+ *  the recorder takes one connection at a time. */
+object Dfu {
+    @Volatile var state: String? = null
+
+    /** The packages this build carries: model (LR-X1, LR-P1) -> firmware revision. */
+    fun bundled(ctx: Context): Map<String, String> =
+        (ctx.assets.list("firmware") ?: emptyArray()).filter { it.endsWith(".txt") }
+            .associate { it.removeSuffix(".txt") to ctx.assets.open("firmware/$it").bufferedReader().readText().trim() }
+
+    fun start(ctx: Context, address: String, name: String, model: String) {
+        val zip = File(ctx.cacheDir, "$model.zip")
+        ctx.assets.open("firmware/$model.zip").use { i -> zip.outputStream().use { i.copyTo(it) } }
+        DfuServiceInitiator.createDfuNotificationChannel(ctx)
+        DfuServiceListenerHelper.registerProgressListener(ctx, object : DfuProgressListenerAdapter() {
+            override fun onDeviceConnecting(a: String) { state = "正在连接录音设备" }
+            override fun onEnablingDfuMode(a: String) { state = "录音设备重启进入升级模式" }
+            override fun onDfuProcessStarting(a: String) { state = "开始升级" }
+            override fun onProgressChanged(a: String, percent: Int, speed: Float, avgSpeed: Float, part: Int, parts: Int) {
+                state = "升级中 $percent% · ${"%.1f".format(avgSpeed)} KB/s"
+            }
+            override fun onDfuCompleted(a: String) { state = "升级完成，录音设备已重启"; DfuServiceListenerHelper.unregisterProgressListener(ctx, this) }
+            override fun onDfuAborted(a: String) { state = "升级已取消"; DfuServiceListenerHelper.unregisterProgressListener(ctx, this) }
+            override fun onError(a: String, error: Int, errorType: Int, message: String?) {
+                state = "升级失败：$message（录音设备留在升级模式时再点一次升级，或插 USB 刷）"
+                DfuServiceListenerHelper.unregisterProgressListener(ctx, this)
+            }
+        })
+        state = "准备升级"
+        DfuServiceInitiator(address).setDeviceName(name).setKeepBond(true)
+            .setForceDfu(false)
+            .setForceScanningForNewAddressInLegacyDfu(true)  // the bootloader advertises as AdaDFU on another address
+            .setPacketsReceiptNotificationsValue(16)
+            .setZip(Uri.fromFile(zip))
+            .start(ctx, DfuService::class.java)
+    }
+}
+
+class DfuService : DfuBaseService() {
+    override fun getNotificationTarget(): Class<MainActivity> = MainActivity::class.java
+}

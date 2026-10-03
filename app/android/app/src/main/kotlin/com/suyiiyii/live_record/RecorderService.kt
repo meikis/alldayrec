@@ -42,7 +42,8 @@ class RecorderService : Service() {
                 "running" to (slicer != null), "uploading" to (uploader != null), "files" to slicer?.files, "slice" to slicer?.sliceS(),
                 "error" to slicer?.error, "sent" to uploader?.sent, "note" to uploader?.note,
                 "pending" to q.size, "pendingBytes" to q.sumOf { it.length() }, "oldest" to q.firstOrNull()?.let(Uploader::startMs),
-                "interruptedAt" to if (interruptedAt > 0) interruptedAt else null, "link" to link?.state, "tag" to slicer?.tag)
+                "interruptedAt" to if (interruptedAt > 0) interruptedAt else null, "link" to link?.state, "tag" to slicer?.tag, "hw" to link?.hw,
+                "dfu" to Dfu.state)
         }
     }
 
@@ -98,12 +99,15 @@ class RecorderService : Service() {
             dir.listFiles { f -> f.name.endsWith(".part") }?.forEach { it.renameTo(File(it.path.removeSuffix(".part") + ".ogg")) }  // cut short by a kill: still valid Ogg
             Log.i("live-record", "starting slicer")
             val packets = if (ble) LinkedBlockingQueue<Ble.Packet>() else null
-            slicer = Slicer(dir, prefs.getInt("foreground", 5), prefs.getInt("background", 20), prefs.getInt("screenOff", 60), packets).also {
+            val clock = if (ble) BleClock(prefs.getLong("bleEnd", 0L)) else null
+            slicer = Slicer(dir, prefs.getInt("foreground", 5), prefs.getInt("background", 20), prefs.getInt("screenOff", 60), packets, clock,
+                            { prefs.edit().putLong("bleEnd", it).apply() }).also {
                 it.foreground = foregroundApp
                 it.screenOff = !(getSystemService(POWER_SERVICE) as PowerManager).isInteractive
                 it.start()
             }
-            if (packets != null) link = BleLink(this, packets) { slicer?.tag = it }.also { it.start() }
+            if (packets != null) link = BleLink(this, packets, prefs, dir, File(getExternalFilesDir(null), "undated"),
+                { slicer?.tag = it }, { name, hw -> uploader?.report(name, hw) }).also { it.start() }
             prefs.edit().remove("endAt").remove("endDevice").apply()  // a new recording carries on the conversation: no end for the old stop
             ensureUploader(prefs, dir)
         }
@@ -222,6 +226,11 @@ class Uploader(private val dir: File, private val server: String, private val to
             }
         }
     }
+
+    /** What the phone last read from its BLE recorder, for the server's progress page; best effort, off this thread. */
+    fun report(device: String, hw: Map<String, Any?>) = Thread {
+        try { post("$server/api/device-status?device=${enc(device)}", org.json.JSONObject(hw).toString().toByteArray(), "application/json") } catch (_: Exception) {}
+    }.start()
 
     fun end(atMs: Long, bleName: String? = null) {
         try { post("$server/api/chunks/end?device=${enc(bleName ?: device)}&t=$atMs", ByteArray(0), null) } catch (e: Exception) { note = "结束信号失败 ${e.message}" }

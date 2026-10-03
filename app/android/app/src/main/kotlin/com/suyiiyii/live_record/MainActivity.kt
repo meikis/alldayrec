@@ -67,6 +67,22 @@ class MainActivity : FlutterActivity() {
                 }
                 "status" -> result.success(RecorderService.status(File(filesDir, "chunks")))
                 "deviceName" -> result.success(Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME) ?: Build.MODEL)  // the name in the system settings
+                "recorder" -> {  // the bound BLE recorder, what it last said, and the firmware this app carries
+                    val p = getSharedPreferences("recorder", MODE_PRIVATE)
+                    result.success(mapOf("name" to p.getString("bleName", null), "model" to p.getString("bleModel", null),
+                        "fw" to p.getString("bleFw", null), "bundled" to Dfu.bundled(this), "dfu" to Dfu.state))
+                }
+                "unbind" -> {  // the next scan takes the first recorder it sees
+                    getSharedPreferences("recorder", MODE_PRIVATE).edit().remove("bleName").remove("bleAddress").remove("bleModel").remove("bleFw").apply()
+                    result.success(null)
+                }
+                "dfu" -> {
+                    val p = getSharedPreferences("recorder", MODE_PRIVATE)
+                    val addr = p.getString("bleAddress", null); val model = p.getString("bleModel", null)
+                    if (RecorderService.slicer != null) result.error("busy", "先停止录音再升级", null)
+                    else if (addr == null || model == null || model !in Dfu.bundled(this)) result.error("none", "还没连过录音设备，或没有它的固件", null)
+                    else { Dfu.start(this, addr, p.getString("bleName", null) ?: model, model); result.success(null) }
+                }
                 else -> result.notImplemented()
             }
         }
@@ -76,7 +92,8 @@ class MainActivity : FlutterActivity() {
 /** Opus frames, from the microphone's encoder or from the BLE recorder (`packets`), cut into self-contained Ogg files
  *  whose length depends on the app state, and named by the wall time of their first frame. */
 class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: Int, @Volatile var offS: Int,
-             private val packets: BlockingQueue<Ble.Packet>? = null) {
+             private val packets: BlockingQueue<Ble.Packet>? = null, private val clock: BleClock? = null,
+             private val saveEnd: (Long) -> Unit = {}) {
     @Volatile var foreground = true
     @Volatile var screenOff = false
     @Volatile private var running = false
@@ -132,6 +149,7 @@ class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: I
         muxer = null
         part?.let { it.renameTo(File(it.path.removeSuffix(".part") + ".ogg")); files++ }
         part = null
+        clock?.let { saveEnd(it.end) }  // a restart after a kill starts after it
     }
 
     private fun micLoop() {
@@ -187,18 +205,17 @@ class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: I
         codec.stop(); codec.release()
     }
 
-    /** The recorder's Opus frames go into the Ogg pieces as they are. It has no clock: a run of frames is anchored at
-     *  the phone's time of its first frame and counted on in 10 ms steps. A seq gap, a disconnect, or frames arriving
-     *  over 2 s later than counted (lost before they got a seq) end the run: the next frame starts a new piece at its
-     *  own arrival time, so later audio is never pulled earlier (Omi app issue #4101). */
+    /** The recorder's Opus frames go into the Ogg pieces as they are, timed by `clock` (BleClock): a seq gap, a
+     *  disconnect, frames arriving late or a count running ahead of arrival end the run, and the next frame starts a
+     *  new piece at its own time. */
     private fun bleLoop(packets: BlockingQueue<Ble.Packet>) {
         format = Ble.opusFormat()
-        var anchor = 0L      // wall ms of the run's first frame; 0 = no run
-        var frames = 0L      // frames written in the run
-        var end = 0L         // wall ms where the last written frame ends: a new run never starts before it
+        val clock = clock!!
+        var anchor = 0L      // wall ms of the piece's first frame
         var seq = -1
+        var lastAt = 0L      // arrival of the packet that began the frame being put together
         val frame = ByteArrayOutputStream()  // the frame being put together from its packets
-        fun breakRun() { frame.reset(); closeFile(); anchor = 0 }
+        fun breakRun() { frame.reset(); closeFile(); clock.brk() }
 
         while (running) {
             val p = packets.poll(200, TimeUnit.MILLISECONDS) ?: continue
@@ -214,16 +231,11 @@ class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: I
             if (d[2].toInt() == 0) {  // a new frame starts: the one before is whole
                 if (frame.size() > 0) {
                     val b = frame.toByteArray(); frame.reset()
-                    write(ByteBuffer.wrap(b), 0, b.size, 0, anchor, frames * Ble.FRAME_US)
-                    frames++
-                    end = anchor + frames * Ble.FRAME_US / 1000
-                    if (frames % 1000 == 0L) android.util.Log.i("live-record", "ble counted time leads arrival by ${end - p.at} ms")
+                    val (t, fresh) = clock.next(lastAt)
+                    if (fresh) { closeFile(); anchor = t }
+                    write(ByteBuffer.wrap(b), 0, b.size, 0, anchor, (t - anchor) * 1000)
                 }
-                if (anchor != 0L && p.at - end > 2000) {
-                    android.util.Log.w("live-record", "ble frames ${p.at - end} ms late: new run")
-                    closeFile(); anchor = 0
-                }
-                if (anchor == 0L) { anchor = maxOf(p.at, end); frames = 0 }
+                lastAt = p.at
             } else if (frame.size() == 0) continue  // the rest of a frame whose start was lost
             frame.write(d, 3, d.size - 3)
         }

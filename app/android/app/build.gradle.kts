@@ -39,6 +39,10 @@ android {
         }
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true  // android.util.Log in the code the JVM tests drive
+    }
+
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("debug")
@@ -54,4 +58,9 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    implementation("no.nordicsemi.android:dfu:2.5.0")  // firmware updates over Bluetooth (legacy DFU, Adafruit bootloader)
+    testImplementation("junit:junit:4.13.2")
 }

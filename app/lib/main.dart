@@ -89,6 +89,18 @@ class Recorder {
   static Future<void> foreground(bool on) => _ch.invokeMethod('foreground', {'on': on});
   static Future<Map> status() async => (await _ch.invokeMethod('status')) as Map;
   static Future<String> deviceName() async => (await _ch.invokeMethod('deviceName')) as String;
+  // the BLE recorder (Android): which one is bound, what it last said, the firmware this build carries
+  static Future<Map> recorder() async => (await _ch.invokeMethod('recorder')) as Map;
+  static Future<void> unbind() => _ch.invokeMethod('unbind');
+  static Future<void> dfu() => _ch.invokeMethod('dfu');
+}
+
+/// A BLE recorder's battery and card in a few words.
+String hwLine(Map? hw) {
+  if (hw == null || hw.isEmpty) return '';
+  final store = hw['store'], free = hw['free_kb'], total = hw['total_kb'];
+  final card = store == -19 ? '没有存储卡' : store == -28 ? '存储卡已满' : total is num && total > 0 ? '卡剩 ${(free / 1048576).toStringAsFixed(1)} GB' : '';
+  return [if (hw['battery'] != null) '电量 ${hw['battery']}%', if (card.isNotEmpty) card].join(' · ');
 }
 
 class Home extends StatefulWidget {
@@ -259,6 +271,8 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
       headline = '录音中 · ${s['slice']} 秒一块';
       if (s['link'] != null) headline += ' · ${s['link']}';
       detail = '已传 ${s['sent']} · 待传 ${s['pending']}';
+      final hw = hwLine(s['hw'] as Map?);
+      if (hw.isNotEmpty) detail += ' · $hw';
     } else {
       headline = note.isEmpty ? '未在录音' : note;
       final n = s['pending'] ?? 0;
@@ -337,7 +351,9 @@ class _UploadPageState extends State<UploadPage> {
       final res = await req.close().timeout(const Duration(seconds: 15));
       final body = jsonDecode(await res.transform(utf8.decoder).join()) as Map;
       c.close();
-      final dev = widget.status['tag'] ?? s.device;  // recording from the BLE recorder: its audio goes up as the board
+      // the BLE recorder's audio goes up under its own name (LR-P1-BDAE), not the device setting
+      final ble = s.source == 'ble' ? (await Recorder.recorder())['name'] as String? : null;
+      final dev = ble?.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_') ?? s.device;
       final mine = (body['devices'] as List? ?? []).cast<Map>().where((d) => d['device'] == dev).firstOrNull;
       if (mounted) setState(() { server = mine; serverNote = mine == null ? '服务端还没有 $dev 的处理任务' : ''; });
     } catch (e) {
@@ -497,6 +513,7 @@ class _SettingsPageState extends State<SettingsPage> {
             onSelectionChanged: (v) => setState(() => source = v.first),
           ),
         ),
+      if (Platform.isAndroid && source == 'ble') const Padding(padding: EdgeInsets.only(bottom: 12), child: RecorderCard()),
       Card.outlined(
         margin: EdgeInsets.zero,
         child: Column(children: [
@@ -526,5 +543,76 @@ class _SettingsPageState extends State<SettingsPage> {
       const SizedBox(height: 24),
       FilledButton(onPressed: _save, style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)), child: const Text('保存')),
     ]);
+  }
+}
+
+/// The bound BLE recorder: name, firmware, battery and card as last read, unbinding, and a firmware update when this
+/// build carries a newer one for its board.
+class RecorderCard extends StatefulWidget {
+  const RecorderCard({super.key});
+  @override
+  State<RecorderCard> createState() => _RecorderCardState();
+}
+
+class _RecorderCardState extends State<RecorderCard> {
+  Map r = {}, st = {};
+  Timer? timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    timer = Timer.periodic(const Duration(seconds: 2), (_) => _load());
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    final a = await Recorder.recorder(), b = await Recorder.status();
+    if (mounted) setState(() { r = a; st = b; });
+  }
+
+  Future<void> _call(Future<void> Function() f) async {
+    try {
+      await f();
+    } on PlatformException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message ?? '$e'), behavior: SnackBarBehavior.floating));
+    }
+    _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    final name = r['name'] as String?, model = r['model'] as String?, fw = r['fw'] as String?;
+    final bundled = (r['bundled'] as Map?)?[model] as String?;
+    final recording = st['running'] == true;
+    final hw = hwLine(st['hw'] as Map?);
+    final dfu = (st['dfu'] ?? r['dfu']) as String?;
+    return Card.outlined(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('录音硬件', style: t.textTheme.titleSmall),
+          const SizedBox(height: 6),
+          Text(name == null ? '未绑定：开始录音时连上看到的第一台，之后只连它' : '已绑定 $name${model != null ? '（$model）' : ''}'),
+          if (fw != null) Text('固件 $fw${bundled != null && bundled != fw ? '，可升级到 $bundled' : ''}', style: TextStyle(color: t.colorScheme.onSurfaceVariant)),
+          if (recording && st['link'] != null) Text('${st['link']}${hw.isNotEmpty ? ' · $hw' : ''}', style: TextStyle(color: t.colorScheme.onSurfaceVariant)),
+          if (dfu != null) Text(dfu, style: TextStyle(color: t.colorScheme.primary)),
+          const Text('新手机配对时，录音设备需接着 USB 电源或刚重启 5 分钟内', style: TextStyle(fontSize: 12)),
+          Row(children: [
+            if (name != null)
+              TextButton(onPressed: recording ? null : () => _call(Recorder.unbind), child: const Text('解除绑定')),
+            if (bundled != null && bundled != fw)
+              TextButton(onPressed: recording ? null : () => _call(Recorder.dfu), child: const Text('升级固件')),
+          ]),
+        ]),
+      ),
+    );
   }
 }
