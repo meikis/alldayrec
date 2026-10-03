@@ -206,11 +206,13 @@ final class Slicer {
   }
 
   /// Mixable, so playing a video or a podcast neither silences it nor interrupts the recording (.record did both);
-  /// .defaultToSpeaker keeps the other apps' sound on the speaker, not the earpiece playAndRecord would pick. No
-  /// .allowBluetooth: the input would move to the AirPods' call microphone. .measurement: no voice processing.
+  /// recording is passive and leaves the output where the user has it: .allowBluetoothA2DP keeps AirPods available as
+  /// an output (playAndRecord hides them otherwise; A2DP is output only). No .allowBluetooth: the input would move to
+  /// the AirPods' call microphone. No .defaultToSpeaker: it would force the sound off headphones. .measurement: no
+  /// voice processing.
   private func activate() throws {
     let session = AVAudioSession.sharedInstance()
-    try session.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers, .defaultToSpeaker])
+    try session.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers, .allowBluetoothA2DP])
     if #available(iOS 14.5, *) { try session.setPrefersNoInterruptionsFromSystemAlerts(true) }  // a call as a banner: only answering it interrupts
     try session.setActive(true)
   }
