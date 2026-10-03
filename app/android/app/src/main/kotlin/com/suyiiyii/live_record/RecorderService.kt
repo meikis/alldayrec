@@ -215,12 +215,14 @@ class Uploader(private val dir: File, private val server: String, private val to
             try {
                 val code = post("$server/api/chunks?device=${enc(deviceOf(b[0]).ifEmpty { device })}&start=${startMs(b[0])}",
                                 b.fold(ByteArray(0)) { acc, f -> acc + f.readBytes() }, "audio/ogg")
+                Log.i("live-record", "upload ${b.size} pieces of ${deviceOf(b[0]).ifEmpty { device }} from ${startMs(b[0])}: HTTP $code")
                 when {
                     code == 200 -> { b.forEach(::keep); sent += b.size; fails = 0; note = null }
                     code == 400 -> { b.forEach { it.delete() }; note = "服务端无法解码一块，已丢弃" }
                     else -> throw Exception("HTTP $code")
                 }
             } catch (e: Exception) {
+                Log.w("live-record", "upload failed (${fails + 1}): ${e.message}")
                 fails++
                 note = "上传失败 ${e.message}"
                 sleep(5000L * minOf(fails, 6))

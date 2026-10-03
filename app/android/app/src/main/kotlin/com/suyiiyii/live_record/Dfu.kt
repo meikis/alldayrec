@@ -36,10 +36,12 @@ object Dfu {
             override fun onDfuAborted(a: String) { state = "升级已取消"; busy = false; DfuServiceListenerHelper.unregisterProgressListener(ctx, this) }
             override fun onError(a: String, error: Int, errorType: Int, message: String?) {
                 state = "升级失败：$message（录音设备留在升级模式时再点一次升级，或插 USB 刷）"; busy = false
+                android.util.Log.w("live-record", "dfu error $error type $errorType: $message")
                 DfuServiceListenerHelper.unregisterProgressListener(ctx, this)
             }
         })
         state = "准备升级"; busy = true
+        android.util.Log.i("live-record", "dfu $model to $address")
         DfuServiceInitiator(address).setDeviceName(name).setKeepBond(true)
             .setForceDfu(false)
             .setForceScanningForNewAddressInLegacyDfu(true)  // the bootloader advertises as AdaDFU on another address

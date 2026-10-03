@@ -260,33 +260,45 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
         return d.bondState == BluetoothDevice.BOND_BONDED
     }
 
+    /** Runs one step of a session, shown on the app's status bar and logged with how long it took. */
+    private fun <T> step(what: String, block: () -> T): T {
+        state = what
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        return block().also { Log.i("live-record", "ble $what: ${android.os.SystemClock.elapsedRealtime() - t0} ms") }
+    }
+
     private fun session(g: BluetoothGatt) {
         val name = prefs.getString("bleName", null) ?: g.device.name ?: g.device.address
         try {
-            state = "已连接，准备中"
-            op("mtu") { g.requestMtu(512) }  // one frame per notify
+            step("已连接，协商包长") { op("mtu") { g.requestMtu(512) } }  // one frame per notify
             g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)  // a fixed short interval; the result is logged below
-            if (!bond(g.device)) {
+            val bonded = g.device.bondState == BluetoothDevice.BOND_BONDED
+            if (!step(if (bonded) "确认配对" else "正在配对") { bond(g.device) }) {
+                Log.w("live-record", "ble pairing refused by $name")
                 pairingRefused = true
                 state = "配对被录音设备拒绝：把它接上 USB 电源（或重启它后 5 分钟内）再连"
                 g.disconnect()
                 return
             }
-            op("services") { g.discoverServices() }
+            step("读取设备服务") { op("services") { g.discoverServices() } }
             val codec = read(g, Ble.SERVICE, Ble.CODEC).firstOrNull()?.toInt()?.and(0xff)
-            if (codec != Ble.OPUS_16K) { state = "设备编码 $codec 不支持（只支持 16 kHz Opus）"; return }
+            if (codec != Ble.OPUS_16K) { state = "设备编码 $codec 不支持（只支持 16 kHz Opus）"; Log.w("live-record", "ble codec $codec"); return }
             val now = System.currentTimeMillis()
-            write(g, Ble.STORE, Ble.TIME, le(ByteArray(8)).putLong(now).array())  // the clock its offline audio is dated by
-            val st = status(g, name)
+            step("给设备对时") { write(g, Ble.STORE, Ble.TIME, le(ByteArray(8)).putLong(now).array()) }  // the clock its offline audio is dated by
+            val st = step("读取设备状态") { status(g, name) }
+            Log.i("live-record", "ble status: boot ${st.boot} frame ${st.frame} " + hw.entries.joinToString(" ") { "${it.key}=${it.value}" })
             subscribe(g, Ble.STORE, Ble.CTRL)  // replies to LIST/READ/DELETE and the app's USB disk switch
             if (st.store == 0 || st.store == -28) offline(g, name, Triple(st.boot, st.frame, now))
+            else Log.i("live-record", "ble offline sync skipped: card state ${st.store}")
             subscribe(g, Ble.SERVICE, Ble.AUDIO)
+            Log.i("live-record", "ble live audio on")
             state = "已连接 · 实时上传"
             while (gatt === g && on) {  // battery and card every minute while the audio runs; the app's requests between
                 val job = jobs.poll(60, TimeUnit.SECONDS)
                 if (gatt !== g || !on) break
                 job?.invoke(g)
                 status(g, name)
+                Log.i("live-record", "ble status: battery ${hw["battery"]}% card ${hw["store"]} free ${hw["free_kb"]} KB")
             }
         } catch (e: Gone) {
         } catch (e: Exception) {
@@ -313,6 +325,7 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
             write(g, Ble.STORE, Ble.CTRL, byteArrayOf(6, if (on) 1 else 0))
             val r = ctrl.poll(15, TimeUnit.SECONDS)
             val err = r?.takeIf { it[0] == 0x86.toByte() }?.get(5)?.toInt()
+            Log.i("live-record", "ble usb disk $on: $err")
             usbNote = when {
                 err == null -> "录音设备没有回应"
                 err == -107 -> "录音设备没接在电脑的 USB 上"
@@ -344,30 +357,46 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
         ctrl.clear(); data.clear()
         subscribe(g, Ble.STORE, Ble.DATA)
         var taken = 0; var bytes = 0L
+        val t0 = android.os.SystemClock.elapsedRealtime()
         for (pass in 1..5) {  // the card fills again (slowly) while we take it
-            write(g, Ble.STORE, Ble.CTRL, byteArrayOf(1))  // LIST
-            val files = mutableListOf<Pair<Long, Long>>()
-            while (true) {
-                val r = ctrl.poll(10, TimeUnit.SECONDS) ?: throw Exception("卡上文件列表超时")
-                if (r[0] == 0x81.toByte()) files += (le(r).getInt(1).toLong() and 0xffffffffL) to (le(r).getInt(5).toLong() and 0xffffffffL)
-                if (r[0] == 0x80.toByte()) break
+            val files = step("读取卡上文件列表") {
+                write(g, Ble.STORE, Ble.CTRL, byteArrayOf(1))  // LIST
+                val files = mutableListOf<Pair<Long, Long>>()
+                while (true) {
+                    val r = ctrl.poll(10, TimeUnit.SECONDS) ?: throw Exception("卡上文件列表超时")
+                    if (r[0] == 0x81.toByte()) files += (le(r).getInt(1).toLong() and 0xffffffffL) to (le(r).getInt(5).toLong() and 0xffffffffL)
+                    if (r[0] == 0x80.toByte()) { if (r.size > 1 && r[1] != 0.toByte()) Log.w("live-record", "ble LIST error ${r[1]}"); break }
+                }
+                files
             }
+            Log.i("live-record", "ble LIST pass $pass: ${files.size} files, ${files.sumOf { it.second }} B")
             // a .part of a file the card no longer lists (taken by another phone) has nothing to go on with
             raw.listFiles { x -> x.name.endsWith(".part") }?.filter { p -> files.none { "%08X.part".format(it.first) == p.name } }?.forEach { it.delete() }
             if (files.isEmpty()) break
             val total = files.sumOf { it.second }
-            for ((f, size) in files) {
-                syncTotalKb = (total + bytes) / 1024; syncDoneKb = bytes / 1024
+            // what an earlier, cut-short sync already has counts as done from the start, not once its file comes up
+            var resumed = files.sumOf { (f, _) -> File(raw, "%08X.part".format(f)).length() }
+            syncTotalKb = (total + bytes) / 1024; syncDoneKb = (bytes + resumed) / 1024
+            // a file cut short last time first, then the rest oldest first (the card lists in directory order, where a
+            // new segment can sit in a freed slot ahead of older ones)
+            for ((f, size) in files.sortedWith(compareBy({ !File(raw, "%08X.part".format(it.first)).exists() }, { it.first }))) {
                 state = "同步离线录音"
-                val b = take(g, f, size) { syncDoneKb = (bytes + it) / 1024 }
+                val had = File(raw, "%08X.part".format(f)).length()
+                resumed -= had
+                val tf = android.os.SystemClock.elapsedRealtime()
+                val b = take(g, f, size) { syncDoneKb = (bytes + resumed + it) / 1024 }
+                val ms = android.os.SystemClock.elapsedRealtime() - tf
+                Log.i("live-record", "ble took %08X: %d B (%d already here) in %.1f s, %d KB/s".format(f, size, had, ms / 1000.0, (size - had) / maxOf(ms, 1)))
                 File(raw, "%08X.BIN".format(f)).writeBytes(b)
                 File(raw, "%08X.part".format(f)).delete()
                 write(g, Ble.STORE, Ble.CTRL, le(ByteArray(5)).put(4).putInt(f.toInt()).array())  // DELETE
-                while ((ctrl.poll(10, TimeUnit.SECONDS) ?: throw Exception("删除卡上文件超时"))[0] != 0x84.toByte()) {}
+                var r: ByteArray
+                do { r = ctrl.poll(10, TimeUnit.SECONDS) ?: throw Exception("删除卡上文件超时") } while (r[0] != 0x84.toByte())
+                if (r.size > 5 && r[5] != 0.toByte()) Log.w("live-record", "ble DELETE %08X: %d".format(f, r[5].toInt()))
                 taken++; bytes += size
             }
         }
-        if (taken > 0) Log.i("live-record", "ble offline: $taken files, $bytes B")
+        Log.i("live-record", "ble offline: $taken files, $bytes B in ${(android.os.SystemClock.elapsedRealtime() - t0) / 1000} s")
         syncDoneKb = 0; syncTotalKb = 0
         pieces(name, live)
     }
@@ -412,6 +441,7 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
         val files = raw.listFiles { f -> f.name.endsWith(".BIN") }?.associate { it.name.removeSuffix(".BIN").toLong(16) to it.readBytes() } ?: return
         if (files.isEmpty()) return
         state = "整理离线录音"
+        Log.i("live-record", "ble pieces from ${files.size} files")
         val tag = Ble.tag(name)
         var n = 0; var lost = 0
         for (run in Store.runs(files, live)) {
