@@ -1,0 +1,185 @@
+package com.suyiiyii.live_record
+
+import android.content.Context
+import android.content.SharedPreferences
+import android.util.Log
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.concurrent.BlockingQueue
+import java.util.concurrent.TimeUnit
+import kotlin.math.abs
+
+/** What happened on the capture side, for the server's device page (/device/<name>, POST /api/device-log): the
+ *  recorder's own event log (firmware lr_log.h), read over BLE from where the last read ended, and the app's key events
+ *  (connect with each step's time, disconnect, offline sync, uploads failing and coming back). An event is first
+ *  appended to a local file; a thread of its own sends the file every 30 s and keeps it while that fails, so a phone
+ *  offline loses nothing, and neither reading nor sending ever waits on the audio's upload or holds it up. */
+object DeviceLog {
+    /** A record of the recorder's log: boot:u16 t:u32 code:u8 x:u8 a:u32 b:u32 (lr_log.h), and its seq. */
+    data class Rec(val seq: Long, val boot: Int, val t: Long, val code: Int, val x: Int, val a: Long, val b: Long)
+    private const val TIME = 14       // a | b << 32: the epoch ms the phone said frame t was at
+    private const val UPTIME = 0x80   // before the boot's first frame: t is ms since power-up
+    private const val FRAME_MS = 10L
+
+    private lateinit var file: File            // the queue: one JSON event per line, the device it belongs to inside
+    private lateinit var prefs: SharedPreferences
+    private val lock = Any()
+    private lateinit var src: String           // this install's app events: "app:<id made at the first start>"
+    private var lastSeq = 0L                   // an app event's seq: its time in ms, kept increasing (also across restarts)
+    private val steps = StringBuilder()        // the connection's steps so far, for its connect event
+
+    fun start(ctx: Context) {
+        synchronized(lock) {
+            if (::file.isInitialized) return
+            file = File(ctx.filesDir, "devlog.jsonl")
+            prefs = ctx.getSharedPreferences("recorder", Context.MODE_PRIVATE)
+            // src + seq is the server's key: another phone, or this one reinstalled, never writes over these events
+            src = prefs.getString("logSrc", null) ?: "app:${java.util.UUID.randomUUID()}".also { prefs.edit().putString("logSrc", it).apply() }
+            lastSeq = prefs.getLong("logSeq", 0)
+        }
+        Thread { while (true) { try { send() } catch (e: Exception) { Log.w("live-record", "devlog send: $e") }; Thread.sleep(30_000) } }
+            .apply { isDaemon = true; name = "devlog" }.start()
+    }
+
+    //
+    // The recorder's log
+    //
+
+    /** DATA notifications of a LOG (seq:u32 + 16 B records), in any order, maybe overlapping -> records by seq. */
+    fun records(packets: List<ByteArray>): List<Rec> {
+        val out = sortedMapOf<Long, Rec>()
+        for (p in packets) {
+            val b = ByteBuffer.wrap(p).order(ByteOrder.LITTLE_ENDIAN)
+            val seq = b.getInt(0).toLong() and 0xffffffffL
+            for (i in 0 until (p.size - 4) / 16) {
+                val o = 4 + i * 16
+                out[seq + i] = Rec(seq + i, b.getShort(o).toInt() and 0xffff, b.getInt(o + 2).toLong() and 0xffffffffL, p[o + 6].toInt() and 0xff,
+                                   p[o + 7].toInt() and 0xff, b.getInt(o + 8).toLong() and 0xffffffffL, b.getInt(o + 12).toLong() and 0xffffffffL)
+            }
+        }
+        return out.values.toList()
+    }
+
+    /** Each record's wall time (epoch ms) or null, as lr_sync.py dates them: a frame by the boot's TIME record nearest
+     *  to it, among these and `known` (boot -> (frame, epoch) of earlier reads). A record from before the boot's first
+     *  frame goes at that frame: a few seconds late at most (the log has no record of the first frame's uptime). A boot
+     *  that ended before any phone set its clock stays undated. */
+    fun dates(recs: List<Rec>, known: Map<Int, Pair<Long, Long>>): List<Long?> {
+        val sync = known.mapValues { mutableListOf(it.value) }.toMutableMap()
+        for (r in recs) if (r.code == TIME) sync.getOrPut(r.boot) { mutableListOf() } += r.t to (r.b shl 32 or r.a)
+        return recs.map { r ->
+            val frame = if (r.code and UPTIME != 0) 0L else r.t
+            sync[r.boot]?.minByOrNull { abs(it.first - frame) }?.let { (f, e) -> e + (frame - f) * FRAME_MS }
+        }
+    }
+
+    /** Where the next read starts: after the last record of an unbroken run from the first one received (a lost
+     *  notify is read again), or `next` when nothing came at all. */
+    fun cursor(recs: List<Rec>, next: Long): Long {
+        var c = recs.firstOrNull()?.seq ?: return next
+        for (r in recs) if (r.seq == c) c++ else break
+        return if (c == recs.last().seq + 1) next else c
+    }
+
+    /** LOG (CTRL 0x07 from:u32 -> DATA notifications, then CTRL 0x87 next:u32) from where the last read of this
+     *  recorder ended, on the BLE session thread with nothing else in flight. A log that started over (erased: next
+     *  below where we were) is read from 0. */
+    fun read(tag: String, ask: (ByteArray) -> Unit, ctrl: BlockingQueue<ByteArray>, data: BlockingQueue<ByteArray>) {
+        try {
+            var from = prefs.getLong("logNext:$tag", 0)
+            for (attempt in 0..1) {
+                data.clear(); ctrl.removeIf { it[0] == 0x87.toByte() }
+                ask(ByteBuffer.allocate(5).order(ByteOrder.LITTLE_ENDIAN).put(7).putInt(from.toInt()).array())
+                var r: ByteArray
+                do { r = ctrl.poll(10, TimeUnit.SECONDS) ?: throw Exception("no LOG reply") } while (r[0] != 0x87.toByte())
+                val next = ByteBuffer.wrap(r).order(ByteOrder.LITTLE_ENDIAN).getInt(1).toLong() and 0xffffffffL
+                if (next < from) { Log.i("live-record", "devlog $tag: log restarted at $next (had $from)"); from = 0; continue }
+                val recs = records(generateSequence { data.poll() }.toList())
+                val known = prefs.getString("logTime:$tag", null)?.split(',')?.map(String::toLong)?.let { mapOf(it[0].toInt() to (it[1] to it[2])) }
+                val at = dates(recs, known ?: emptyMap())
+                add(recs.mapIndexed { i, x -> event(tag, "rec", x.seq, at[i], JSONObject().put("boot", x.boot).put("t", x.t).put("code", x.code)
+                                                                                     .put("x", x.x).put("a", x.a).put("b", x.b)) })
+                val e = prefs.edit().putLong("logNext:$tag", cursor(recs, next))
+                recs.lastOrNull { it.code == TIME }?.let { e.putString("logTime:$tag", "${it.boot},${it.t},${it.b shl 32 or it.a}") }
+                e.apply()
+                Log.i("live-record", "devlog $tag: ${recs.size} records from $from, next $next")
+                return
+            }
+        } catch (e: Exception) { Log.w("live-record", "devlog $tag read: $e") }
+    }
+
+    //
+    // The app's events
+    //
+
+    /** One of the app's events, filed under the device it is about (a recorder's name, or the phone's for its upload). */
+    fun app(device: String, kind: String, text: String, level: String? = null) {
+        if (!::file.isInitialized) return
+        val now = System.currentTimeMillis()
+        val seq = synchronized(lock) { maxOf(now, lastSeq + 1).also { lastSeq = it; prefs.edit().putLong("logSeq", it).apply() } }
+        add(listOf(event(device, src, seq, now, JSONObject().put("kind", kind).put("text", text).apply { if (level != null) put("level", level) })))
+    }
+
+    /** A step of connecting (BleLink.step), kept for the connect event. */
+    fun step(what: String, ms: Long) {
+        synchronized(steps) { steps.append(if (steps.isEmpty()) "" else "，").append("$what $ms ms") }
+    }
+
+    /** The link is up and the audio flows: the steps it took, as one event. */
+    fun connected(device: String) {
+        val s = synchronized(steps) { steps.toString().also { steps.clear() } }
+        app(device, "connect", "连上：$s")
+    }
+
+    /** The link went down (GATT status: 8 timeout, 19 the recorder ended it, 0 the phone did, 133 never came up). */
+    fun disconnected(device: String, status: Int) {
+        synchronized(steps) { steps.clear() }
+        app(device, "disconnect", "断开（status $status）", "warn")
+    }
+
+    //
+    // The queue
+    //
+
+    private fun event(device: String, src: String, seq: Long, at: Long?, data: JSONObject) =
+        JSONObject().put("device", device).put("src", src).put("seq", seq).put("at", at ?: JSONObject.NULL).put("data", data)
+
+    private fun add(events: List<JSONObject>) {
+        if (events.isEmpty()) return
+        synchronized(lock) { file.appendText(events.joinToString("") { "$it\n" }) }
+    }
+
+    /** The queue moved aside (new events start a new file) and sent per device; kept for the next round while a
+     *  request fails (the server keeps a record sent again once). A batch the server cannot take (400, 422) is dropped. */
+    private fun send() {
+        val server = prefs.getString("server", null)?.takeIf { it.isNotEmpty() } ?: return
+        synchronized(lock) { if (file.exists()) file.renameTo(File(file.parentFile, "devlog-${System.currentTimeMillis()}.send")) }
+        for (f in file.parentFile!!.listFiles { x -> x.name.endsWith(".send") }!!.sortedBy { it.name }) {
+            val byDevice = f.readLines().filter(String::isNotBlank).map(::JSONObject).groupBy { it.remove("device") as String }
+            var kept = false
+            for ((device, events) in byDevice) {
+                val code = post("$server/api/device-log?device=${URLEncoder.encode(device, "UTF-8")}", JSONArray(events).toString().toByteArray())
+                if (code == 200) continue
+                Log.w("live-record", "devlog send $device: HTTP $code")
+                if (code != 400 && code != 422) kept = true
+            }
+            if (kept) return
+            f.delete()
+        }
+    }
+
+    private fun post(url: String, body: ByteArray): Int = try {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.requestMethod = "POST"; c.connectTimeout = 15_000; c.readTimeout = 30_000; c.doOutput = true
+        c.setRequestProperty("Authorization", "Bearer ${prefs.getString("token", "")}")
+        c.setRequestProperty("Content-Type", "application/json")
+        c.outputStream.use { it.write(body) }
+        c.responseCode.also { code -> (if (code < 400) c.inputStream else c.errorStream)?.use { it.readBytes() } }
+    } catch (e: Exception) { Log.w("live-record", "devlog send: $e"); -1 }
+}

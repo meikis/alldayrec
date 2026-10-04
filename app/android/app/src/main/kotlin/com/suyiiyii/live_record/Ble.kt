@@ -281,7 +281,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
     private fun <T> step(what: String, block: () -> T): T {
         state = what
         val t0 = android.os.SystemClock.elapsedRealtime()
-        return block().also { Log.i("live-record", "ble $what: ${android.os.SystemClock.elapsedRealtime() - t0} ms") }
+        return block().also { val ms = android.os.SystemClock.elapsedRealtime() - t0; Log.i("live-record", "ble $what: $ms ms"); DeviceLog.step(what, ms) }
     }
 
     private fun session(g: BluetoothGatt) {
@@ -323,6 +323,8 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             val m = Mirror(File(ctx.filesDir, "recorder/${Ble.tag(name)}"))
             mirrorName = Ble.tag(name); boot = st.boot
             catchUp(g, m)
+            DeviceLog.read(mirrorName, { write(g, Ble.STORE, Ble.CTRL, it) }, ctrl, data)
+            DeviceLog.connected(mirrorName)
             state = "已连接 · 实时上传"
             var lastStatus = android.os.SystemClock.elapsedRealtime()
             var open = -1L  // the file LIVE goes on in
@@ -345,6 +347,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
                 if (now - lastStatus > 60_000) {
                     jobs.poll()?.invoke(g)
                     status(g, name)
+                    DeviceLog.read(mirrorName, { write(g, Ble.STORE, Ble.CTRL, it) }, ctrl, data)
                     clean(g, m)
                     lastStatus = now
                     Log.i("live-record", "ble status: battery ${hw["battery"]}% card ${hw["store"]} free ${hw["free_kb"]} KB")
@@ -370,6 +373,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
     private fun kicked(g: BluetoothGatt, why: String) {
         Log.w("live-record", "ble kicked: $why")
         prefs.edit().putBoolean("bleKicked", true).apply()
+        DeviceLog.app(Ble.tag(prefs.getString("bleName", null) ?: g.device.address), "kicked", "录音设备不再认这台手机（$why），不再重连", "error")
         state = KICKED
         g.disconnect()
     }
@@ -380,6 +384,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         jobs.put { g ->
             write(g, Ble.STORE, Ble.CTRL, le(ByteArray(5)).put(0x20).putInt(s).array())  // PAUSE
             pausedUntil = if (s > 0) System.currentTimeMillis() + s * 1000L else 0L
+            DeviceLog.app(mirrorName, if (s > 0) "pause" else "resume", if (s > 0) "暂停录音 ${if (s % 60 == 0) "${s / 60} 分钟" else "$s 秒"}" else "恢复录音")
             Log.i("live-record", "ble pause $s s")
         }
     }
@@ -485,6 +490,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         }
         Log.i("live-record", "ble caught up: $done B in ${(android.os.SystemClock.elapsedRealtime() - t0) / 1000} s")
         syncNote = "${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())} 补传录音设备的录音 ${done / 1024} KB"
+        if (done > 0) DeviceLog.app(mirrorName, "sync", "补传 ${done / 1024} KB，用时 ${(android.os.SystemClock.elapsedRealtime() - t0) / 1000} s")
         syncDoneKb = 0; syncTotalKb = 0
     }
 
@@ -543,6 +549,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
                 g.close()
                 if (gatt !== g) return  // an old link, already given up (Bluetooth turned off)
                 gatt = null
+                DeviceLog.disconnected(mirrorName.ifEmpty { Ble.tag(g.device.name ?: g.device.address) }, status)
                 lastSeen = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())
                 // a pairing that did not finish (a dialog left alone) waits a little; unbound or kicked: no reconnecting
                 val wait = if (pairingFailed) 30_000L else 0L

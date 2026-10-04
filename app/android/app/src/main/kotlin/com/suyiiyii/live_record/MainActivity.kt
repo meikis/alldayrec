@@ -117,11 +117,12 @@ class MainActivity : FlutterActivity() {
                 }
                 "unbind" -> Thread {  // the recorder forgets every phone (when connected), then this phone forgets it
                     val p = getSharedPreferences("recorder", MODE_PRIVATE)
-                    val addr = p.getString("bleAddress", null)
+                    val addr = p.getString("bleAddress", null); val name = p.getString("bleName", null)
                     // first: the link must not reconnect when the recorder drops it
                     p.edit().remove("bleName").remove("bleAddress").remove("bleModel").remove("bleFw").remove("bindPending")
                         .remove("bindForce").remove("bleKicked").commit()
                     val forgot = RecorderService.link?.forgetAll() ?: false
+                    name?.let { DeviceLog.app(Ble.tag(it), "unbind", if (forgot) "解除绑定：录音设备忘掉了所有手机" else "解除绑定：录音设备没连上，只有这台手机忘掉了它") }
                     if (addr != null && BluetoothAdapter.checkBluetoothAddress(addr))
                         Ble.removeBond(getSystemService(BluetoothManager::class.java).adapter.getRemoteDevice(addr))
                     runOnUiThread { result.success(forgot) }

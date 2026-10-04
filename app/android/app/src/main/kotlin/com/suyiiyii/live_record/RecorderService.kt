@@ -58,6 +58,7 @@ class RecorderService : Service() {
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
             .createNotificationChannel(NotificationChannel(CHANNEL, "录音中", NotificationManager.IMPORTANCE_LOW))
         registerReceiver(screen, IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON) })
+        DeviceLog.start(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -213,13 +214,18 @@ class Uploader(private val dir: File, private val server: String, private val to
                                 b.fold(ByteArray(0)) { acc, f -> acc + f.readBytes() }, "audio/ogg")
                 Log.i("live-record", "upload ${b.size} pieces of ${deviceOf(b[0]).ifEmpty { device }} from ${startMs(b[0])}: HTTP $code")
                 when {
-                    code == 200 -> { b.forEach(::keep); sent += b.size; fails = 0; note = null }
+                    code == 200 -> {
+                        b.forEach(::keep); sent += b.size; note = null
+                        if (fails > 0) DeviceLog.app(deviceOf(b[0]).ifEmpty { device }, "upload_ok", "上传恢复（之前连续失败 $fails 次）")
+                        fails = 0
+                    }
                     code == 400 -> { b.forEach { it.delete() }; note = "服务端无法解码一块，已丢弃" }
                     else -> throw Exception("HTTP $code")
                 }
             } catch (e: Exception) {
                 Log.w("live-record", "upload failed (${fails + 1}): ${e.message}")
                 fails++
+                if (fails == 1) DeviceLog.app(deviceOf(b[0]).ifEmpty { device }, "upload_fail", "上传失败：${e.message}", "error")
                 note = "上传失败 ${e.message}"
                 sleep(5000L * minOf(fails, 6))
             }
