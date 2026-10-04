@@ -5,6 +5,7 @@
 #include <hal/nrf_power.h>
 #include <zephyr/fs/fcb.h>
 #include <zephyr/kernel.h>
+#include <zephyr/random/random.h>
 #include <zephyr/storage/flash_map.h>
 
 #include "lib/battery/battery.h"
@@ -166,7 +167,9 @@ int lr_log_init(void)
     }
     if (ram.magic != MAGIC || ram.check != check() || ram.n > N) {
         ram.magic = MAGIC;
-        ram.first = seq;
+        // a log started afresh (erased above) is numbered on from a random point below 2^31, not from 0 again: a reader
+        // keys records by seq, and the old log's ones are already out there (a warm reset keeps the RAM's numbering)
+        ram.first = last.fe_sector ? seq : sys_rand32_get() >> 1;
         ram.boot = r.boot;
         ram.n = 0;
     } else if (ram.first < seq) {  // a reset between writing a batch and taking it out of RAM: not twice
