@@ -1,6 +1,6 @@
 """The live-record server's client endpoints as run.sh needs them: keeps every upload, decodes it with ffmpeg (as
 server/audio.py does: 400 when it cannot), logs status reports, event logs and end signals to OUT/server.jsonl; Bearer
-token required. `check` reads that log back: every piece decoded, and the recorder's audio one gap-free run in time.
+token required. Any other page (the app's WebViews) says a test is running. `check` reads that log back: every piece decoded, and the recorder's audio one gap-free run in time.
     python3 server.py serve HOST PORT TOKEN OUT
     python3 server.py check OUT DEVICE"""
 import json
@@ -38,9 +38,18 @@ def serve(host: str, port: int, token: str, out: Path):
             return False
 
         def do_GET(self):
+            path = urlparse(self.path).path
+            if not path.startswith("/api/"):  # the app's web pages (?token=): what is going on, not a token error
+                b = ("<meta name=viewport content='width=device-width'><p style='font:17px sans-serif;padding:24px'>"
+                     "live-record 正在做自动测试，几分钟后自动恢复正常设置。</p>").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(b)))
+                self.end_headers()
+                self.wfile.write(b)
+                return
             if not self.authorized():
                 return
-            path = urlparse(self.path).path
             if path == "/api/client-config":
                 return self.reply({"slice": {"foreground": 1, "background": 20, "screenOff": 60}})
             if path == "/api/status":

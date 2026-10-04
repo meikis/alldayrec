@@ -236,7 +236,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     let name = Ble.name([a[CBAdvertisementDataLocalNameKey] as? String, p.name])
     // in the background iOS asks for no scan responses: a full name never comes (binding saves the identifier for that)
     guard let bound = prefs.string(forKey: "bleName"), name == bound else {
-      return Ble.log("scan: \(name ?? "-") (advertised \(a[CBAdvertisementDataLocalNameKey] as? String ?? "no name"))")
+      return Ble.log("scan: \(name ?? "-") (advertised \(a[CBAdvertisementDataLocalNameKey] as? String ?? "no name")) \(p.identifier)")
     }
     if a[CBAdvertisementDataIsConnectable] as? Bool == false { state = "\(bound) 正连着其他手机"; return }
     c.stopScan()
