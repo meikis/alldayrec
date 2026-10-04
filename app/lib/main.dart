@@ -1,6 +1,7 @@
-// live-record client. Native code keeps the microphone open, cuts the stream into pieces whose length follows
-// the app state and uploads them in order: on Android RecorderService.kt (Opus/Ogg, START_STICKY, survives a kill),
-// on iOS Recorder.swift (ADTS AAC, `audio` background mode). This side is settings, status and the pages in a WebView.
+// live-record client. Native code keeps the microphone open (or follows the BLE recorder), cuts the stream into pieces
+// whose length follows the app state and uploads them in order: on Android RecorderService.kt + Ble.kt (Opus/Ogg,
+// START_STICKY, survives a kill), on iOS Recorder.swift + Ble.swift (Opus/Ogg, `audio` and `bluetooth-central`
+// background modes). This side is settings, status and the pages in a WebView.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -30,7 +31,7 @@ void main() {
 class Settings {
   String server = 'https://lr.example.com', token = '';
   String device = 'phone';  // the phone's own name from the system settings, not set here (BLE audio goes up as the board's name)
-  String source = 'mic';  // 'mic' or 'ble' (the BLE recorder; Android only)
+  String source = 'mic';  // 'mic' or 'ble' (the BLE recorder)
   bool archive = true;
   static Future<Settings> load() async {
     final p = await SharedPreferences.getInstance(), s = Settings();
@@ -38,7 +39,7 @@ class Settings {
     s.token = p.getString('token') ?? '';
     s.device = (await Recorder.deviceName()).replaceAll(RegExp(r'[^\p{L}\p{N}._-]+', unicode: true), '_');
     s.archive = p.getBool('archive') ?? true;
-    s.source = Platform.isAndroid ? p.getString('source') ?? 'mic' : 'mic';
+    s.source = p.getString('source') ?? 'mic';
     return s;
   }
 
@@ -92,7 +93,7 @@ class Recorder {
   static Future<void> foreground(bool on) => _ch.invokeMethod('foreground', {'on': on});
   static Future<Map> status() async => (await _ch.invokeMethod('status')) as Map;
   static Future<String> deviceName() async => (await _ch.invokeMethod('deviceName')) as String;
-  // the BLE recorder (Android): which one is bound, what it last said, how a firmware update goes (firmware.dart)
+  // the BLE recorder: which one is bound, what it last said, how a firmware update goes (firmware.dart, Android)
   static Future<Map> recorder() async => (await _ch.invokeMethod('recorder')) as Map;
   /// Unbinding: true when the recorder was connected and forgot every phone, false when only this phone forgot it.
   static Future<bool> unbind() async => (await _ch.invokeMethod('unbind')) as bool;
@@ -179,7 +180,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   }
 
   DateTime autoStarted = DateTime(2000);
-  bool get ble => Platform.isAndroid && settings?.source == 'ble';
+  bool get ble => settings?.source == 'ble';
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -813,8 +814,8 @@ class _QrScanPageState extends State<QrScanPage> {
       Scaffold(appBar: AppBar(title: const Text('扫码登录')), body: MobileScanner(controller: controller, onDetect: _onDetect));
 }
 
-/// The BLE recorder (Android): which one is bound and, as last read over the link, its battery, card, offline sync
-/// and firmware; the card as a USB disk on a computer, a firmware update from the server (firmware.dart), unbinding.
+/// The BLE recorder: which one is bound and, as last read over the link, its battery, card, offline sync and firmware;
+/// the card as a USB disk on a computer, a firmware update from the server (firmware.dart, Android), unbinding.
 class RecorderPage extends StatefulWidget {
   final bool visible;
   final Future<void> Function(String source) onSource;  // bound: 'ble'; unbound: back to 'mic'
@@ -830,10 +831,8 @@ class _RecorderPageState extends State<RecorderPage> {
   @override
   void initState() {
     super.initState();
-    if (Platform.isAndroid) {
-      _load();
-      timer = Timer.periodic(const Duration(seconds: 2), (_) => widget.visible ? _load() : null);
-    }
+    _load();
+    timer = Timer.periodic(const Duration(seconds: 2), (_) => widget.visible ? _load() : null);
   }
 
   @override
@@ -865,9 +864,10 @@ class _RecorderPageState extends State<RecorderPage> {
   Future<void> _unbind(String name, bool linked) async {
     final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
       title: Text('解除绑定 $name？'),
-      content: Text(linked
-          ? '录音设备会忘掉所有手机、停止录音（卡上的录音已取回）。这台手机改用手机麦克风。'
-          : '录音设备不在附近：只在这台手机上解除，它自己还记着绑定、会继续录音。以后可以在添加时强制绑定。'),
+      content: Text((linked
+              ? '录音设备会忘掉所有手机、停止录音（卡上的录音已取回）。这台手机改用手机麦克风。'
+              : '录音设备不在附近：只在这台手机上解除，它自己还记着绑定、会继续录音。以后可以在添加时强制绑定。') +
+          (Platform.isIOS ? '\n\niPhone 自己的配对记录 App 删不掉：之后到 设置 › 蓝牙 › $name › 忽略此设备；以后要在这台 iPhone 上再绑定它，必须先忽略。' : '')),
       actions: [
         TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('取消')),
         TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('解除绑定')),
@@ -897,7 +897,6 @@ class _RecorderPageState extends State<RecorderPage> {
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context), cs = t.colorScheme;
-    if (!Platform.isAndroid) return const Center(child: Text('BLE 录音硬件目前只支持 Android'));
     final name = r['name'] as String?, model = r['model'] as String?;
     final hw = (st['hw'] as Map?) ?? {};
     final fw = (hw['fw'] ?? r['fw']) as String?;
@@ -965,7 +964,8 @@ class _RecorderPageState extends State<RecorderPage> {
         if (r['kicked'] == true) ...[
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Text('另一台手机绑定了这台录音设备，这台手机不再连它。要拿回来，就重新添加（原来那台手机会被顶掉）。', style: small),
+            child: Text('另一台手机绑定了这台录音设备，这台手机不再连它。要拿回来，就重新添加（原来那台手机会被顶掉）。'
+                '${Platform.isIOS ? '重新添加前，先到 iPhone 设置 › 蓝牙 › $name › 忽略此设备。' : ''}', style: small),
           ),
           add,
         ],
@@ -1166,7 +1166,7 @@ class _AddRecorderPageState extends State<AddRecorderPage> {
           Padding(padding: const EdgeInsets.only(top: 12), child: Text('蓝牙没有打开：打开后这里会开始找录音设备', style: TextStyle(color: cs.error))),
         if (['bluetooth', 'notifications', 'battery'].any((k) => perms.isNotEmpty && perms[k] != true))
           sectionCard(context, '权限', Column(children: [
-            perm('bluetooth', '附近的设备', '找到并连接录音设备'),
+            perm('bluetooth', Platform.isIOS ? '蓝牙' : '附近的设备', '找到并连接录音设备'),
             perm('notifications', '通知', '后台连接录音设备时要显示一条通知'),
             perm('battery', '后台运行', '不受电池优化限制，录音设备才能整天连着'),
           ])),

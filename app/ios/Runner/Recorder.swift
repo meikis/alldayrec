@@ -1,12 +1,18 @@
 // iOS counterpart of RecorderService.kt + Slicer: the microphone stays open under the `audio` background mode,
 // the stream is cut into Ogg Opus pieces (a piece cut short by a kill still decodes) and uploaded in order.
 // iOS has no START_STICKY: after a kill, the next launch uploads what was left and the owner restarts by hand.
+// With the BLE recorder as the source (Ble.swift) the microphone stays off: the link makes the pieces, and it comes back
+// by itself at launch, also when iOS relaunches the app in the background for the recorder.
 import AVFoundation
+import CoreBluetooth
 import Flutter
 import UIKit
 
 enum Recorder {
   static var slicer: Slicer?
+  static var link: BleLink?  // the BLE recorder, when it is the source instead of the microphone
+  static var nearby: Nearby?  // the add-recorder page's scan, while it is open
+  static var probe: CBCentralManager?  // whether Bluetooth is on, for that page
   static var uploader: Uploader?
   static var interruptedAt: Int64?
   static var foregroundApp = true
@@ -28,41 +34,106 @@ enum Recorder {
         slicer?.foreground = foregroundApp
         if foregroundApp { slicer?.resume() }  // a recording the system stopped and did not give back (from the background iOS may refuse)
         result(nil)
-      case "slices":  // new lengths from the server: the running slicer cuts its next piece with them
+      case "slices":  // new lengths from the server: the running slicer cuts its next piece with them, the link reads them
         slicer?.setSlices(fg: a["foreground"] as? Int ?? 1, bg: a["background"] as? Int ?? 20)
+        for k in ["foreground", "background"] { defaults.set(a[k] as? Int ?? 20, forKey: k) }
         result(nil)
       case "status": result(status())
       case "deviceName": result(UIDevice.current.name)  // "iPhone" since iOS 16 without the user-assigned-device-name entitlement
       case "upload": if Uploader.pending(dir) > 0 { upload() }; result(nil)
+      case "recorder":  // the bound BLE recorder and what it last said; firmware updates are Android's (Dfu.kt)
+        result(["name": defaults.string(forKey: "bleName") ?? NSNull(), "model": defaults.string(forKey: "bleModel") ?? NSNull(),
+                "fw": defaults.string(forKey: "bleFw") ?? NSNull(), "dfu": NSNull(), "kicked": defaults.bool(forKey: "bleKicked")])
+      case "permissions":  // what adding a recorder asks for: on iOS only Bluetooth (no notification, no battery setting)
+        let ok = CBManager.authorization == .allowedAlways
+        if ok && probe == nil { probe = CBCentralManager(delegate: nil, queue: nil, options: [CBCentralManagerOptionShowPowerAlertKey: false]) }
+        result(["bluetooth": ok, "notifications": true, "battery": true, "bluetoothOn": probe.map { $0.state != .poweredOff } ?? true])
+      case "askPermission":
+        if a["which"] as? String == "bluetooth" {
+          if CBManager.authorization == .notDetermined { probe = CBCentralManager(delegate: nil, queue: nil) }  // iOS asks now
+          else if let u = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(u) }  // refused once: only Settings
+        }
+        result(nil)
+      case "scan":  // the add-recorder page opens (true; again every 30 s: one scan goes on, keeping the names it has) or closes
+        if a["on"] as? Bool != true { nearby?.stop(); nearby = nil }
+        else if nearby == nil && CBManager.authorization == .allowedAlways { nearby = Nearby() }
+        result(nil)
+      case "nearby": result(nearby?.list() ?? [])
+      case "bind":  // the recorder the person chose (address: its identifier): the link pairs with it next
+        defaults.set(a["name"] as? String, forKey: "bleName")
+        defaults.set(a["address"] as? String, forKey: "bleId")
+        defaults.set(true, forKey: "bindPending")
+        defaults.set(a["force"] as? Bool ?? false, forKey: "bindForce")  // the recorder then forgets its other phones
+        for k in ["bleKicked", "bleModel", "bleFw"] { defaults.removeObject(forKey: k) }
+        result(nil)
+      case "usbDisk":  // the connected board's card to the computer's USB, or back
+        guard let l = link else { return result(FlutterError(code: "none", message: "先开始录音，连上录音设备", details: nil)) }
+        l.usbDisk(a["on"] as? Bool ?? false)
+        result(nil)
+      case "unbind":  // the recorder forgets every phone (when connected); this iPhone's keys stay (no API: Settings)
+        Thread.detachNewThread {
+          // first: the link must not reconnect when the recorder drops it
+          for k in ["bleName", "bleId", "bleModel", "bleFw", "bindPending", "bindForce", "bleKicked"] { defaults.removeObject(forKey: k) }
+          let forgot = link?.forgetAll() ?? false
+          DispatchQueue.main.async { result(forgot) }
+        }
+      case "pause":  // the connected recorder keeps nothing for s seconds (0: records again)
+        do {
+          guard let l = link else { throw CocoaError(.featureUnsupported) }
+          try l.pause(a["s"] as? Int ?? 0)
+          result(nil)
+        } catch { result(FlutterError(code: "none", message: "录音设备没连上", details: nil)) }
       default: result(FlutterMethodNotImplemented)
       }
     }
-    resume()
   }
 
   static func status() -> [String: Any] {
     let q = Uploader.files(dir)
     let bytes = q.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
-    return ["running": slicer != nil, "uploading": uploader != nil && !q.isEmpty, "files": slicer?.files ?? NSNull(),
-            "slice": slicer?.sliceS() ?? NSNull(), "error": slicer?.error ?? NSNull(), "sent": uploader?.sent ?? NSNull(),
+    let l = link
+    return ["running": slicer != nil || l != nil, "uploading": uploader != nil && !q.isEmpty, "files": slicer?.files ?? l?.files ?? NSNull(),
+            "slice": slicer?.sliceS() ?? (l != nil ? sliceS() : nil) ?? NSNull(), "error": slicer?.error ?? NSNull(), "sent": uploader?.sent ?? NSNull(),
             "pending": q.count, "pendingBytes": bytes, "oldest": q.first.flatMap { Uploader.piece($0)?.start } ?? NSNull(),
-            "note": uploader?.note ?? NSNull(), "interruptedAt": interruptedAt ?? NSNull()]
+            "note": uploader?.note ?? NSNull(), "interruptedAt": interruptedAt ?? NSNull(),
+            "source": (slicer != nil ? "mic" : l != nil ? "ble" : nil) ?? NSNull(), "link": l?.state ?? NSNull(), "tag": l?.tag ?? NSNull(),
+            "hw": l?.hw ?? NSNull(), "usbNote": l?.usbNote ?? NSNull(), "lastSync": l?.syncNote ?? NSNull(),
+            "syncDone": l?.syncDoneKb ?? NSNull(), "syncTotal": l?.syncTotalKb ?? NSNull(), "pausedUntil": l?.pausedUntil ?? NSNull()]
   }
 
+  /// The piece length the BLE link cuts the live file into (the microphone's Slicer has its own).
+  static func sliceS() -> Int { max(1, defaults.integer(forKey: foregroundApp ? "foreground" : "background")) }
+
   private static func start(_ a: [String: Any]) -> String? {
-    if slicer != nil { return nil }
-    for k in ["server", "token", "device"] { defaults.set(a[k] as? String ?? "", forKey: k) }
+    if slicer != nil || link != nil { return nil }
+    for k in ["server", "token", "device", "source"] { defaults.set(a[k] as? String ?? "", forKey: k) }
     defaults.set(a["archive"] as? Bool ?? true, forKey: "archive")
-    let s = Slicer(dir: dir, fgS: a["foreground"] as? Int ?? 1, bgS: a["background"] as? Int ?? 20)
-    s.foreground = foregroundApp
-    do { try s.start() } catch { return "\(error)" }
-    slicer = s
+    defaults.set(a["foreground"] as? Int ?? 1, forKey: "foreground")
+    defaults.set(a["background"] as? Int ?? 20, forKey: "background")
+    if defaults.string(forKey: "source") == "ble" {
+      startLink()
+    } else {
+      let s = Slicer(dir: dir, fgS: a["foreground"] as? Int ?? 1, bgS: a["background"] as? Int ?? 20)
+      s.foreground = foregroundApp
+      do { try s.start() } catch { return "\(error)" }
+      slicer = s
+      UIApplication.shared.isIdleTimerDisabled = true  // the page is meant to be watched
+    }
     interruptedAt = nil
     defaults.set(true, forKey: "active")
     defaults.removeObject(forKey: "endAt")  // a new recording carries on: no end for the last stop
-    UIApplication.shared.isIdleTimerDisabled = true  // the page is meant to be watched
+    defaults.removeObject(forKey: "endDevice")
     upload()
     return nil
+  }
+
+  private static func startLink() {
+    let fm = FileManager.default
+    let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]  // undated audio: in the Files app, as on Android
+    link = BleLink(chunks: dir, undated: docs.appendingPathComponent("undated"), mirrors: support.appendingPathComponent("recorder"),
+                   sliceS: sliceS, report: { name, hw in uploader?.report(name, hw) })
+    link!.start()
   }
 
   private static func stop() {
@@ -72,6 +143,7 @@ enum Recorder {
     }
     UIApplication.shared.isIdleTimerDisabled = false
     slicer?.stop(); slicer = nil
+    if let l = link { defaults.set(l.tag, forKey: "endDevice"); l.stop(); link = nil }  // the end goes under the recorder's name
     // iOS gives about 30 s after the app leaves the screen; what is not sent by then goes on the next launch
     var task = UIBackgroundTaskIdentifier.invalid
     let release = {
@@ -88,7 +160,11 @@ enum Recorder {
   private static func endAfterQueue(_ done: @escaping () -> Void = {}) {
     Thread.detachNewThread {
       while Uploader.pending(dir) > 0 && defaults.object(forKey: "endAt") != nil { Thread.sleep(forTimeInterval: 0.5) }
-      if let at = defaults.object(forKey: "endAt") as? Int64 { uploader?.end(at); defaults.removeObject(forKey: "endAt") }  // the server may close the conversation now
+      if let at = defaults.object(forKey: "endAt") as? Int64 {  // the server may close the conversation now
+        uploader?.end(at, device: defaults.string(forKey: "endDevice"))
+        defaults.removeObject(forKey: "endAt")
+        defaults.removeObject(forKey: "endDevice")
+      }
       done()
     }
   }
@@ -106,8 +182,11 @@ enum Recorder {
     defaults.removeObject(forKey: "endAt")
   }
 
-  /// At launch: a piece being written when the process died still decodes up to its last page; send what is left over.
-  private static func resume() {
+  /// At launch (AppDelegate, before any UI: iOS may be relaunching the app in the background for the BLE recorder): a
+  /// piece being written when the process died still decodes up to its last page; send what is left over. The BLE link
+  /// comes back by itself: the recorder records anyway, and the link is always on (Android's sticky service).
+  static func launch() {
+    foregroundApp = UIApplication.shared.applicationState != .background
     let fm = FileManager.default
     var last: Int64 = 0
     for f in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
@@ -116,6 +195,11 @@ enum Recorder {
       if f.lastPathComponent.contains(".part.") {  // no sample count: <start>.ogg (or .aac from the app before)
         try? fm.moveItem(at: f, to: dir.appendingPathComponent(f.lastPathComponent.replacingOccurrences(of: ".part.", with: ".")))
       }
+    }
+    if defaults.bool(forKey: "active") && defaults.string(forKey: "source") == "ble" {
+      startLink()
+      upload()
+      return
     }
     guard defaults.bool(forKey: "active") || Uploader.pending(dir) > 0 || defaults.object(forKey: "endAt") != nil else { return }
     let killed = defaults.bool(forKey: "active")
@@ -290,8 +374,10 @@ final class Slicer {
   }
 }
 
-/// Uploads the .ogg files (.aac from the app before) in start order, one at a time, retrying forever; a file is archived or deleted once the
-/// server has it, so the directory is the offline queue.
+/// Uploads the .ogg files (.aac from the app before) in start order, retrying forever; a file is archived or deleted once
+/// the server has it, so the directory is the offline queue. The BLE recorder's back-to-back pieces waiting together go
+/// as one request, as on Android (each is a whole Ogg stream, so their bytes in a row decode as one): with 1 s pieces
+/// one request per piece cannot keep up when a request takes over a second.
 final class Uploader: Thread {
   var server = "", token = "", device = "phone", archive: URL?
   private(set) var sent = 0
@@ -301,11 +387,25 @@ final class Uploader: Thread {
 
   init(dir: URL) { self.dir = dir }
 
-  /// A queued file's start (unix ms) and sample count: <start>_<n>.ogg, or <start>.ogg for a piece a kill cut short.
-  static func piece(_ f: URL) -> (start: Int64, n: Int64?)? {
-    let p = f.deletingPathExtension().lastPathComponent.split(separator: "_").map { Int64($0) }
+  /// A queued file's start (unix ms) and sample count: <start>_<n>.ogg, or <start>.ogg for a piece a kill cut short;
+  /// the BLE recorder's carry its name instead: <start>@LR-P1-BDAE.ogg, uploaded as that device.
+  static func piece(_ f: URL) -> (start: Int64, n: Int64?, device: String?)? {
+    let at = f.deletingPathExtension().lastPathComponent.split(separator: "@", maxSplits: 1)
+    let p = at[0].split(separator: "_").map { Int64($0) }
     guard ["ogg", "aac"].contains(f.pathExtension), (1...2).contains(p.count), let start = p[0] else { return nil }
-    return (start, p.count == 2 ? p[1] : nil)
+    return (start, p.count == 2 ? p[1] : nil, at.count == 2 ? String(at[1]) : nil)
+  }
+
+  /// The oldest pieces of one BLE recorder that follow each other (a stop or a kill leaves a gap), at most 30; the
+  /// microphone's go one at a time, each with its n.
+  private func batch(_ q: [URL]) -> [URL] {
+    guard let d = Uploader.piece(q[0])?.device else { return [q[0]] }
+    var out = [q[0]]
+    for f in q.dropFirst() {
+      guard out.count < 30, let p = Uploader.piece(f), p.device == d, p.start - Uploader.piece(out.last!)!.start <= 1500 else { break }
+      out.append(f)
+    }
+    return out
   }
 
   static func files(_ dir: URL) -> [URL] {
@@ -318,13 +418,15 @@ final class Uploader: Thread {
 
   override func main() {
     while true {
-      guard let f = Uploader.files(dir).first, let p = Uploader.piece(f) else { Thread.sleep(forTimeInterval: 1); continue }
+      let q = Uploader.files(dir)
+      guard let f = q.first, let p = Uploader.piece(f) else { Thread.sleep(forTimeInterval: 1); continue }
+      let b = batch(q)
       do {
-        let code = try post("\(server)/api/chunks?device=\(enc(device))&start=\(p.start)" + (p.n.map { "&n=\($0)" } ?? ""),
-                            try Data(contentsOf: f), f.pathExtension == "ogg" ? "audio/ogg" : "audio/aac")
+        let code = try post("\(server)/api/chunks?device=\(enc(p.device ?? device))&start=\(p.start)" + (p.n.map { "&n=\($0)" } ?? ""),
+                            try b.reduce(Data()) { $0 + (try Data(contentsOf: $1)) }, f.pathExtension == "ogg" ? "audio/ogg" : "audio/aac")
         switch code {
-        case 200: keep(f); sent += 1; fails = 0; note = nil
-        case 400: try? FileManager.default.removeItem(at: f); note = "服务端无法解码一块，已丢弃"
+        case 200: b.forEach(keep); sent += b.count; fails = 0; note = nil
+        case 400: b.forEach { try? FileManager.default.removeItem(at: $0) }; note = "服务端无法解码一块，已丢弃"
         default: throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "HTTP \(code)"])
         }
       } catch {
@@ -335,8 +437,15 @@ final class Uploader: Thread {
     }
   }
 
-  func end(_ atMs: Int64) {
-    do { _ = try post("\(server)/api/chunks/end?device=\(enc(device))&t=\(atMs)", Data(), nil) } catch { note = "结束信号失败 \(error.localizedDescription)" }
+  func end(_ atMs: Int64, device ble: String? = nil) {
+    do { _ = try post("\(server)/api/chunks/end?device=\(enc(ble ?? device))&t=\(atMs)", Data(), nil) } catch { note = "结束信号失败 \(error.localizedDescription)" }
+  }
+
+  /// What the phone last read from its BLE recorder, for the server's progress page; best effort, off this thread.
+  func report(_ device: String, _ hw: [String: Any]) {
+    Thread.detachNewThread { [self] in
+      _ = try? post("\(server)/api/device-status?device=\(enc(device))", (try? JSONSerialization.data(withJSONObject: hw)) ?? Data(), "application/json")
+    }
   }
 
   private func keep(_ f: URL) {
@@ -358,6 +467,12 @@ final class Uploader: Thread {
     r.httpMethod = "POST"
     r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     if let type { r.setValue(type, forHTTPHeaderField: "Content-Type") }
+    // the request finishes even if iOS would suspend the app meanwhile (the BLE link keeps it awake only while the
+    // recorder sends): up to the ~30 s iOS gives
+    var task = UIBackgroundTaskIdentifier.invalid
+    let release = { DispatchQueue.main.async { if task != .invalid { UIApplication.shared.endBackgroundTask(task); task = .invalid } } }
+    task = UIApplication.shared.beginBackgroundTask(withName: "upload", expirationHandler: release)  // not ended on expiry = killed
+    defer { release() }
     var code = 0, err: Error?
     let done = DispatchSemaphore(value: 0)
     URLSession.shared.uploadTask(with: r, from: body) { _, resp, e in

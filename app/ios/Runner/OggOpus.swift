@@ -1,7 +1,7 @@
 // Opus in Ogg pages written by hand (RFC 7845; port of web/src/lib/ogg.ts). AudioToolbox encodes Opus
 // (kAudioFormatOpus, iOS 11) but cannot write Ogg ('pck?'), and its CAF/MP4 hold nothing readable after a kill;
 // an Ogg page is self-contained, so a piece cut short still decodes up to its last whole page.
-// Checked on a Mac against ffmpeg: app/ios/OggOpusCheck/main.swift.
+// Checked on a Mac against ffmpeg: app/ios/OggOpusCheck/main.swift. The page itself is Ogg.page (Store.swift).
 import AVFoundation
 
 /// One run of continuous recording: 16 kHz mono float in, one Opus encoder (20 ms, 24 kbps), cut into Ogg Opus
@@ -105,24 +105,9 @@ final class OpusPieces {
   }
 
   private func page(_ packets: [Data], flags: UInt8, granule: Int64) throws {
-    var lacing: [UInt8] = []
-    for p in packets {
-      var n = p.count
-      while true { lacing.append(UInt8(min(n, 255))); if n < 255 { break }; n -= 255 }
-    }
-    var out = Data("OggS".utf8) + [0, flags] + le(UInt64(granule)) + le(piece!.serial) + le(piece!.seq) + le(UInt32(0)) + [UInt8(lacing.count)] + lacing
-    for p in packets { out += p }
-    var crc: UInt32 = 0
-    for b in out { crc = (crc << 8) ^ Self.crc[Int(((crc >> 24) ^ UInt32(b)) & 0xff)] }
-    out.replaceSubrange(22..<26, with: le(crc))
+    let out = Ogg.page(packets, flags: flags, granule: granule, serial: piece!.serial, seq: piece!.seq)  // Store.swift
     piece!.seq += 1
     try piece!.h.write(contentsOf: out)  // unbuffered: on disk for the next launch even if the process dies
-  }
-
-  private static let crc: [UInt32] = (0..<256).map { i in
-    var r = UInt32(i) << 24
-    for _ in 0..<8 { r = r & 0x8000_0000 != 0 ? (r << 1) ^ 0x04c1_1db7 : r << 1 }
-    return r
   }
 
   private func le<T: FixedWidthInteger>(_ v: T) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }

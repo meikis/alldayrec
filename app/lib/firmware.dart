@@ -1,6 +1,7 @@
 // The BLE recorder's firmware from the server (server/firmware.py): the newest package of the recorder's model, looked
-// up and sent over Bluetooth (Dfu.kt) only when the person asks. Android only, as the recorder page.
+// up and sent over Bluetooth (Dfu.kt) only when the person asks. Android only: on iOS the tile shows the revision.
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -115,6 +116,7 @@ class _FirmwareTileState extends State<FirmwareTile> {
       if (m != null && newer && '${m['notes'] ?? ''}'.isNotEmpty) '${m['notes']}',
       ?note,
       ?widget.dfu,
+      if (Platform.isIOS) 'iPhone 上不能升级固件：用 Android 手机的 App，或插 USB 用 lr.sh flash',
     ];
     return ListTile(
       contentPadding: EdgeInsets.zero,
@@ -123,7 +125,7 @@ class _FirmwareTileState extends State<FirmwareTile> {
       subtitle: Text(lines.join('\n')),
       trailing: wait
           ? const SizedBox.square(dimension: 24, child: CircularProgressIndicator(strokeWidth: 2.5))
-          : widget.model == null
+          : widget.model == null || Platform.isIOS
               ? null
               : newer
                   ? FilledButton.tonalIcon(onPressed: _update, icon: const Icon(Icons.system_update_alt_rounded, size: 18), label: const Text('升级'))

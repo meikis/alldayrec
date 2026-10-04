@@ -1,7 +1,7 @@
 // OpusPieces (Runner/OggOpus.swift) on a Mac, read back with ffmpeg as the server does: every piece decodes to
 // exactly its n samples, the pieces of two runs put end to end are the input sample for sample in time (no gap,
 // no overlap), and a piece cut short by a kill still decodes.
-//   swiftc -o /tmp/oggopus app/ios/Runner/OggOpus.swift app/ios/OggOpusCheck/main.swift && /tmp/oggopus
+//   swiftc -o /tmp/oggopus app/ios/Runner/Store.swift app/ios/Runner/OggOpus.swift app/ios/OggOpusCheck/main.swift && /tmp/oggopus
 import AVFoundation
 
 setbuf(stdout, nil)
