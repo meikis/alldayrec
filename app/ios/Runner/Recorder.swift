@@ -188,6 +188,13 @@ enum Recorder {
   /// piece being written when the process died still decodes up to its last page; send what is left over. The BLE link
   /// comes back by itself: the recorder records anyway, and the link is always on (Android's sticky service).
   static func launch() {
+    // app/ios/e2e/run.sh: settings in the launch environment (only devicectl or a debugger sets one); null removes a key
+    if let j = ProcessInfo.processInfo.environment["LR_E2E"], let d = try? JSONSerialization.jsonObject(with: Data(j.utf8)) as? [String: Any] {
+      for (k, v) in d {
+        let u = k.hasPrefix("flutter.") ? UserDefaults.standard : defaults  // flutter.*: the Dart side's shared_preferences
+        if v is NSNull { u.removeObject(forKey: k) } else { u.set(v, forKey: k) }
+      }
+    }
     DeviceLog.start(dir: dir.deletingLastPathComponent(), prefs: defaults)
     foregroundApp = UIApplication.shared.applicationState != .background
     let fm = FileManager.default

@@ -488,7 +488,8 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     guard t.count >= 16 else { throw Fail(description: "状态只有 \(t.count) 字节") }
     let s = Status(boot: Int(Store.le(t, 0, 2)), frame: Ble.u32(t, 2), store: Int(Int16(truncatingIfNeeded: Store.le(t, 6, 2))))
     var h: [String: Any] = ["name": name, "store": s.store, "free_kb": Ble.u32(t, 8), "total_kb": Ble.u32(t, 12),
-                            "battery": (try read(p, Ble.bas, Ble.battery)).first.map { Int($0) } ?? NSNull()]
+                            // optional: macOS cannot publish 180F, so the Mac's fake recorder (app/ios/e2e) has none
+                            "battery": (try? read(p, Ble.bas, Ble.battery))?.first.map { Int($0) } ?? NSNull()]
     if t.count >= 47 {
       let left = Int64(Int32(truncatingIfNeeded: Store.le(t, 43, 4)))
       pausedUntil = left > 0 ? Recorder.now() + left * 1000 : 0
