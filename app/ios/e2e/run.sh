@@ -3,8 +3,9 @@
 # stream of firmware/devkit/src/lr_store.h over CoreBluetooth), server.py stands in for the server behind a cloudflared
 # quick tunnel (HTTPS: no ATS exception, no local-network prompt on the phone), and the app on a wirelessly paired
 # iPhone gets its settings from the launch environment (LR_E2E, Recorder.launch()): bound to the fake, BLE source.
-# The phone must stay unlocked for the few seconds of the app's launch; after that it may lock (the app goes on in the
-# background). A launch refused (locked again) is tried at the next unlock.
+# The phone must stay unlocked until the app has found the fake (about 15 s: it scans for its name, which iOS sees only
+# in the foreground); after that it may lock (the app goes on in the background). A launch that is refused or does not
+# connect is tried again at the next unlock.
 #   app/ios/e2e/run.sh [--install] [--minutes N] [--kill]
 #     --install    build the release app (debug Flutter builds do not run on their own) and install it
 #     --minutes N  how long the app follows the fake (default 5); then server.py check
@@ -95,7 +96,7 @@ tunnel
 # the app launched while the phone is unlocked, and running: iOS refuses a launch once the phone has locked again, and
 # the wait starts over (the fake advertises only while the app is meant to follow it)
 start() {  # $1: the app's settings (JSON); $2: run the fake for it
-  while true; do
+  for try in 1 2 3 4 5; do
     unlocked
     answers || tunnel
     if [ -n "${2:-}" ]; then
@@ -107,10 +108,19 @@ start() {  # $1: the app's settings (JSON); $2: run the fake for it
     launch "$1"
     sleep 8
     P=$(pid)
-    [ -n "$P" ] && return
-    say "the app did not start (locked again?): waiting for the next unlock"
+    if [ -n "$P" ] && [ -n "${2:-}" ]; then  # and it found the fake: by its name, which iOS sees only in the foreground
+      for _ in $(seq 30); do grep -q "subscribed 7C3E0004" "$W/fake.log" && return; sleep 2; done
+      say "the app runs but did not connect to the fake in 60 s (locked before its scan?)"
+    elif [ -n "$P" ]; then
+      return
+    else
+      say "the app did not start (locked again?)"
+    fi
+    say "waiting for the next unlock (try $try of 5)"
     if [ -n "${2:-}" ]; then kill $FAKE; FAKE=; fi
+    while xcrun devicectl device info lockState --device "$DEV" 2>/dev/null | grep -q "passcodeRequired: false"; do sleep 10; done
   done
+  say "giving up: the app never ran with the fake"; exit 1
 }
 
 # the test

@@ -228,11 +228,16 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       return connect(p, auto: false)
     }
     state = "正在找 \(bound)"
+    Ble.log("scanning for \(bound)")
     c.scanForPeripherals(withServices: [Ble.store])
   }
 
   func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral, advertisementData a: [String: Any], rssi: NSNumber) {
-    guard let bound = prefs.string(forKey: "bleName"), Ble.name([a[CBAdvertisementDataLocalNameKey] as? String, p.name]) == bound else { return }
+    let name = Ble.name([a[CBAdvertisementDataLocalNameKey] as? String, p.name])
+    // in the background iOS asks for no scan responses: a full name never comes (binding saves the identifier for that)
+    guard let bound = prefs.string(forKey: "bleName"), name == bound else {
+      return Ble.log("scan: \(name ?? "-") (advertised \(a[CBAdvertisementDataLocalNameKey] as? String ?? "no name"))")
+    }
     if a[CBAdvertisementDataIsConnectable] as? Bool == false { state = "\(bound) 正连着其他手机"; return }
     c.stopScan()
     Ble.log("found \(p.identifier) \(bound) rssi=\(rssi)")
