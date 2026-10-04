@@ -1,8 +1,8 @@
 // The record stream as the phone takes it (Runner/Store.swift), the cases of the Android app's StoreTest.kt and the data
 // of firmware/devkit/lr_sync.py's selftest: mirror (LIVE with holes READ again), pieces dated by the nearest 'T', frames
-// held for a boot without one, closed files finished and deletable once their pieces are uploaded. Foundation only, so
-// CI runs it on Linux:
-//   swiftc -o /tmp/storecheck app/ios/Runner/Store.swift app/ios/StoreCheck/main.swift && /tmp/storecheck
+// held for a boot without one, closed files finished and deletable once their pieces are uploaded; and the recorder's
+// event log (Runner/DeviceLog.swift, DeviceLogTest.kt's case). Foundation only, so CI runs it on Linux:
+//   cd app/ios && swiftc -o /tmp/storecheck Runner/Store.swift Runner/DeviceLog.swift StoreCheck/main.swift && /tmp/storecheck
 import Foundation
 
 func check<T: Equatable>(_ got: T, _ want: T, _ what: String, line: Int = #line) {
@@ -112,6 +112,35 @@ do {
 do {
   let ogg = Store.oggOpus(Array(repeating: Data([0xF8, 0xFF, 0xFE]), count: 120))  // 120 silent 10 ms Opus frames
   check(count(ogg, "OggS"), 5, "pages: head, tags, 50 + 50 + 20 frames")
+}
+
+// the recorder's event log (DeviceLog.swift), the case of DeviceLogTest.kt and lr_sync.py --selftest: boot 7's TIME fell
+// out of the log, boot 8's frames are dated by its TIME at frame 1000; LOG packets out of order, one sent twice
+do {
+  let T: Int64 = 1_700_000_000_000
+  func r(_ boot: Int, _ t: Int, _ code: Int, _ x: Int = 0, _ a: Int64 = 0, _ b: Int64 = 0) -> [UInt8] {
+    Store.le(UInt16(boot)) + Store.le(UInt32(t)) + [UInt8(code), UInt8(x)] + Store.le(UInt32(truncatingIfNeeded: a)) + Store.le(UInt32(truncatingIfNeeded: b))
+  }
+  func pkt(_ seq: Int, _ recs: [UInt8]...) -> [UInt8] { Store.le(UInt32(seq)) + recs.flatMap { $0 } }
+  let packets = [pkt(5003, r(8, 400, 9, 0, 24, 400), r(8, 1000, 14, 0, T & 0xffff_ffff, T >> 32)),
+                 pkt(5000, r(7, 123456, 22, 200, 2048, 7), r(8, 1500, 1 | 0x80, 205, 0x4, 0x1abcdef | 1 << 28)),
+                 pkt(5002, r(8, 3200, 3 | 0x80, 1, -5)),
+                 pkt(5003, r(8, 400, 9, 0, 24, 400)),
+                 pkt(5005, r(8, 2000, 10, 0x13), r(8, 2100, 0x63, 1, 2, 3))]
+  let recs = DeviceLog.records(packets)
+  check(recs.map(\.seq), Array(5000...5006), "records by seq")
+  check(recs[4], DeviceLog.Rec(seq: 5004, boot: 8, t: 1000, code: 14, x: 0, a: T & 0xffff_ffff, b: T >> 32), "TIME record")
+  check(recs[2], DeviceLog.Rec(seq: 5002, boot: 8, t: 3200, code: 0x83, x: 1, a: 0xffff_fffb, b: 0), "u32 fields stay unsigned")
+  check(recs[1].b, 0x1abcdef | 1 << 28, "b")
+  // boot 7 undated; boot 8's uptime records at its frame 0 (T - 10 s); frames 10 ms each from the TIME at 1000
+  check(DeviceLog.dates(recs, known: [:]), [nil, T - 10_000, T - 10_000, T - 6_000, T, T + 10_000, T + 11_000], "dates")
+  // a later read of the same boot, its TIME known from the read before
+  let later = DeviceLog.records([pkt(5007, r(8, 61_000, 22, 190))])
+  check(DeviceLog.dates(later, known: [8: (1000, T)]), [T + 600_000], "dated by an earlier read's TIME")
+  check(DeviceLog.dates(later, known: [7: (1000, T)]), [nil], "another boot's TIME: no")
+  check(DeviceLog.cursor(recs, next: 5007), 5007, "all there")
+  check(DeviceLog.cursor(recs.filter { $0.seq != 5002 }, next: 5007), 5002, "a notify lost: read again from it")
+  check(DeviceLog.cursor([], next: 5007), 5007, "nothing new")
 }
 
 print("storecheck ok")

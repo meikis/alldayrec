@@ -265,6 +265,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     conn = nil  // its session ends at its next step
     abort()
     guard p === peripheral else { return }  // an old link, already given up
+    DeviceLog.disconnected(tag ?? p.identifier.uuidString, error?.localizedDescription)
     lastSeen = Ble.hhmm()
     if BleLink.stale(error) { forgotten(p) }
     // a pairing that did not finish (a dialog left alone) waits a little; unbound or kicked: no reconnecting
@@ -294,6 +295,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   private func kicked(_ p: CBPeripheral, _ why: String) {
     Ble.log("kicked: \(why)")
     prefs.set(true, forKey: "bleKicked")
+    DeviceLog.app(tag ?? p.identifier.uuidString, "kicked", "录音设备不再认这台手机（\(why)），不再重连", level: "error")
     state = BleLink.kicked
     q.async { self.central?.cancelPeripheralConnection(p) }
   }
@@ -376,7 +378,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   private func step<T>(_ what: String, _ block: () throws -> T) rethrows -> T {
     state = what
     let t0 = Date()
-    defer { Ble.log("\(what): \(Int(-t0.timeIntervalSinceNow * 1000)) ms") }
+    defer { let ms = Int(-t0.timeIntervalSinceNow * 1000); Ble.log("\(what): \(ms) ms"); DeviceLog.step(what, ms) }
     return try block()
   }
 
@@ -431,6 +433,8 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       let m = Mirror(mirrors.appendingPathComponent(Ble.tag(name)))
       boot = st.boot
       try catchUp(p, m)
+      readLog(p)
+      DeviceLog.connected(Ble.tag(name))
       state = "已连接 · 实时上传"
       var lastStatus = Date()
       var open: Int64 = -1  // the file LIVE goes on in
@@ -451,6 +455,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         if -lastStatus.timeIntervalSinceNow > 60 {
           try jobs.poll()?(p)
           _ = try status(p, name)
+          readLog(p)
           try clean(p, m)
           lastStatus = Date()
           Ble.log("status: battery \(hw["battery"] ?? "-")% card \(hw["store"] ?? "-") free \(hw["free_kb"] ?? "-") KB")
@@ -504,6 +509,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     jobs.put { [self] p in
       try write(p, Ble.ctrl, [0x20] + Store.le(UInt32(s)))  // PAUSE
       pausedUntil = s > 0 ? Recorder.now() + Int64(s) * 1000 : 0
+      DeviceLog.app(tag ?? "", s > 0 ? "pause" : "resume", s > 0 ? "暂停录音 \(s % 60 == 0 ? "\(s / 60) 分钟" : "\(s) 秒")" : "恢复录音")
       Ble.log("pause \(s) s")
     }
   }
@@ -588,6 +594,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
     Ble.log("caught up: \(done) B in \(Int(-t0.timeIntervalSinceNow)) s")
     syncNote = "\(Ble.hhmm()) 补传录音设备的录音 \(done / 1024) KB"
+    if done > 0 { DeviceLog.app(tag ?? "", "sync", "补传 \(done / 1024) KB，用时 \(Int(-t0.timeIntervalSinceNow)) s") }
     syncDoneKb = 0; syncTotalKb = 0
   }
 
@@ -618,6 +625,26 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   }
 
   private var boot = 0  // the session's
+
+  /// The recorder's event log since the last read (DeviceLog), with nothing else in flight on the link. A log that
+  /// started over (erased: next below where we were) is read from 0.
+  private func readLog(_ p: Conn) {
+    guard let tag else { return }
+    do {
+      var from = DeviceLog.from(tag)
+      for _ in 0..<2 {
+        data.clear()
+        guard let r = try reply(p, [7] + Store.le(UInt32(from)), 0x87), r.count >= 5 else { throw Fail(description: "LOG 没有回应") }  // LOG
+        let next = Ble.u32(r, 1)
+        if next < from { Ble.log("devlog \(tag): log restarted at \(next) (had \(from))"); from = 0; continue }
+        var packets: [[UInt8]] = []
+        while let d = data.poll() { packets.append(d) }  // its DATA came before the reply
+        DeviceLog.took(tag, packets, next: next)
+        Ble.log("devlog \(tag): \(packets.count) packets from \(from), next \(next)")
+        return
+      }
+    } catch { Ble.log("devlog \(tag) read: \(error)") }
+  }
 
   /// The mirror into dated pieces (Mirror.pieces): the live file in pieces as long as the app's slice.
   private func pieces(_ m: Mirror) throws {

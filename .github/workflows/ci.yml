@@ -63,8 +63,8 @@ jobs:
           flutter-version: 3.47.5  # Dart 3.13.4, as pubspec.yaml asks; a new stable's lints come in by bumping this
           cache: true
       - run: flutter analyze
-      # the iPhone's BLE record stream (Store.swift: mirror, 'T' dating, Ogg): Foundation only, so it runs here too
-      - run: swiftc -o /tmp/storecheck ios/Runner/Store.swift ios/StoreCheck/main.swift && /tmp/storecheck
+      # the iPhone's BLE record stream (Store.swift: mirror, 'T' dating, Ogg) and event log (DeviceLog.swift): Foundation only
+      - run: swiftc -o /tmp/storecheck ios/Runner/Store.swift ios/Runner/DeviceLog.swift ios/StoreCheck/main.swift && /tmp/storecheck
 
   firmware:
     needs: changes

@@ -72,9 +72,11 @@ enum Recorder {
         result(nil)
       case "unbind":  // the recorder forgets every phone (when connected); this iPhone's keys stay (no API: Settings)
         Thread.detachNewThread {
+          let name = defaults.string(forKey: "bleName")
           // first: the link must not reconnect when the recorder drops it
           for k in ["bleName", "bleId", "bleModel", "bleFw", "bindPending", "bindForce", "bleKicked"] { defaults.removeObject(forKey: k) }
           let forgot = link?.forgetAll() ?? false
+          if let name { DeviceLog.app(Ble.tag(name), "unbind", forgot ? "解除绑定：录音设备忘掉了所有手机" : "解除绑定：录音设备没连上，只有这台手机忘掉了它") }
           DispatchQueue.main.async { result(forgot) }
         }
       case "pause":  // the connected recorder keeps nothing for s seconds (0: records again)
@@ -186,6 +188,7 @@ enum Recorder {
   /// piece being written when the process died still decodes up to its last page; send what is left over. The BLE link
   /// comes back by itself: the recorder records anyway, and the link is always on (Android's sticky service).
   static func launch() {
+    DeviceLog.start(dir: dir.deletingLastPathComponent(), prefs: defaults)
     foregroundApp = UIApplication.shared.applicationState != .background
     let fm = FileManager.default
     var last: Int64 = 0
@@ -425,12 +428,16 @@ final class Uploader: Thread {
         let code = try post("\(server)/api/chunks?device=\(enc(p.device ?? device))&start=\(p.start)" + (p.n.map { "&n=\($0)" } ?? ""),
                             try b.reduce(Data()) { $0 + (try Data(contentsOf: $1)) }, f.pathExtension == "ogg" ? "audio/ogg" : "audio/aac")
         switch code {
-        case 200: b.forEach(keep); sent += b.count; fails = 0; note = nil
+        case 200:
+          b.forEach(keep); sent += b.count; note = nil
+          if fails > 0 { DeviceLog.app(p.device ?? device, "upload_ok", "上传恢复（之前连续失败 \(fails) 次）") }
+          fails = 0
         case 400: b.forEach { try? FileManager.default.removeItem(at: $0) }; note = "服务端无法解码一块，已丢弃"
         default: throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "HTTP \(code)"])
         }
       } catch {
         fails += 1
+        if fails == 1 { DeviceLog.app(p.device ?? device, "upload_fail", "上传失败：\(error.localizedDescription)", level: "error") }
         note = "上传失败 \(error.localizedDescription)"
         Thread.sleep(forTimeInterval: 5 * Double(min(fails, 6)))
       }
