@@ -21,7 +21,6 @@ import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.LinkedBlockingQueue
 
 /** Foreground service that owns recording and uploading, so neither needs the Flutter UI alive. Uploading does not
  *  depend on recording: after a stop (or a launch, or a kill, with pieces left) the service stays up as a dataSync
@@ -99,16 +98,13 @@ class RecorderService : Service() {
         if (slicer == null) {
             dir.listFiles { f -> f.name.endsWith(".part") }?.forEach { it.renameTo(File(it.path.removeSuffix(".part") + ".ogg")) }  // cut short by a kill: still valid Ogg
             Log.i("live-record", "starting slicer")
-            val packets = if (ble) LinkedBlockingQueue<Ble.Packet>() else null
-            val clock = if (ble) BleClock(prefs.getLong("bleEnd", 0L)) else null
-            slicer = Slicer(dir, prefs.getInt("foreground", 5), prefs.getInt("background", 20), prefs.getInt("screenOff", 60), packets, clock,
-                            { prefs.edit().putLong("bleEnd", it).apply() }).also {
+            slicer = Slicer(dir, prefs.getInt("foreground", 5), prefs.getInt("background", 20), prefs.getInt("screenOff", 60), ble).also {
                 it.foreground = foregroundApp
                 it.screenOff = !(getSystemService(POWER_SERVICE) as PowerManager).isInteractive
                 it.start()
             }
-            if (packets != null) link = BleLink(this, packets, prefs, dir, File(getExternalFilesDir(null), "undated"),
-                { slicer?.tag = it }, { name, hw -> uploader?.report(name, hw) }).also { it.start() }
+            if (ble) link = BleLink(this, prefs, dir, File(getExternalFilesDir(null), "undated"), { slicer?.sliceS() ?: 20 },
+                { n -> slicer?.let { it.files += n } }, { slicer?.tag = it }, { name, hw -> uploader?.report(name, hw) }).also { it.start() }
             prefs.edit().remove("endAt").remove("endDevice").apply()  // a new recording carries on the conversation: no end for the old stop
             ensureUploader(prefs, dir)
         }

@@ -1,8 +1,10 @@
-"""Reference client for the live-record offline store (src/lr_store.h): sync the clock, take the stored files,
-put every frame back on the wall clock, write one WAV per continuous run; with --server, send the dated runs as Ogg
-pieces to /api/chunks under the recorder's name, as the phone app does. --delete removes what was kept (sent, or
-written here when undated) from the card. `log` prints the recorder's event log (src/lr_log.h) as a timeline.
-    uv run --no-project --with bleak python lr_sync.py OUT_DIR [--delete] [--name LR-X1-567E] [--server URL --token T]
+"""Reference client for the live-record record stream (src/lr_store.h): sync the clock, take the files (the open one
+too), optionally follow the stream (LIVE) for a while and check what came that way against the card, put every frame
+back on the wall clock, write one WAV per continuous run; with --server, send the dated runs as Ogg pieces to
+/api/chunks under the recorder's name, as the phone app does. --delete removes what was kept (sent, or written here
+when undated) from the card; the open file stays. `log` prints the recorder's event log (src/lr_log.h) as a timeline.
+    uv run --no-project --with bleak python lr_sync.py OUT_DIR [--follow SECONDS] [--delete] [--name LR-X1-567E]
+        [--server URL --token T]
     uv run --no-project --with bleak python lr_sync.py log [--name LR-X1-567E] [--from SEQ]
 """
 import asyncio
@@ -20,8 +22,7 @@ from pathlib import Path
 from bleak import BleakClient, BleakScanner
 
 U = lambda n: f"7c3e{n:04x}-1a2b-4c5d-8e9f-6c6976657265"
-TIME, CTRL, DATA = U(1), U(2), U(3)
-AUDIO_SVC = "19b10000-e8f2-537e-4f6c-d104768a1214"  # advertised; the store service is not
+TIME, CTRL, DATA, LIVE = U(1), U(2), U(3), U(4)
 FRAME_MS = 10
 
 
@@ -46,10 +47,10 @@ def records(b: bytes):
             return
 
 
-def runs(files: dict[int, bytes], live: tuple[int, int, int]):
-    """files: file id -> bytes. live: (boot, frame, epoch_ms) from this connection's sync. Yields
-    (epoch_ms of the first frame or None, [opus...]) per run of consecutive frames."""
-    sync, audio = {live[0]: [live[1:]]}, {}
+def runs(files: dict[int, bytes]):
+    """files: file id -> bytes. Yields (epoch_ms of the first frame or None, [opus...]) per run of consecutive frames;
+    a run is dated by its boot's 'T' records (in any of its files, wherever in the stream they are)."""
+    sync, audio = {}, {}
     for f in sorted(files):
         for r in records(files[f]):
             (sync if r[0] == "T" else audio).setdefault(f >> 16, []).append(r[1:])
@@ -75,6 +76,18 @@ def cur_time(ts, frame):
     return e + (frame - f) * FRAME_MS
 
 
+def assemble(parts: dict[int, bytes], start: int = 0) -> tuple[bytes, int | None]:
+    """Pieces of a file by offset (READ's DATA, LIVE) -> its bytes from `start` up to the first hole, and where that
+    hole is (None: no hole). Pieces may overlap: the stream and the card hold the same bytes at the same offset."""
+    out = bytearray()
+    for o in sorted(parts):
+        end = start + len(out)
+        if o > end:
+            return bytes(out), end
+        out += parts[o][end - o:]
+    return bytes(out), None
+
+
 _CRC = []
 for _i in range(256):
     _r = _i << 24
@@ -84,7 +97,7 @@ for _i in range(256):
 
 
 def ogg_opus(frames, frame_ms=FRAME_MS, rate=16000) -> bytes:
-    """Opus packets into one Ogg Opus file (RFC 7845), as web/src/lib/ogg.ts and the app's muxer make them."""
+    """Opus packets into one Ogg Opus file (RFC 7845), as web/src/lib/ogg.ts and the app's Store.oggOpus make them."""
     serial = random.getrandbits(32)
 
     def page(packets, flags, granule, seq):
@@ -112,7 +125,7 @@ def ogg_opus(frames, frame_ms=FRAME_MS, rate=16000) -> bytes:
     return b"".join(pages)
 
 
-PIECE_S = 60  # an offline run goes up in pieces of this length
+PIECE_S = 60  # a run goes up in pieces of this length
 
 
 def upload(server: str, token: str, device: str, start: int, frames) -> None:
@@ -136,58 +149,78 @@ def decode(frames) -> bytes:
     return bytes(out)
 
 
-async def main(out: Path, delete: bool, name: str, server: str | None, token: str):
+async def main(out: Path, delete: bool, name: str, follow: float, server: str | None, token: str):
     dev = await BleakScanner.find_device_by_filter(
-        lambda d, a: AUDIO_SVC in a.service_uuids and (a.local_name or "").startswith(name), 20)
+        lambda d, a: U(0) in a.service_uuids and (a.local_name or "").startswith(name), 20)
     if not dev:
         sys.exit("no device")
     async with BleakClient(dev) as c:
-        now = int(time.time() * 1000)
-        await c.write_gatt_char(TIME, struct.pack("<Q", now), response=True)
-        boot, frame, store, free_kb, total_kb = struct.unpack_from("<HIhII", await c.read_gatt_char(TIME))
-        print(f"boot {boot}, frame {frame} = {dt.datetime.fromtimestamp(now / 1000)}, store {store}, "
-              f"card {free_kb / 1024:.0f} of {total_kb / 1024:.0f} MB free")
-        if store:
-            sys.exit(f"the device stores nothing (error {store})")
-        replies, data = asyncio.Queue(), {}
-        await c.start_notify(CTRL, lambda _, d: replies.put_nowait(bytes(d)))
+        replies, data, live = asyncio.Queue(), {}, {}
         last = [time.time()]  # the last DATA notify: a file takes as long as it takes while bytes keep coming
 
         def on_data(_, d):
             data[struct.unpack_from("<I", d)[0]] = bytes(d[4:])
             last[0] = time.time()
 
+        await c.start_notify(CTRL, lambda _, d: replies.put_nowait(bytes(d)))
         await c.start_notify(DATA, on_data)
-        await c.write_gatt_char(CTRL, b"\x01", response=True)
-        listing = []
-        while (r := await asyncio.wait_for(replies.get(), 10))[0] != 0x80:
-            listing.append(struct.unpack_from("<II", r, 1))
-        print("files:", [(f"{f:08X}", s) for f, s in listing])
-        files = {}
-        for f, size in listing:
+        if follow:  # before LIST: nothing the stream adds after it is missed
+            await c.start_notify(LIVE, lambda _, d: live.setdefault(struct.unpack_from("<I", d)[0], {}).__setitem__(
+                struct.unpack_from("<I", d, 4)[0], bytes(d[8:])))
+        now = int(time.time() * 1000)
+        await c.write_gatt_char(TIME, struct.pack("<Q", now), response=True)  # a 'T' record, into the stream
+        boot, frame, store, free_kb, total_kb = struct.unpack("<HIhII", (await c.read_gatt_char(TIME))[:16])
+        print(f"boot {boot}, frame {frame} = {dt.datetime.fromtimestamp(now / 1000)}, store {store}, "
+              f"card {free_kb / 1024:.0f} of {total_kb / 1024:.0f} MB free")
+
+        async def listing():
+            await c.write_gatt_char(CTRL, b"\x01", response=True)
+            files = []
+            while (r := await asyncio.wait_for(replies.get(), 10))[0] != 0x80:
+                files.append(struct.unpack_from("<II", r, 1))
+            return files, struct.unpack_from("<I", r, 2)[0]
+
+        async def read(f: int, off: int) -> dict[int, bytes]:
+            """READ from off to where the card's file ends (the open one: what the stream has finished)."""
             data.clear()
-            t = time.time()
-            await c.write_gatt_char(CTRL, struct.pack("<BII", 2, f, 0), response=True)
+            last[0] = time.time()
+            await c.write_gatt_char(CTRL, struct.pack("<BII", 2, f, off), response=True)
             while True:
                 try:
-                    if (r := await asyncio.wait_for(replies.get(), 5))[0] == 0x82:
-                        break
+                    if (await asyncio.wait_for(replies.get(), 5))[0] == 0x82:
+                        return dict(data)
                 except TimeoutError:
                     if time.time() - last[0] > 15:
                         sys.exit(f"{f:08X}: stalled")
-            end = struct.unpack_from("<I", r, 5)[0]
-            b, off = bytearray(), 0
-            for o in sorted(data):
-                if o != off:
-                    sys.exit(f"{f:08X}: hole at {off} (next chunk at {o})")
-                b += data[o]
-                off += len(data[o])
-            ok = end == size == len(b)
-            print(f"{f:08X}: {len(b)} B of {size} in {time.time() - t:.1f} s, {len(b) / 1024 / (time.time() - t):.0f} KB/s{'' if ok else '  INCOMPLETE'}")
+
+        files, open_file = await listing() if not store else ([], None)
+        print("files:", [(f"{f:08X}", s) for f, s in files], f"open {open_file:08X}" if open_file is not None else "")
+        got = {}
+        for f, size in files:
+            t = time.time()
+            b, hole = assemble(await read(f, 0))
+            ok = hole is None and len(b) == size
+            print(f"{f:08X}: {len(b)} B of {size} in {time.time() - t:.1f} s{'' if ok else '  INCOMPLETE'}")
             if ok:
-                files[f] = bytes(b)
-                (out / f"{f:08X}.BIN").write_bytes(b)  # as on the card, for a second look
-        for i, (start, frames) in enumerate(runs(files, (boot, frame, now))):
+                got[f] = b
+        if follow:
+            print(f"following the stream for {follow:.0f} s")
+            await asyncio.sleep(follow)
+            await c.stop_notify(LIVE)
+            for f, parts in sorted(live.items()):
+                # the mirror: what READ took, then the stream; a hole (a lost notify) is READ again from there
+                b, hole = assemble({0: got.get(f, b""), **parts})
+                if hole is not None:
+                    print(f"{f:08X}: hole at {hole}, READ from there")
+                    b, hole = assemble({0: b, **(await read(f, len(b))), **parts})
+                card, _ = assemble(await read(f, 0))  # the card's copy, now
+                n = min(len(b), len(card))
+                print(f"{f:08X}: stream {len(b)} B, card {len(card)} B, first {n} B "
+                      f"{'the same' if b[:n] == card[:n] else 'DIFFER'}{'' if hole is None else f', hole at {hole}'}")
+                got[f] = b
+        for f, b in got.items():
+            (out / f"{f:08X}.BIN").write_bytes(b)  # as on the card, for a second look
+        for i, (start, frames) in enumerate(runs(got)):
             when = dt.datetime.fromtimestamp(start / 1000).strftime("%m%d-%H%M%S.%f")[:-3] if start else "undated"
             p = out / f"{i:03d}-{when}.wav"
             with wave.open(str(p), "wb") as w:
@@ -198,7 +231,9 @@ async def main(out: Path, delete: bool, name: str, server: str | None, token: st
                 sent = f", sent as {dev.name}"
             print(f"run {i}: {len(frames) * FRAME_MS / 1000:.2f} s from {when} -> {p.name}{sent}")
         if delete:
-            for f in files:
+            for f in got:
+                if f == open_file:
+                    continue  # the stream goes on in it
                 await c.write_gatt_char(CTRL, struct.pack("<BI", 4, f), response=True)
                 r = await asyncio.wait_for(replies.get(), 10)
                 print(f"delete {f:08X}: {struct.unpack_from('<b', r, 5)[0]}")
@@ -299,7 +334,7 @@ def timeline(recs):
 
 async def log(name: str, start: int):
     dev = await BleakScanner.find_device_by_filter(
-        lambda d, a: AUDIO_SVC in a.service_uuids and (a.local_name or "").startswith(name), 20)
+        lambda d, a: U(0) in a.service_uuids and (a.local_name or "").startswith(name), 20)
     if not dev:
         sys.exit("no device")
     async with BleakClient(dev) as c:
@@ -321,12 +356,17 @@ async def log(name: str, start: int):
 def selftest():
     a = lambda first, n: bytes([0x41, n]) + struct.pack("<I", first) + b"".join(bytes([2, i, i]) for i in range(n))
     t = lambda frame, epoch: b"T" + struct.pack("<IQ", frame, epoch)
-    boot1 = {1 << 16: a(0, 3) + t(2, 10_000) + a(3, 2) + a(9, 1), 1 << 16 | 1: a(10, 1)[:-1]}  # gap at 5..8, cut tail
-    boot2 = {2 << 16: a(0, 2)}  # rebooted, never synced, not the live boot: time unknown
-    got = list(runs({**boot1, **boot2}, (3, 50, 99_000)))
-    assert [(s, len(f)) for s, f in got] == [(9_980, 5), (10_070, 1), (None, 2)], got
+    # boot 1: a gap at 5..8, a cut-short tail; its 'T' in the middle of the stream, after the frames it dates.
+    # boot 2: rebooted, never synced: time unknown. boot 3: the open file, its 'T' (this connection's) last.
+    files = {1 << 16: a(0, 3) + a(3, 2) + t(4, 10_000) + a(9, 1), 1 << 16 | 1: a(10, 1)[:-1],
+             2 << 16: a(0, 2), 3 << 16: a(40, 10) + t(50, 99_000)}
+    got = list(runs(files))
+    assert [(s, len(f)) for s, f in got] == [(9_960, 5), (10_050, 1), (None, 2), (98_900, 10)], got
     ogg = ogg_opus([bytes([0xF8, 0xFF, 0xFE])] * 120)  # 120 silent 10 ms Opus frames
     assert ogg[:4] == b"OggS" and ogg.count(b"OggS") == 5, ogg.count(b"OggS")
+    # READ took 0..6, LIVE brought 4..8 (overlap) and 10..12 (after a lost notify)
+    assert assemble({0: b"abcdef", 4: b"efgh", 10: b"kl"}) == (b"abcdefgh", 8)
+    assert assemble({0: b"abcdefgh", 8: b"ij", 10: b"kl"}) == (b"abcdefghijkl", None)
 
     # the event log, wrapped: the oldest sectors went, so boot 7 starts mid-way (its BOOT and TIME gone); LOG packets
     # as the device sends them (seq + records), one sent twice by an overlapping read, out of order
@@ -358,4 +398,5 @@ if __name__ == "__main__":
         sys.exit(asyncio.run(log(arg("--name", "LR-"), int(arg("--from", 0)))))
     d = Path(sys.argv[1])
     d.mkdir(parents=True, exist_ok=True)
-    asyncio.run(main(d, "--delete" in sys.argv, arg("--name", "LR-"), arg("--server"), arg("--token", "")))
+    asyncio.run(main(d, "--delete" in sys.argv, arg("--name", "LR-"), float(arg("--follow", 0)), arg("--server"),
+                     arg("--token", "")))

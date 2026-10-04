@@ -9,6 +9,7 @@
 #include <zephyr/fs/fs.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 #include <zephyr/sys/byteorder.h>
 
 #include "lr_log.h"
@@ -22,21 +23,24 @@ extern struct k_mutex write_sdcard_mutex;  // transport.c: one SPI bus, one writ
 extern uint32_t transport_frame_no;        // transport.c: frames the codec has made since boot
 
 #define DIR "/SD:/LR"
-#define REC_FRAMES 100       // one record a second
+#define REC_FRAMES 10        // a record per 100 ms: a phone following the stream gets each one as it closes
 #define SEG_MAX (16u << 20)  // a long offline stretch still ends in files a phone can take one by one
 #define CHUNK 4096           // SD read size while sending a file
 #define RESERVE_KB CONFIG_LR_STORE_RESERVE_KB  // recording stops (-ENOSPC) below this much free space, resumes at twice it
+#define BATCH CONFIG_LR_STORE_BATCH            // finished records kept in RAM until there are this many bytes
 
-static uint16_t boot;
+static uint16_t boot;  // 0: no card at boot (nothing to count boots on); the stream still goes to a phone
 static int16_t store_err = -ENODEV;  // until lr_store_init succeeds: no card, or it failed
 static uint16_t seg;
-static uint32_t seg_size;
+static uint32_t seg_size;  // the segment's length in the stream: on the card (or lost to it), plus `done` bytes in RAM
 static char path[32];
 uint32_t free_kb;  // the card, as of the last statvfs, less what was written since (lr_log.c heartbeat too)
 static uint32_t total_kb;
 
-static uint8_t rec[4096];
-static uint32_t rec_len, rec_next;  // bytes in rec; the frame that may extend it
+/* The record stream in RAM: `done` bytes of finished records not yet on the card, then the open 'A' record. Every
+ * record the card gets goes to a following phone too (LIVE), with the same file and offset, as it closes. */
+static uint8_t pend[BATCH + 6 + REC_FRAMES * 256];
+static uint32_t done, rec_len, rec_next;  // finished bytes; bytes of the open record; the frame that may extend it
 static uint8_t rec_count;
 
 static const char *file_path(char *buf, uint32_t file)
@@ -44,6 +48,13 @@ static const char *file_path(char *buf, uint32_t file)
     snprintf(buf, 32, DIR "/%08X.BIN", file);
     return buf;
 }
+
+static uint32_t cur_file(void)
+{
+    return (uint32_t) boot << 16 | seg;
+}
+
+static void restart_segment(void);
 
 /* The card's free space; a full card stops recording until a phone deletes what it took. Store thread or SD mutex. */
 static void count_free(void)
@@ -55,12 +66,13 @@ static void count_free(void)
     }
     if (store_err == -ENOSPC && free_kb >= 2 * RESERVE_KB) {
         store_err = 0;
+        restart_segment();  // the stream went on while the card was full: the card starts a file of its own
         LOG_INF("card has room again: %u KB", free_kb);
         lr_log(LR_CARD_FULL, 0, free_kb, 0);
     }
 }
 
-uint32_t dropped;            // frames lost on the way to the card (gaps in the frame numbers it got)
+uint32_t dropped;            // frames lost on the way to the store (gaps in the frame numbers it got)
 static uint16_t append_max;  // the slowest append so far, ms
 
 static struct fs_file_t seg_file;  // the open segment, kept open: reopening walked its FAT chain on every append, slower
@@ -76,15 +88,28 @@ static void close_segment(void)
 
 static bool append_failed;  // only the first failure of a run goes to the event log
 
+/* The next segment, if this one has anything. A file on the card is always the start of the stream's file of that
+ * name: after bytes the card did not take (no card, full, lent, a failed write) it goes on in a new one. */
+static void restart_segment(void)
+{
+    close_segment();
+    if (seg_size) {
+        // finished records not on the card are the old file's (LIVE sent them so): not the new one's start
+        memmove(pend, pend + done, rec_len);
+        done = 0;
+        seg++;
+        seg_size = 0;
+        lr_log(LR_SEGMENT, 0, cur_file(), 0);
+    }
+    file_path(path, cur_file());
+}
+
 static int append(const void *data, uint32_t len)
 {
     int64_t t0 = k_uptime_get();
     if (free_kb < RESERVE_KB) {
-        if (store_err != -ENOSPC) {
-            LOG_ERR("card full (%u KB free): not recording", free_kb);
-            lr_log(LR_CARD_FULL, 1, free_kb, 0);
-        }
-        store_err = -ENOSPC;
+        LOG_ERR("card full (%u KB free): not recording", free_kb);
+        lr_log(LR_CARD_FULL, 1, free_kb, 0);
         return -ENOSPC;
     }
     int err = 0;
@@ -102,7 +127,6 @@ static int append(const void *data, uint32_t len)
             lr_log(LR_SLOW, 0, ms, len);
         }
         if (n > 0) {
-            seg_size += n;
             free_kb -= MIN(free_kb, DIV_ROUND_UP(n, 1024));
         }
         err = n == len ? 0 : n < 0 ? n : -EIO;
@@ -114,60 +138,102 @@ static int append(const void *data, uint32_t len)
     return err;
 }
 
-static void flush(void)
+/* The finished records to the card in one write. A card that cannot take them does not stop the stream: the
+ * segment ends there, and TIME's store reads the error. */
+static void write_out(void)
+{
+    if (!done) {
+        return;
+    }
+    int err = store_err ? 0 : append(pend, done);
+    memmove(pend, pend + done, rec_len);  // the open record moves up
+    done = 0;
+    if (err) {
+        LOG_ERR("SD write failed: %d", err);
+        store_err = err;
+        close_segment();  // the stream goes on in this segment; the card gets a new one once it works again
+    }
+}
+
+static void live(const uint8_t *b, uint32_t len, uint32_t offset);
+
+/* A finished record into the stream: to a following phone now, to the card with its batch. */
+static void put_record(uint32_t len)
+{
+    live(pend + done, len, seg_size);
+    done += len;
+    seg_size += len;
+}
+
+static void close_record(void)
 {
     if (rec_count) {
-        rec[1] = rec_count;
-        if (append(rec, rec_len)) {
-            LOG_ERR("SD write failed, %u frames lost", rec_count);
-        }
+        pend[done + 1] = rec_count;
+        put_record(rec_len);
+        rec_len = rec_count = 0;
     }
-    rec_len = rec_count = 0;
+}
+
+/* The open record closed and everything finished written: before a READ of the open segment, a reset, a lend. */
+static void flush(void)
+{
+    close_record();
+    write_out();
 }
 
 static void next_segment(void)
 {
     flush();
-    if (seg_size) {  // an empty segment stays the open one
-        close_segment();
-        seg++;
-        seg_size = 0;
-        lr_log(LR_SEGMENT, 0, (uint32_t) boot << 16 | seg, 0);
-    }
-    file_path(path, (uint32_t) boot << 16 | seg);
+    restart_segment();
 }
 
 void lr_store_frame(uint32_t frame_no, const uint8_t *data, uint16_t len, bool after_gap)
 {
-    if (len > 255 || (store_err && store_err != -ENOSPC)) {
-        return;  // no card; a full one still takes the frames to the record, which append() then drops
+    if (len > 255) {
+        return;
     }
     if (rec_count && frame_no > rec_next && !after_gap) {
         dropped += frame_no - rec_next;
         lr_log(LR_DROPPED, 0, frame_no - rec_next, dropped);
     }
-    if (rec_count && (frame_no != rec_next || rec_count == REC_FRAMES || rec_len + 1 + len > sizeof(rec))) {
-        flush();
+    if (rec_count && (frame_no != rec_next || rec_count == REC_FRAMES)) {
+        close_record();
+        if (done >= BATCH) {
+            write_out();
+        }
     }
     if (seg_size >= SEG_MAX) {
         next_segment();
     }
     if (!rec_count) {
-        rec[0] = 'A';
-        sys_put_le32(frame_no, rec + 2);
+        pend[done] = 'A';
+        sys_put_le32(frame_no, pend + done + 2);
         rec_len = 6;
     }
-    rec[rec_len++] = len;
-    memcpy(rec + rec_len, data, len);
+    pend[done + rec_len++] = len;
+    memcpy(pend + done + rec_len, data, len);
     rec_len += len;
     rec_count++;
     rec_next = frame_no + 1;
 }
 
+/* A 'T' record into the stream (SD mutex held): the phone's clock at the frame the codec is on now. */
+static void put_sync(uint32_t frame, uint64_t epoch)
+{
+    close_record();
+    if (done >= BATCH) {
+        write_out();
+    }
+    pend[done] = 'T';
+    sys_put_le32(frame, pend + done + 1);
+    sys_put_le64(epoch, pend + done + 5);
+    put_record(13);
+}
+
 //
 // Commands, handled on the store's own thread: SD access and notifications may block, the BT RX thread must not
 //
-enum { LIST = 1, READ = 2, STOP = 3, DELETE = 4, FORGET = 5, USB_DISK = 6, LOG = 7, SYNC = 0x10, ROTATE = 0x11, UNLEND = 0x12, PAUSE = 0x20 };
+enum { LIST = 1, READ = 2, STOP = 3, DELETE = 4, FORGET = 5, USB_DISK = 6, LOG = 7, SYNC = 0x10, UNLEND = 0x12, FOLLOW = 0x13, PAUSE = 0x20 };
 struct cmd {
     uint8_t op;
     uint32_t file, offset;
@@ -175,6 +241,16 @@ struct cmd {
     uint32_t frame;
 };
 K_MSGQ_DEFINE(cmds, sizeof(struct cmd), 8, 4);
+
+/* A phone starts following the stream. While the card does not take it, nothing before this could be READ: the
+ * stream starts a new file, so the phone has it from offset 0. */
+static void live_ccc(const struct bt_gatt_attr *attr, uint16_t value)
+{
+    if (value == BT_GATT_CCC_NOTIFY) {
+        struct cmd c = {.op = FOLLOW};
+        k_msgq_put(&cmds, &c, K_NO_WAIT);
+    }
+}
 
 static ssize_t time_write(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf, uint16_t len,
                           uint16_t offset, uint8_t flags)
@@ -265,9 +341,36 @@ BT_GATT_SERVICE_DEFINE(lr_svc,
                                               NULL),
                        BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT),
                        BT_GATT_CHARACTERISTIC(LR_UUID(3), BT_GATT_CHRC_NOTIFY, BT_GATT_PERM_NONE, NULL, NULL, NULL),
-                       BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT), );
+                       BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT),
+                       BT_GATT_CHARACTERISTIC(LR_UUID(4), BT_GATT_CHRC_NOTIFY, BT_GATT_PERM_NONE, NULL, NULL, NULL),
+                       BT_GATT_CCC(live_ccc, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT), );
 #define CTRL_ATTR (&lr_svc.attrs[4])
 #define DATA_ATTR (&lr_svc.attrs[7])
+#define LIVE_ATTR (&lr_svc.attrs[10])
+
+/* A record as it enters the stream, to the phone if it follows (LIVE): file, offset, bytes, split to the MTU. Called
+ * with the SD mutex held (one packet buffer). A notify waits for a TX buffer, so a busy link slows the pusher (its
+ * queue holds ~3.5 s); one that fails (the link going) leaves a gap the phone fills with READ. */
+static void live(const uint8_t *b, uint32_t len, uint32_t offset)
+{
+    static uint8_t p[8 + 512];
+    struct bt_conn *conn = get_current_connection();
+    if (!conn || !bt_gatt_is_subscribed(conn, LIVE_ATTR, BT_GATT_CCC_NOTIFY)) {
+        return;
+    }
+    conn = bt_conn_ref(conn);
+    uint16_t room = MIN(bt_gatt_get_mtu(conn) - 3 - 8, sizeof(p) - 8);
+    for (uint32_t i = 0; i < len; i += room) {
+        uint16_t m = MIN(room, len - i);
+        sys_put_le32(cur_file(), p);
+        sys_put_le32(offset + i, p + 4);
+        memcpy(p + 8, b + i, m);
+        if (bt_gatt_notify(conn, LIVE_ATTR, p, 8 + m)) {
+            break;
+        }
+    }
+    bt_conn_unref(conn);
+}
 
 /* Notify until it fits in the TX buffers; false once the link is gone. */
 static bool notify(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *data, uint16_t len)
@@ -291,7 +394,7 @@ static void reply(struct bt_conn *conn, uint8_t op, uint32_t a, uint32_t b, uint
 
 static void list(struct bt_conn *conn)
 {
-    // ponytail: the first 64 closed files per LIST; a phone deletes what it took and lists again
+    // ponytail: the first 64 files per LIST; a phone deletes what it took and lists again
     static uint32_t files[64][2];
     int n = 0;
     struct fs_dir_t d;
@@ -301,7 +404,7 @@ static void list(struct bt_conn *conn)
     int err = fs_opendir(&d, DIR), opened = !err;
     while (!err && n < ARRAY_SIZE(files) && !(err = fs_readdir(&d, &e)) && e.name[0]) {
         uint32_t file = strtoul(e.name, NULL, 16);
-        if (e.type == FS_DIR_ENTRY_FILE && strlen(e.name) == 12 && file != ((uint32_t) boot << 16 | seg)) {
+        if (e.type == FS_DIR_ENTRY_FILE && strlen(e.name) == 12) {
             files[n][0] = file;
             files[n++][1] = e.size;
         }
@@ -313,8 +416,9 @@ static void list(struct bt_conn *conn)
     for (int i = 0; i < n; i++) {
         reply(conn, 0x81, files[i][0], files[i][1], 4);
     }
-    uint8_t end[2] = {0x80, (uint8_t) err};
-    notify(conn, CTRL_ATTR, end, 2);
+    uint8_t end[6] = {0x80, (uint8_t) err};
+    sys_put_le32(cur_file(), end + 2);  // the open segment, listed too: the one the stream goes on in
+    notify(conn, CTRL_ATTR, end, sizeof(end));
 }
 
 static uint8_t chunk[CHUNK];
@@ -338,11 +442,18 @@ static void send_file(struct bt_conn *conn, uint32_t file, uint32_t off)
     bt_conn_le_phy_update(conn, BT_CONN_LE_PHY_PARAM_2M);
     uint16_t payload = MIN(bt_gatt_get_mtu(conn) - 3 - 4, sizeof(pkt) - 4);
     bool ok = true;
-    while (ok && !k_msgq_num_used_get(&cmds)) {
+    uint32_t end = UINT32_MAX;
+    k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+    if (file == cur_file()) {  // the open segment: its finished records onto the card, and no further (LIVE has the rest)
+        write_out();
+        end = seg_size;
+    }
+    k_mutex_unlock(&write_sdcard_mutex);
+    while (ok && off < end && !k_msgq_num_used_get(&cmds)) {
         k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
         int n = fs_open(&f, file_path(p, file), FS_O_READ);
         if (!n) {
-            n = fs_seek(&f, off, FS_SEEK_SET) ?: fs_read(&f, chunk, CHUNK);
+            n = fs_seek(&f, off, FS_SEEK_SET) ?: fs_read(&f, chunk, MIN(CHUNK, end - off));
             fs_close(&f);
         }
         k_mutex_unlock(&write_sdcard_mutex);
@@ -382,7 +493,8 @@ extern volatile bool usb_disk_lent;  // usb.c: the card reader shows the card
 extern bool usb_charge;
 
 /* The card to the computer (USB disk) and back. Lent, the card is unmounted and nothing records to it (-EBUSY); back,
- * it is mounted again (the ProMicro powers it off and on first) and recording goes on in a new segment. */
+ * it is mounted again (the ProMicro powers it off and on first) and the card goes on in a new segment. The stream
+ * itself never stops. */
 static int lend(bool on)
 {
     if (on == usb_disk_lent) {
@@ -408,11 +520,8 @@ static int lend(bool on)
         int err = mount_sd_card();
         store_err = err;
         if (!err) {
-            seg++;
-            seg_size = 0;
-            file_path(path, (uint32_t) boot << 16 | seg);
+            restart_segment();
             count_free();
-            lr_log(LR_SEGMENT, 0, (uint32_t) boot << 16 | seg, 0);
         }
         LOG_INF("card back from USB: %d", err);
         lr_log(LR_USB_DISK, 0, err, 0);
@@ -421,27 +530,79 @@ static int lend(bool on)
     return 0;
 }
 
+static int card_init(int (*mount)(void), uint16_t *counted);
+
+/* A card that failed (a write, the mount, none at boot) is tried again once a minute, one mount try, the SD mutex
+ * not held meanwhile (the stream goes on). Back, it goes on in a new segment, as after a lend; a card that was not
+ * there at boot counts this boot then and starts at its segment 0. Lent (-EBUSY) and full (-ENOSPC: back when a phone
+ * deletes) are not failures. */
+static void retry_card(void)
+{
+    if (!store_err || store_err == -EBUSY || store_err == -ENOSPC) {
+        return;
+    }
+    k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+    close_segment();
+    uint16_t was = boot;
+    k_mutex_unlock(&write_sdcard_mutex);
+    int err;
+    unmount_sd_card();  // whatever state the failure left it in
+    if (was) {
+        err = mount_sd_card_once();
+    } else {
+        err = card_init(mount_sd_card_once, &was);  // counts the boot
+    }
+    k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+    if (!err) {
+        flush();  // the stream's last records go with the file they are in (not on the card)
+        if (!boot) {
+            boot = was;
+            seg = seg_size = 0;
+            file_path(path, cur_file());
+            lr_log(LR_SEGMENT, 0, cur_file(), 0);
+        } else {
+            restart_segment();
+        }
+        store_err = 0;
+        count_free();
+        LOG_INF("card back: %08X", cur_file());
+    } else if (was) {
+        store_err = err;
+    }
+    k_mutex_unlock(&write_sdcard_mutex);
+}
+
 static void store_thread(void)
 {
     struct cmd c;
+    int64_t tried = k_uptime_get();
     for (;;) {
-        k_msgq_get(&cmds, &c, K_FOREVER);
+        int got = k_msgq_get(&cmds, &c, K_SECONDS(60));
+        if (k_uptime_get() - tried >= 60000) {
+            tried = k_uptime_get();
+            retry_card();
+        }
+        if (got) {
+            continue;
+        }
         if (c.op == UNLEND) {
             lend(false);
             continue;
         }
         struct bt_conn *conn = get_current_connection();
-        if (c.op == SYNC || c.op == ROTATE) {
+        if (c.op == FOLLOW) {
             k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
-            next_segment();
-            if (c.op == SYNC) {
-                uint8_t t[13] = {'T'};
-                sys_put_le32(c.frame, t + 1);
-                sys_put_le64(c.epoch, t + 5);
-                append(t, sizeof(t));
-                LOG_INF("sync: frame %u = %llu", c.frame, c.epoch);
+            if (store_err) {
+                next_segment();
             }
             k_mutex_unlock(&write_sdcard_mutex);
+            continue;
+        }
+        if (c.op == SYNC) {  // into the stream, where it is: no new segment
+            k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+            put_sync(c.frame, c.epoch);
+            k_mutex_unlock(&write_sdcard_mutex);
+            LOG_INF("sync: frame %u = %llu", c.frame, c.epoch);
             continue;
         }
         if (!conn) {
@@ -449,9 +610,9 @@ static void store_thread(void)
         }
         conn = bt_conn_ref(conn);
         if (c.op == LIST) {
-            // what was recorded since the connection (while the phone took the files, before it listens) is listed too
+            // the open segment is listed with what the stream has finished: written out first
             k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
-            next_segment();
+            write_out();
             count_free();
             k_mutex_unlock(&write_sdcard_mutex);
             list(conn);
@@ -474,7 +635,7 @@ static void store_thread(void)
         } else if (c.op == DELETE) {
             char p[32];
             int err = -EBUSY;
-            if (c.file != ((uint32_t) boot << 16 | seg)) {
+            if (c.file != cur_file()) {
                 k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
                 struct fs_dirent e;
                 err = fs_unlink(file_path(p, c.file));
@@ -512,13 +673,8 @@ void lr_store_lend(bool on)
     }
 }
 
-void lr_store_rotate(void)
-{
-    struct cmd c = {.op = ROTATE};
-    k_msgq_put(&cmds, &c, K_NO_WAIT);
-}
-
-/* Mount the SD card, count this boot, pick its first segment, start the command thread. */
+/* Mount the SD card, count this boot, pick its first segment; start the command thread, card or not (the stream, its
+ * 'T' records and LIVE go on without one). */
 int lr_store_init(void)
 {
     resetreas = NRF_POWER->RESETREAS;
@@ -529,11 +685,26 @@ int lr_store_init(void)
         fault[0] = 0;
         lr_log(LR_FAULT, 0, last_fault[0], last_fault[1]);
     }
+    int err = card_init(mount_sd_card, &boot);
+    store_err = err;
+    if (err) {
+        seg = sys_rand32_get();  // boot 0 has no count: a random first segment keeps this boot's files apart from another's
+    }
+    file_path(path, cur_file());
+    k_thread_create(&store_thread_data, store_stack, K_THREAD_STACK_SIZEOF(store_stack),
+                    (k_thread_entry_t) store_thread, NULL, NULL, NULL,
+                    K_PRIO_PREEMPT(9), 0, K_NO_WAIT);  // below the pusher (7): sending a file never starves recording
+    return err;
+}
+
+/* Mount, set the card up, count this boot into *counted. The caller sets store_err (and boot, under the SD mutex). */
+static int card_init(int (*mount)(void), uint16_t *counted)
+{
     struct fs_file_t f;
     fs_file_t_init(&f);
-    int err = mount_sd_card();
+    int err = mount();
     if (err) {
-        return store_err = err;
+        return err;
     }
     // a computer the card is lent to (USB disk) leaves it alone: no Spotlight index, no fseventsd log
     struct fs_file_t m;
@@ -549,26 +720,21 @@ int lr_store_init(void)
     err = fs_mkdir(DIR);
     if (err && err != -EEXIST) {
         LOG_ERR("mkdir " DIR ": %d", err);
-        return store_err = err;
+        return err;
     }
     err = fs_open(&f, DIR "/BOOT", FS_O_CREATE | FS_O_RDWR);
     if (err) {
-        return store_err = err;
+        return err;
     }
     uint8_t b[2] = {0};
     fs_read(&f, b, 2);
-    boot = sys_get_le16(b) + 1;
-    sys_put_le16(boot, b);
+    *counted = sys_get_le16(b) + 1;
+    sys_put_le16(*counted, b);
     fs_seek(&f, 0, FS_SEEK_SET);
     fs_write(&f, b, 2);
     fs_close(&f);
-    file_path(path, (uint32_t) boot << 16);
-    store_err = 0;
     count_free();
-    LOG_INF("boot %u, %u of %u KB free", boot, free_kb, total_kb);
-    lr_log(LR_STORE, 0, boot, free_kb);
-    k_thread_create(&store_thread_data, store_stack, K_THREAD_STACK_SIZEOF(store_stack),
-                    (k_thread_entry_t) store_thread, NULL, NULL, NULL,
-                    K_PRIO_PREEMPT(9), 0, K_NO_WAIT);  // below the pusher (7): sending a file never starves recording
+    LOG_INF("boot %u, %u of %u KB free", *counted, free_kb, total_kb);
+    lr_log(LR_STORE, 0, *counted, free_kb);
     return 0;
 }

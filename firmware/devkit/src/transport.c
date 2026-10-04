@@ -44,26 +44,7 @@ struct k_mutex write_sdcard_mutex;
 K_SEM_DEFINE(pusher_wake_sem, 0, 1);
 static atomic_t connection_generation;
 
-static ssize_t audio_data_write_handler(struct bt_conn *conn,
-                                        const struct bt_gatt_attr *attr,
-                                        const void *buf,
-                                        uint16_t len,
-                                        uint16_t offset,
-                                        uint8_t flags);
-
 static struct bt_conn_cb _callback_references;
-static void audio_ccc_config_changed_handler(const struct bt_gatt_attr *attr, uint16_t value);
-static ssize_t audio_data_read_characteristic(struct bt_conn *conn,
-                                              const struct bt_gatt_attr *attr,
-                                              void *buf,
-                                              uint16_t len,
-                                              uint16_t offset);
-static ssize_t audio_codec_read_characteristic(struct bt_conn *conn,
-                                               const struct bt_gatt_attr *attr,
-                                               void *buf,
-                                               uint16_t len,
-                                               uint16_t offset);
-
 static void dfu_ccc_config_changed_handler(const struct bt_gatt_attr *attr, uint16_t value);
 static ssize_t dfu_control_point_write_handler(struct bt_conn *conn,
                                                const struct bt_gatt_attr *attr,
@@ -75,49 +56,9 @@ static ssize_t dfu_control_point_write_handler(struct bt_conn *conn,
 //
 // Service and Characteristic
 //
-// Audio service with UUID 19B10000-E8F2-537E-4F6C-D104768A1214
-// exposes following characteristics:
-// - Audio data (UUID 19B10001-E8F2-537E-4F6C-D104768A1214) to send audio data (read/notify)
-// - Audio codec (UUID 19B10002-E8F2-537E-4F6C-D104768A1214) to send audio codec type (read)
-// TODO: The current audio service UUID seems to come from old Intel sample code,
-// we should change it to UUID 814b9b7c-25fd-4acd-8604-d28877beee6d
-static struct bt_uuid_128 audio_service_uuid =
-    BT_UUID_INIT_128(BT_UUID_128_ENCODE(0x19B10000, 0xE8F2, 0x537E, 0x4F6C, 0xD104768A1214));
-static struct bt_uuid_128 audio_characteristic_data_uuid =
-    BT_UUID_INIT_128(BT_UUID_128_ENCODE(0x19B10001, 0xE8F2, 0x537E, 0x4F6C, 0xD104768A1214));
-static struct bt_uuid_128 audio_characteristic_format_uuid =
-    BT_UUID_INIT_128(BT_UUID_128_ENCODE(0x19B10002, 0xE8F2, 0x537E, 0x4F6C, 0xD104768A1214));
-static struct bt_uuid_128 audio_characteristic_speaker_uuid =
-    BT_UUID_INIT_128(BT_UUID_128_ENCODE(0x19B10003, 0xE8F2, 0x537E, 0x4F6C, 0xD104768A1214));
-
-static struct bt_gatt_attr audio_service_attr[] = {
-    BT_GATT_PRIMARY_SERVICE(&audio_service_uuid),
-    BT_GATT_CHARACTERISTIC(&audio_characteristic_data_uuid.uuid,
-                           BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
-                           BT_GATT_PERM_READ_ENCRYPT,
-                           audio_data_read_characteristic,
-                           NULL,
-                           NULL),
-    BT_GATT_CCC(audio_ccc_config_changed_handler, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE_ENCRYPT),
-    BT_GATT_CHARACTERISTIC(&audio_characteristic_format_uuid.uuid,
-                           BT_GATT_CHRC_READ,
-                           BT_GATT_PERM_READ_ENCRYPT,  // the clients' first read: an unpaired phone pairs here
-                           audio_codec_read_characteristic,
-                           NULL,
-                           NULL),
-#ifdef CONFIG_OMI_ENABLE_SPEAKER
-    BT_GATT_CHARACTERISTIC(&audio_characteristic_speaker_uuid.uuid,
-                           BT_GATT_CHRC_WRITE | BT_GATT_CHRC_NOTIFY,
-                           BT_GATT_PERM_WRITE,
-                           NULL,
-                           audio_data_write_handler,
-                           NULL),
-    BT_GATT_CCC(audio_ccc_config_changed_handler, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE), //
-#endif
-
-};
-
-static struct bt_gatt_service audio_service = BT_GATT_SERVICE(audio_service_attr);
+// The record stream's service (lr_store.c), advertised: clients find the recorder by it
+static struct bt_uuid_128 lr_service_uuid =
+    BT_UUID_INIT_128(BT_UUID_128_ENCODE(0x7c3e0000, 0x1a2b, 0x4c5d, 0x8e9f, 0x6c6976657265));
 
 // Nordic Legacy DFU service with UUID 00001530-1212-EFDE-1523-785FEABCD123
 // exposes following characteristics:
@@ -288,7 +229,7 @@ int accel_start()
 // Advertisement data: 31 bytes at most, so the board name (LR-X1) here and the full name (LR-X1-3F2A) in the scan response
 static const struct bt_data bt_ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-    BT_DATA(BT_DATA_UUID128_ALL, audio_service_uuid.val, sizeof(audio_service_uuid.val)),
+    BT_DATA(BT_DATA_UUID128_ALL, lr_service_uuid.val, sizeof(lr_service_uuid.val)),
     BT_DATA(BT_DATA_NAME_SHORTENED, CONFIG_LR_NAME_PREFIX, sizeof(CONFIG_LR_NAME_PREFIX) - 1),
 };
 
@@ -424,54 +365,6 @@ uint32_t lr_pause_left(void)
 // State and Characteristics
 //
 
-static void audio_ccc_config_changed_handler(const struct bt_gatt_attr *attr, uint16_t value)
-{
-    if (value == BT_GATT_CCC_NOTIFY) {
-        LOG_INF("Client subscribed for notifications");
-    } else if (value == 0) {
-        LOG_INF("Client unsubscribed from notifications");
-    } else {
-        LOG_INF("Invalid CCC value: %u", value);
-    }
-    k_sem_give(&pusher_wake_sem);
-}
-
-static ssize_t audio_data_read_characteristic(struct bt_conn *conn,
-                                              const struct bt_gatt_attr *attr,
-                                              void *buf,
-                                              uint16_t len,
-                                              uint16_t offset)
-{
-    LOG_DBG("audio_data_read_characteristic");
-    return bt_gatt_attr_read(conn, attr, buf, len, offset, NULL, 0);
-}
-
-static ssize_t audio_codec_read_characteristic(struct bt_conn *conn,
-                                               const struct bt_gatt_attr *attr,
-                                               void *buf,
-                                               uint16_t len,
-                                               uint16_t offset)
-{
-    uint8_t value[1] = {CODEC_ID};
-    LOG_DBG("audio_codec_read_characteristic %d", CODEC_ID);
-    return bt_gatt_attr_read(conn, attr, buf, len, offset, value, sizeof(value));
-}
-
-static ssize_t audio_data_write_handler(struct bt_conn *conn,
-                                        const struct bt_gatt_attr *attr,
-                                        const void *buf,
-                                        uint16_t len,
-                                        uint16_t offset,
-                                        uint8_t flags)
-{
-    uint16_t amount = 400;
-    int16_t *int16_buf = (int16_t *) buf;
-    uint8_t *data = (uint8_t *) buf;
-    bt_gatt_notify(conn, attr, &amount, sizeof(amount));
-    amount = speak(len, buf);
-    return len;
-}
-
 //
 // DFU Service Handlers
 //
@@ -578,7 +471,6 @@ static void _transport_connected(struct bt_conn *conn, uint8_t err)
     k_work_reschedule(&unencrypted_work, K_SECONDS(UNENCRYPTED_S));
 
     is_connected = true;
-    lr_store_rotate();  // what was recorded offline becomes closed files the phone can take
     atomic_inc(&connection_generation);
     k_sem_give(&pusher_wake_sem);
     adv_refresh();
@@ -707,7 +599,6 @@ static struct bt_conn_cb _callback_references = {
 // Ring Buffer
 //
 
-#define NET_BUFFER_HEADER_SIZE 3
 #define RING_BUFFER_HEADER_SIZE 6  // size:u16 (top bit: frames left out before this one), frame number:u32
 #define AFTER_GAP 0x80
 uint32_t transport_frame_no;  // frames the codec has made since boot, the offline store's clock
@@ -722,16 +613,13 @@ static uint8_t tx_buffer_2[CODEC_OUTPUT_MAX_BYTES + RING_BUFFER_HEADER_SIZE];
 static uint32_t tx_buffer_size = 0;
 static struct ring_buf ring_buf;
 static bool tx_frame_pending = false;
-static uint32_t tx_gatt_offset = 0;
-static uint8_t tx_gatt_index = 0;
 
-static bool write_to_tx_queue(uint8_t *data, size_t size)
+static bool write_to_tx_queue(uint8_t *data, size_t size, uint32_t frame_no)
 {
     if (size > CODEC_OUTPUT_MAX_BYTES) {
         return false;
     }
-    if (!capturing()) {  // unbound or paused: nothing kept, the frame only counted
-        transport_frame_no++;
+    if (!capturing()) {  // unbound or paused: nothing kept, the frame only counted (broadcast_audio_packets numbered it)
         skipped = true;
         return true;
     }
@@ -739,7 +627,7 @@ static bool write_to_tx_queue(uint8_t *data, size_t size)
     // Copy data (TODO: Avoid this copy)
     tx_buffer_2[0] = size & 0xFF;
     tx_buffer_2[1] = ((size >> 8) & 0x7F) | (skipped ? AFTER_GAP : 0);
-    sys_put_le32(transport_frame_no++, tx_buffer_2 + 2);  // counted even if the queue is full: a gap, not a shift
+    sys_put_le32(frame_no, tx_buffer_2 + 2);
     memcpy(tx_buffer_2 + RING_BUFFER_HEADER_SIZE, data, size);
 
     // Write to ring buffer: whole or not at all
@@ -768,8 +656,6 @@ static bool load_tx_frame(void)
 
     tx_frame_no = sys_get_le32(tx_buffer + 2);
     tx_frame_pending = true;
-    tx_gatt_offset = 0;
-    tx_gatt_index = 0;
     return true;
 }
 
@@ -777,8 +663,6 @@ static void consume_tx_frame(void)
 {
     tx_frame_pending = false;
     tx_buffer_size = 0;
-    tx_gatt_offset = 0;
-    tx_gatt_index = 0;
 }
 
 //
@@ -788,69 +672,6 @@ static void consume_tx_frame(void)
 // Thread
 K_THREAD_STACK_DEFINE(pusher_stack, 4096);
 struct k_thread pusher_thread;  // lr_log.c watches its stack
-static uint16_t packet_next_index = 0;
-static uint8_t pusher_temp_data[CODEC_OUTPUT_MAX_BYTES + NET_BUFFER_HEADER_SIZE];
-
-static bool push_to_gatt(struct bt_conn *conn)
-{
-    if (!load_tx_frame()) {
-        return false;
-    }
-
-    uint8_t *buffer = tx_buffer + RING_BUFFER_HEADER_SIZE;
-    const int max_retries = 3;
-
-    while (tx_gatt_offset < tx_buffer_size) {
-        uint32_t id = packet_next_index++;
-        uint32_t packet_size = MIN(current_mtu - NET_BUFFER_HEADER_SIZE, tx_buffer_size - tx_gatt_offset);
-        pusher_temp_data[0] = id & 0xFF;
-        pusher_temp_data[1] = (id >> 8) & 0xFF;
-        pusher_temp_data[2] = tx_gatt_index;
-        memcpy(pusher_temp_data + NET_BUFFER_HEADER_SIZE, buffer + tx_gatt_offset, packet_size);
-
-        int retry_count = 0;
-        while (retry_count < max_retries) {
-            int err =
-                bt_gatt_notify(conn, &audio_service.attrs[1], pusher_temp_data, packet_size + NET_BUFFER_HEADER_SIZE);
-
-            if (err) {
-                LOG_DBG("bt_gatt_notify failed (err %d)", err);
-                LOG_DBG("MTU: %d, packet_size: %d", current_mtu, packet_size + NET_BUFFER_HEADER_SIZE);
-                k_sleep(K_MSEC(1));
-                retry_count++;
-                continue;
-            }
-
-            break;
-        }
-
-        if (retry_count >= max_retries) {
-            LOG_ERR("Failed to send packet after %d retries", max_retries);
-            return false;
-        }
-
-        tx_gatt_offset += packet_size;
-        tx_gatt_index++;
-    }
-
-    consume_tx_frame();
-    return true;
-}
-// While no phone takes the audio, frames go to the SD card (lr_store.c)
-static bool write_to_storage(void)
-{
-    if (!load_tx_frame()) {
-        return false;
-    }
-    k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
-    if (is_sd_on()) {
-        lr_store_frame(tx_frame_no, tx_buffer + RING_BUFFER_HEADER_SIZE, tx_buffer_size, tx_after_gap);
-    }
-    k_mutex_unlock(&write_sdcard_mutex);
-    consume_tx_frame();
-    return true;
-}
-
 void pusher(void)
 {
     k_msleep(500);
@@ -858,38 +679,12 @@ void pusher(void)
     while (1) {
         k_sem_take(&pusher_wake_sem, K_FOREVER);
 
-        while (tx_frame_pending || !ring_buf_is_empty(&ring_buf)) {
-            struct bt_conn *conn = current_connection;
-            if (conn) {
-                conn = bt_conn_ref(conn);
-            }
-
-            bool valid = true;
-            if (current_mtu < MINIMAL_PACKET_SIZE) {
-                valid = false;
-            } else if (!conn) {
-                valid = false;
-            } else {
-                valid = bt_gatt_is_subscribed(conn, &audio_service.attrs[1], BT_GATT_CCC_NOTIFY);
-            }
-
-            bool progressed = false;
-            if (!valid) {  // connected but not listening (yet) counts as offline: the audio is kept
-                progressed = write_to_storage();
-            }
-
-            if (valid) {
-                progressed = push_to_gatt(conn);
-            }
-
-            if (conn) {
-                bt_conn_unref(conn);
-            }
-
-            if (!progressed) {
-                break;
-            }
-
+        // every frame into the record stream (lr_store.c): to the card always, to a phone that follows it (LIVE)
+        while (load_tx_frame()) {
+            k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+            lr_store_frame(tx_frame_no, tx_buffer + RING_BUFFER_HEADER_SIZE, tx_buffer_size, tx_after_gap);
+            k_mutex_unlock(&write_sdcard_mutex);
+            consume_tx_frame();
             k_yield();
         }
     }
@@ -972,7 +767,6 @@ int transport_start()
 #endif
 
     // Start advertising
-    bt_gatt_service_register(&audio_service);
     bt_gatt_service_register(&dfu_service);
     count_bonds();  // and advertising starts with what they say
 
@@ -1010,8 +804,11 @@ int broadcast_audio_packets(uint8_t *buffer, size_t size)
 {
     int retry_count = 0;
     const int max_retries = 3;
+    // numbered once, queued or not: a frame that never makes it is a gap, not a shift (a number per try moved every
+    // later frame 10 ms on)
+    uint32_t frame_no = transport_frame_no++;
 
-    while (retry_count < max_retries && !write_to_tx_queue(buffer, size)) {
+    while (retry_count < max_retries && !write_to_tx_queue(buffer, size, frame_no)) {
         k_sleep(K_MSEC(1));
         retry_count++;
     }

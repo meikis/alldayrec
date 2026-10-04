@@ -51,6 +51,10 @@ config LR_STORE_RESERVE_KB
     int "Offline store: stop recording when the SD card has less than this free (KB); resume at twice it"
     default 1024
 
+config LR_STORE_BATCH
+    int "Record stream: finished records gather in RAM until this many bytes (4 KB is ~1 s of audio), then go to the card in one write"
+    default 4096
+
 config LR_BATTERY_VDDH
     bool "Battery on VDDH (nice!nano): read VDDH/5 inside the chip, no divider or charger pins"
     default n

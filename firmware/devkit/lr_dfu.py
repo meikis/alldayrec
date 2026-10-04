@@ -15,13 +15,12 @@ from bleak import BleakClient, BleakScanner
 
 U = lambda n: f"0000{n:04x}-1212-efde-1523-785feabcd123"
 DFU_SVC, CP, PKT = U(0x1530), U(0x1531), U(0x1532)
-AUDIO_SVC = "19b10000-e8f2-537e-4f6c-d104768a1214"
 PRN = 8  # (16 lost the XIAO bootloader mid-image, 10-03) the bootloader reports the bytes it has every PRN packets: our flow control
 PKT_LEN = 20  # legacy DFU's packet size. 240-byte packets (MTU 247) stalled the Adafruit bootloader mid-image (10-03)
 
 
 async def enter_bootloader(name: str, uf2=False):
-    dev = await BleakScanner.find_device_by_filter(lambda d, a: AUDIO_SVC in a.service_uuids and (a.local_name or "").startswith(name), 20)
+    dev = await BleakScanner.find_device_by_filter(lambda d, a: (a.local_name or "").startswith(name), 20)  # by name: any firmware version
     if not dev:
         sys.exit(f"no {name}")
     print(f"{dev.name}: rebooting into the bootloader")
@@ -36,8 +35,8 @@ async def send(pkg: str):
     z = zipfile.ZipFile(pkg)
     app = json.loads(z.read("manifest.json"))["manifest"]["application"]
     fw, init = z.read(app["bin_file"]), z.read(app["dat_file"])
-    # the bootloader advertises the DFU service and not the audio one
-    dev = await BleakScanner.find_device_by_filter(lambda d, a: DFU_SVC in a.service_uuids and AUDIO_SVC not in a.service_uuids, 30)
+    # the bootloader advertises the DFU service under its own name; the running firmware has it too, named LR-...
+    dev = await BleakScanner.find_device_by_filter(lambda d, a: DFU_SVC in a.service_uuids and not (a.local_name or "").startswith("LR-"), 30)
     if not dev:
         sys.exit("no device in DFU mode")
     print(f"bootloader: {dev.name} {dev.address}")

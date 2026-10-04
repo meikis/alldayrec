@@ -10,6 +10,7 @@
  * @return 0 if successful, negative errno code if error
  */
 int mount_sd_card(void);
+int mount_sd_card_once(void);
 void unmount_sd_card(void);
 
 void sd_on();

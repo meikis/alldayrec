@@ -1,23 +1,22 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { oggOpus } from "../lib/ogg";
+import { RecordStream } from "../lib/stream";
 
 // Two sources, one queue. The phone's microphone: every SLICE_MS the recorder is stopped and restarted, so each
-// blob is a complete webm file. The BLE recorder (Omi devkit firmware): its Opus frames go into Ogg pieces of
-// SLICE_MS as they arrive, no re-encoding. Either way each piece POSTs to /api/chunks with its own start time,
-// the same way the app sends its Opus pieces.
+// blob is a complete webm file. The BLE recorder: the Opus frames of its record stream go into Ogg pieces of
+// SLICE_MS, no re-encoding. Either way each piece POSTs to /api/chunks with its own start time, the same way the
+// app sends its Opus pieces.
 const SLICE_MS = 20000,
   BPS = 32000;
-// Omi audio service: notify packets are [seq lo, seq hi, part] + Opus; a frame longer than the MTU comes in parts 1, 2…
-const SVC = "19b10000-e8f2-537e-4f6c-d104768a1214",
-  AUDIO = "19b10001-e8f2-537e-4f6c-d104768a1214",
-  CODEC = "19b10002-e8f2-537e-4f6c-d104768a1214",
-  OPUS_16K = 20,
-  FRAME_MS = 10,
-  // the offline store (firmware src/lr_store.h): TIME takes the phone's clock, its read is the card's state. The
-  // phone app takes the recorded files; this page only sets the clock so they can be dated
+// the record stream's service (firmware src/lr_store.h): TIME takes the page's clock (read: the card's state), CTRL
+// LIST/READ, DATA what READ sends, LIVE each record as the board makes it
+const FRAME_MS = 10,
   STORE = "7c3e0000-1a2b-4c5d-8e9f-6c6976657265",
-  TIME = "7c3e0001-1a2b-4c5d-8e9f-6c6976657265";
+  TIME = "7c3e0001-1a2b-4c5d-8e9f-6c6976657265",
+  CTRL = "7c3e0002-1a2b-4c5d-8e9f-6c6976657265",
+  DATA = "7c3e0003-1a2b-4c5d-8e9f-6c6976657265",
+  LIVE = "7c3e0004-1a2b-4c5d-8e9f-6c6976657265";
 // typed by hand, else a name of its own for this browser, kept from the first visit
 const device = ref((localStorage.device ||= `web-recorder-${crypto.randomUUID().slice(0, 8)}`)),
   source = ref<"mic" | "ble">(localStorage.source === "ble" ? "ble" : "mic"),
@@ -123,69 +122,109 @@ async function startMic() {
   note(`开始 · ${track.label} · ${JSON.stringify(track.getSettings())}`);
 }
 
-// --- BLE recorder. The device has no clock: a piece starts at the phone time its first frame arrived (never
-// before the previous piece's end), and a lost packet or a dropped link starts a new piece, so later audio is
-// never pulled earlier to close a gap.
+// --- BLE recorder: the page follows its record stream (firmware src/lr_store.h, lib/stream.ts) from where it is when
+// the page connects; a lost notify, or the time the link was down, is READ from the card. The board has no clock: the
+// page writes its own (TIME) on connect and every 10 minutes, the board puts it into the stream as a 'T' record, and
+// each piece's start is the nearest 'T' + 10 ms a frame. What the board recorded before the page connected is the
+// phone app's to take.
 let ble: BluetoothDevice | null = null,
-  frames: Uint8Array[] = [],
-  pieceStart = 0,
-  lastEnd = 0,
-  lastSeq = -1;
-function cut() {
-  if (!frames.length) return;
-  enqueue(oggOpus(frames, FRAME_MS), pieceStart);
-  lastEnd = pieceStart + frames.length * FRAME_MS;
-  frames = [];
-}
-function onPacket(e: Event) {
+  ctrlCh: BluetoothRemoteGATTCharacteristic | null = null,
+  clockTimer = 0,
+  reading = false;
+const follower = new RecordStream((frames, start) => enqueue(oggOpus(frames, FRAME_MS), start), SLICE_MS / FRAME_MS);
+const replies: Uint8Array[] = [];
+const bytes = (e: Event) => {
   const v = (e.target as BluetoothRemoteGATTCharacteristic).value!;
-  const b = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
-  const seq = b[0] | (b[1] << 8),
-    part = b[2],
-    data = b.slice(3);
-  packets.value++;
-  if (lastSeq >= 0 && ((seq - lastSeq) & 0xffff) !== 1) {
-    note(`丢了 ${(seq - lastSeq - 1) & 0xffff} 个包，从这里起新的一块`);
-    cut();
+  return new Uint8Array(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
+};
+const u32 = (b: Uint8Array, at: number) => new DataView(b.buffer, b.byteOffset).getUint32(at, true);
+/** The next CTRL reply of one of `ops`, others passed over. */
+async function reply(ops: number[], timeoutMs = 15000): Promise<Uint8Array> {
+  for (const until = Date.now() + timeoutMs; Date.now() < until; await sleep(20)) {
+    const i = replies.findIndex((r) => ops.includes(r[0]));
+    if (i >= 0) return replies.splice(i, 1)[0];
   }
-  lastSeq = seq;
-  if (part > 0) {
-    // the rest of a frame; its start may have been lost, then the frame is too
-    const head = frames.pop();
-    if (head) frames.push(new Uint8Array([...head, ...data]));
-    return;
-  }
-  if (frames.length >= SLICE_MS / FRAME_MS) cut();
-  if (!frames.length) pieceStart = Math.max(Date.now(), lastEnd);
-  frames.push(data);
+  throw new Error(`录音设备没有回应 0x${ops[0].toString(16)}`);
 }
+async function command(...b: number[]) {
+  await ctrlCh!.writeValueWithResponse(new Uint8Array(b));
+}
+const le32 = (n: number) => [n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, n >>> 24];
+/** LIST: the files on the card with their sizes, and the one the stream goes on in. */
+async function list() {
+  replies.length = 0;
+  await command(1);
+  const files = new Map<number, number>();
+  for (;;) {
+    const r = await reply([0x81, 0x80]);
+    if (r[0] === 0x80) return { files, open: u32(r, 2) };
+    files.set(u32(r, 1), u32(r, 5));
+  }
+}
+/** READ the followed file from where the page's bytes end, to the board's end of it. */
+async function read() {
+  if (reading) return;
+  reading = true;
+  try {
+    const from = follower.end();
+    await command(2, ...le32(follower.file), ...le32(from));
+    await reply([0x82], 60000);
+    if (follower.end() === from) note(`补读 ${follower.file.toString(16)} 没有拿到数据`);
+  } finally {
+    reading = false;
+  }
+}
+function onLive(e: Event) {
+  const b = bytes(e);
+  packets.value++;
+  if (follower.put(u32(b, 0), u32(b, 4), b.subarray(8)) !== null) void read().catch((x) => note("补读失败 " + x));
+}
+const onData = (e: Event) => {
+  const b = bytes(e);
+  follower.put(follower.file, u32(b, 0), b.subarray(4));
+};
 async function connect() {
   const gatt = await ble!.gatt!.connect();
-  const svc = await gatt.getPrimaryService(SVC);
-  const codec = (await (await svc.getCharacteristic(CODEC)).readValue()).getUint8(0);
-  if (codec !== OPUS_16K)
-    throw new Error(`设备的编码是 ${codec}，这里只认 Opus 16 kHz（${OPUS_16K}）`);
+  const svc = await gatt.getPrimaryService(STORE);
+  const ch = async (uuid: string, on: (e: Event) => void) => {
+    const c = await svc.getCharacteristic(uuid);
+    c.oncharacteristicvaluechanged = on; // assigned, not added: a reconnect hands back the same object
+    await c.startNotifications();
+    return c;
+  };
+  ctrlCh = await ch(CTRL, (e) => replies.push(bytes(e)));
+  await ch(DATA, onData);
+  await ch(LIVE, onLive); // before LIST: nothing the stream adds after it is missed
+  const { files, open } = await list();
+  if (follower.file !== open) {
+    if (follower.file >= 0 && files.has(follower.file)) await read(); // the rest of the file the page had
+    // the first time from where the stream is now; after a drop, all of the file it went on in while the link was down
+    follower.follow(open, follower.file < 0 ? (files.get(open) ?? 0) : 0);
+  }
+  await read();
   await recorderState(gatt);
-  const ch = await svc.getCharacteristic(AUDIO);
-  ch.oncharacteristicvaluechanged = onPacket; // assigned, not added: a reconnect hands back the same object
-  await ch.startNotifications();
-  lastSeq = -1;
-  note(`已连上 ${ble!.name}，Opus 16 kHz，按设备名 ${target()} 上传`);
+  clearInterval(clockTimer);
+  clockTimer = window.setInterval(() => void setClock(gatt).catch(() => {}), 10 * 60000);
+  note(`已连上 ${ble!.name}，跟读 ${open.toString(16)}，按设备名 ${target()} 上传`);
 }
-/** Sets the board's clock, reads its battery and card, and tells the server, as the app does. */
-async function recorderState(gatt: BluetoothRemoteGATTServer) {
+/** The page's clock into the board's stream: a 'T' record there, which dates the pieces. */
+async function setClock(gatt: BluetoothRemoteGATTServer) {
   const time = await (await gatt.getPrimaryService(STORE)).getCharacteristic(TIME);
   const now = new DataView(new ArrayBuffer(8));
   now.setBigUint64(0, BigInt(Date.now()), true);
   await time.writeValueWithResponse(now.buffer);
-  const t = await time.readValue();
+  return time;
+}
+/** Sets the board's clock, reads its battery and card, and tells the server, as the app does. */
+async function recorderState(gatt: BluetoothRemoteGATTServer) {
+  const t = await (await setClock(gatt)).readValue();
   const battery = (await (await (await gatt.getPrimaryService("battery_service")).getCharacteristic("battery_level")).readValue()).getUint8(0);
   const st = { store: t.getInt16(6, true), free_kb: t.getUint32(8, true), total_kb: t.getUint32(12, true), battery };
   hw.value = `电量 ${battery}% · ${st.store === -19 ? "没有存储卡" : st.store === -28 ? "存储卡已满" : `卡剩 ${(st.free_kb / 1048576).toFixed(1)} GB`}`;
   await send(`/api/device-status?device=${encodeURIComponent(target())}`, new Blob([JSON.stringify(st)], { type: "application/json" }), "application/json").catch(() => {});
 }
 async function onDrop() {
-  cut();
+  clearInterval(clockTimer);
   if (!recording.value) return; // stopped on purpose
   note("蓝牙断了，重连中");
   for (let i = 1; recording.value && !ble?.gatt?.connected; i++) {
@@ -198,10 +237,9 @@ async function onDrop() {
   }
 }
 async function startBle() {
-  ble = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }], optionalServices: [STORE, "battery_service"] });
+  ble = await navigator.bluetooth.requestDevice({ filters: [{ services: [STORE] }], optionalServices: ["battery_service"] });
   ble.addEventListener("gattserverdisconnected", () => void onDrop());
-  frames = [];
-  lastEnd = 0;
+  follower.follow(-1, 0);
   packets.value = 0;
   await connect();
 }
@@ -232,7 +270,7 @@ async function stop() {
   if (ble) {
     ble.gatt?.disconnect();
     ble = null;
-    cut();
+    follower.cut();
   }
   note("停止，等最后几块传完");
   await sleep(500);

@@ -2,24 +2,27 @@ package com.suyiiyii.live_record
 
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.random.Random
 
-/** The BLE recorder's offline store (firmware src/lr_store.h, reference client firmware/devkit/lr_sync.py): files of
- *  'A' records (consecutive 10 ms Opus frames from `first`) and 'T' records (frame `frame` was at `epochMs`), named
- *  boot << 16 | segment. A frame's wall time is its boot's sync + 10 ms per frame. Plain Kotlin: the unit test runs it. */
+/** The BLE recorder's record stream (firmware src/lr_store.h, reference client firmware/devkit/lr_sync.py): files of
+ *  'A' records (consecutive 10 ms Opus frames from `first`) and 'T' records (frame `frame` was at the phone's
+ *  `epochMs`), named boot << 16 | segment. A frame's wall time is its boot's nearest 'T' + 10 ms per frame. Plain
+ *  Kotlin: the unit test runs it. */
 object Store {
     const val FRAME_MS = 10L
-    const val PIECE_FRAMES = 6000  // an offline run goes up in 60 s pieces
+    const val OLD_PIECE_FRAMES = 6000  // a file the board has closed goes up in 60 s pieces
 
     sealed class Rec
     class Audio(val first: Long, val frames: List<ByteArray>) : Rec()
     class Sync(val frame: Long, val epochMs: Long) : Rec()
 
-    /** The records of one file in order; a record cut short by power loss ends it. */
-    fun records(b: ByteArray): List<Rec> {
-        val out = mutableListOf<Rec>()
+    /** The whole records of `b` and the offset each ends at (relative to `base`); a record cut short ends the list. */
+    fun scan(b: ByteArray, base: Long = 0): List<Pair<Rec, Long>> {
+        val out = mutableListOf<Pair<Rec, Long>>()
         val v = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
         var i = 0
         while (i < b.size) {
@@ -35,59 +38,14 @@ object Store {
                     frames += b.copyOfRange(j + 1, j + 1 + len)
                     j += 1 + len
                 }
-                out += Audio(first, frames)
                 i = j
+                out += Audio(first, frames) to base + i
             } else if (b[i] == 'T'.code.toByte() && i + 13 <= b.size) {
-                out += Sync(v.getInt(i + 1).toLong() and 0xffffffffL, v.getLong(i + 5))
+                out += Sync(v.getInt(i + 1).toLong() and 0xffffffffL, v.getLong(i + 5)) to base + i + 13
                 i += 13
             } else return out
         }
         return out
-    }
-
-    /** A run of consecutive frames: its first frame's wall time (null: its boot was never synced) and the frames. */
-    class Run(val boot: Int, val startMs: Long?, val frames: MutableList<ByteArray>)
-
-    /** files: file id -> bytes; live: (boot, frame, epochMs) read at this connection (its 'T' may sit in the open
-     *  segment). The nearest sync of the boot dates a run (a later one is as good: the mic's clock runs on). */
-    fun runs(files: Map<Long, ByteArray>, live: Triple<Int, Long, Long>?): List<Run> {
-        val syncs = HashMap<Int, MutableList<Sync>>()
-        live?.let { syncs.getOrPut(it.first) { mutableListOf() } += Sync(it.second, it.third) }
-        val audio = sortedMapOf<Int, MutableList<Audio>>()
-        for ((f, b) in files.toSortedMap()) {
-            val boot = (f shr 16).toInt()
-            for (r in records(b)) when (r) {
-                is Sync -> syncs.getOrPut(boot) { mutableListOf() } += r
-                is Audio -> audio.getOrPut(boot) { mutableListOf() } += r
-            }
-        }
-        val out = mutableListOf<Run>()
-        for ((boot, recs) in audio) {
-            val ts = syncs[boot]
-            fun at(frame: Long) = ts?.minByOrNull { Math.abs(it.frame - frame) }?.let { it.epochMs + (frame - it.frame) * FRAME_MS }
-            var first = -1L
-            var cur: Run? = null
-            for (a in recs) {
-                if (cur != null && a.first == first + cur.frames.size) { cur.frames += a.frames; continue }
-                cur?.let { out += it }
-                first = a.first
-                cur = Run(boot, at(a.first), a.frames.toMutableList())
-            }
-            cur?.let { out += it }
-        }
-        return out
-    }
-
-    /** A dated run as Ogg pieces in `dir`, named start@tag.ogg like the slicer's (written .part, then renamed, so the
-     *  uploader never takes half a file); returns the pieces. */
-    fun writePieces(run: Run, dir: File, tag: String): List<File> {
-        val start = run.startMs ?: return emptyList()
-        return run.frames.chunked(PIECE_FRAMES).mapIndexed { k, frames ->
-            val name = "${start + k * PIECE_FRAMES * FRAME_MS}@$tag"
-            val part = File(dir, "$name.part")
-            part.writeBytes(oggOpus(frames))
-            File(dir, "$name.ogg").also { part.renameTo(it) }
-        }
     }
 
     private val CRC = IntArray(256) { i ->
@@ -115,7 +73,8 @@ object Store {
         return a
     }
 
-    /** 16 kHz mono Opus packets of FRAME_MS each into one Ogg Opus file (RFC 7845), as web/src/lib/ogg.ts does. */
+    /** 16 kHz mono Opus packets of FRAME_MS each into one Ogg Opus file (RFC 7845), as web/src/lib/ogg.ts does:
+     *  pre-skip 0 (the board's encoder runs on across pieces), granule counting every frame from the piece's start. */
     fun oggOpus(frames: List<ByteArray>): ByteArray {
         val serial = Random.nextInt()
         val head = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN)
@@ -130,5 +89,161 @@ object Store {
             out.write(page(frames.subList(i, end), if (end == frames.size) 4 else 0, end * FRAME_MS * 48, serial, seq++))
         }
         return out.toByteArray()
+    }
+}
+
+/** The recorder's files mirrored byte for byte in `dir` (<file>.BIN, as on its card), and how far each has become Ogg
+ *  pieces for the upload queue. One thread uses it (the BLE session's). State in `dir`/state.txt:
+ *    F file closed size cut tscan finished piece,piece...   per file: closed (the stream goes on in another), its
+ *                                  size on the card (-1: unknown), bytes turned into pieces, bytes scanned for 'T',
+ *                                  all of it in pieces, the pieces written
+ *    T clock frame epochMs                         the 'T' records seen; clock: the boot, or the file for boot 0 (no
+ *                                                  card to count boots: each such boot has its own files) */
+class Mirror(private val dir: File) {
+    companion object { const val LIST_MAX = 64 }
+
+    class F(var closed: Boolean = false, var size: Long = -1, var cut: Long = 0, var tscan: Long = 0,
+            val pieces: MutableList<String> = mutableListOf(), var finished: Boolean = false)
+
+    val files = sortedMapOf<Long, F>()
+    private val syncs = HashMap<Long, MutableList<LongArray>>()
+    private val state = File(dir, "state.txt")
+
+    init {
+        dir.mkdirs()
+        if (state.exists()) for (l in state.readLines()) {
+            val p = l.split(' ')
+            when (p[0]) {
+                "F" -> files[p[1].toLong(16)] = F(p[2] == "1", p[3].toLong(), p[4].toLong(), p[5].toLong(),
+                    p.getOrElse(7) { "" }.split(',').filter { it.isNotEmpty() }.toMutableList(), p[6] == "1")
+                "T" -> syncs.getOrPut(p[1].toLong(16)) { mutableListOf() } += longArrayOf(p[2].toLong(), p[3].toLong())
+            }
+        }
+    }
+
+    private fun save() {
+        val tmp = File(dir, "state.tmp")
+        tmp.writeText(buildString {
+            for ((f, s) in files) append("F %08X %d %d %d %d %d %s\n".format(f, if (s.closed) 1 else 0, s.size, s.cut, s.tscan, if (s.finished) 1 else 0, s.pieces.joinToString(",")))
+            for ((c, ts) in syncs) for (t in ts) append("T %08X %d %d\n".format(c, t[0], t[1]))
+        })
+        tmp.renameTo(state)
+    }
+
+    private fun bin(f: Long) = File(dir, "%08X.BIN".format(f))
+    fun have(f: Long) = bin(f).length()
+    private fun clock(f: Long) = if (f shr 16 == 0L) f else f shr 16
+
+    /** Bytes of file `f` at `off` (LIVE, or READ's DATA). Returns where a hole starts when they come after one (the
+     *  caller READs from there), null when taken. Bytes the mirror has already are the same: skipped. */
+    fun put(f: Long, off: Long, b: ByteArray): Long? {
+        val s = files.getOrPut(f) { F() }
+        val h = have(f)
+        if (off > h) return h
+        if (off + b.size > h) FileOutputStream(bin(f), true).use { it.write(b, (h - off).toInt(), (off + b.size - h).toInt()) }
+        if (s.finished && have(f) > h) s.finished = false
+        return null
+    }
+
+    /** What LIST says: files on the card with their sizes, and the one the stream goes on in (kept, listed or not). A
+     *  LIST gives at most LIST_MAX files (firmware list()), so only a shorter one says that a file it leaves out is no
+     *  longer on the card (deleted elsewhere, another card): closed at what the mirror has. */
+    fun listed(card: Map<Long, Long>, open: Long) {
+        for ((f, size) in card) files.getOrPut(f) { F() }.apply { this.size = size; closed = f != open }
+        if (open >= 0) files.getOrPut(open) { F() }.closed = false
+        if (card.size < LIST_MAX) for ((f, s) in files) if (f !in card && f != open) { s.closed = true; s.size = have(f) }
+        save()
+    }
+
+    /** Files the stream has moved on from (a LIVE packet of `open` arrived): closed; LIST tells their size. */
+    fun moved(open: Long) {
+        for ((f, s) in files) if (f != open && !s.closed) s.closed = true
+        save()
+    }
+
+    /** Files with bytes on the card the mirror lacks: (file, from). */
+    fun missing(): List<Pair<Long, Long>> = files.filter { (f, s) -> s.size > have(f) }.map { (f, _) -> f to have(f) }
+
+    /** A file whose card copy cannot give more (its READ ends where the mirror does): take what the mirror has. */
+    fun noMore(f: Long) { files[f]?.let { it.size = minOf(it.size, have(f)); save() } }
+
+    private fun bytes(f: Long, from: Long): ByteArray = if (!bin(f).exists()) ByteArray(0) else RandomAccessFile(bin(f), "r").use { r ->
+        r.seek(from); ByteArray((r.length() - from).toInt()).also { r.readFully(it) }
+    }
+
+    /** Turns what the mirror has into Ogg pieces in `out`, `start@tag.ogg`, `start` = the frame's boot's nearest 'T' +
+     *  10 ms per frame. Pieces end at a gap in the frames, at `liveFrames` (the open file) or 60 s (a closed one), and
+     *  at the end of a closed file the mirror has whole; a file's last frames otherwise wait for more. Frames of a boot
+     *  with no 'T' yet wait for one; a file of a boot that is over (`boot` is the live one) and never had one goes to
+     *  `undated` once the mirror has it whole, as one Ogg of all its frames (its runs back to back: no time to put
+     *  them at anyway).
+     *  Returns the number of pieces written. */
+    fun pieces(out: File, undated: File, tag: String, liveFrames: Int, boot: Int): Int {
+        for ((f, s) in files) if (have(f) > s.tscan) {  // first every 'T' there is: a later file may date an earlier one
+            for ((r, end) in Store.scan(bytes(f, s.tscan), s.tscan)) {
+                if (r is Store.Sync) syncs.getOrPut(clock(f)) { mutableListOf() }.let { ts -> if (ts.none { it[0] == r.frame }) ts += longArrayOf(r.frame, r.epochMs) }
+                s.tscan = end
+            }
+        }
+        var n = 0
+        for ((f, s) in files) {
+            val whole = s.closed && s.size in 0..have(f)
+            if (s.finished || (have(f) <= s.cut && !whole)) continue
+            val max = if (s.closed) Store.OLD_PIECE_FRAMES else liveFrames
+            val ts = syncs[clock(f)]
+            val dead = if (f shr 16 == 0L) whole else (f shr 16) < boot
+            if (ts.isNullOrEmpty() && !(dead && whole)) continue  // waits for this boot's first 'T'
+            var first = -1L
+            val run = mutableListOf<ByteArray>()
+            val lost = mutableListOf<ByteArray>()  // frames that will never have a time
+            fun emit(end: Long) {
+                if (run.isNotEmpty()) {
+                    if (ts.isNullOrEmpty()) {
+                        lost += run
+                    } else {
+                        val near = ts.minBy { Math.abs(it[0] - first) }
+                        val name = "${near[1] + (first - near[0]) * Store.FRAME_MS}@$tag"
+                        val part = File(out, "$name.part")
+                        part.writeBytes(Store.oggOpus(run))
+                        part.renameTo(File(out, "$name.ogg"))
+                        s.pieces += name
+                        n++
+                    }
+                }
+                s.cut = end
+                run.clear()
+                save()
+            }
+            var last = s.cut  // where the last whole record ends
+            for ((r, end) in Store.scan(bytes(f, s.cut), s.cut)) {
+                if (r is Store.Audio) {
+                    if (run.isNotEmpty() && r.first != first + run.size) emit(last)  // a gap: frames lost on the way
+                    if (run.isEmpty()) first = r.first
+                    run += r.frames
+                }
+                last = end
+                if (run.isEmpty()) s.cut = end else if (run.size >= max) emit(end)
+            }
+            if (whole) {
+                emit(last)
+                if (lost.isNotEmpty()) undated.mkdirs().also { File(undated, "$tag-%08X.ogg".format(f)).writeBytes(Store.oggOpus(lost)) }
+                s.finished = true
+                save()
+            }
+        }
+        return n
+    }
+
+    /** Closed files the mirror has whole, all turned into pieces, the pieces uploaded (gone from `out`): the card may
+     *  delete them. */
+    fun done(out: File): List<Long> = files.filter { (_, s) ->
+        s.closed && s.finished && s.pieces.none { File(out, "$it.ogg").exists() || File(out, "$it.part").exists() }
+    }.keys.toList()
+
+    /** A file the card has deleted: gone from the mirror too (its 'T' records stay for the rest of the boot). */
+    fun drop(f: Long) {
+        bin(f).delete()
+        files.remove(f)
+        save()
     }
 }

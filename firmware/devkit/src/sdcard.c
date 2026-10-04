@@ -114,6 +114,17 @@ int mount_sd_card(void)
     return err;
 }
 
+/* One try, no waiting: the store tries a failed card again once a minute (lr_store.c). Logged when it works. */
+int mount_sd_card_once(void)
+{
+    int err = disk_access_init("SD") ?: fs_mount(&mount_point);
+    if (!err) {
+        lr_log(LR_MOUNT, 0, 0, 0);
+    }
+    sd_enabled = !err;
+    return err;
+}
+
 void unmount_sd_card(void)
 {
     fs_unmount(&mount_point);

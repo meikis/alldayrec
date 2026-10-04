@@ -20,11 +20,8 @@ import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
-import java.util.concurrent.BlockingQueue
-import java.util.concurrent.TimeUnit
 
 class MainActivity : FlutterActivity() {
     private var nearby: Nearby? = null  // the add-recorder page's scan, while it is open
@@ -154,11 +151,11 @@ class MainActivity : FlutterActivity() {
     }
 }
 
-/** Opus frames, from the microphone's encoder or from the BLE recorder (`packets`), cut into self-contained Ogg files
- *  whose length depends on the app state, and named by the wall time of their first frame. */
+/** Opus frames from the microphone's encoder cut into self-contained Ogg files whose length depends on the app state,
+ *  named by the wall time of their first frame. With the BLE recorder as the source (`ble`) the microphone stays off:
+ *  BleLink makes the pieces, as long as sliceS() says, and counts them in `files`. */
 class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: Int, @Volatile var offS: Int,
-             private val packets: BlockingQueue<Ble.Packet>? = null, private val clock: BleClock? = null,
-             private val saveEnd: (Long) -> Unit = {}) {
+             private val ble: Boolean = false) {
     @Volatile var foreground = true
     @Volatile var screenOff = false
     @Volatile private var running = false
@@ -166,7 +163,7 @@ class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: I
     @Volatile var error: String? = null
     /** The BLE recorder's name: pieces carry it in their file name (start@name.ogg) and go up as that device. */
     @Volatile var tag: String? = null
-    private lateinit var thread: Thread
+    private var thread: Thread? = null
     private val sr = 16000
 
     // the piece being written; only the slicer thread touches these
@@ -181,14 +178,13 @@ class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: I
     fun sliceS() = if (screenOff) offS else if (foreground) fgS else bgS
 
     fun start() {
-        android.util.Log.i("live-record", "slicer start fg=$fgS bg=$bgS off=$offS ble=${packets != null}")
+        android.util.Log.i("live-record", "slicer start fg=$fgS bg=$bgS off=$offS ble=$ble")
         running = true
         lastState = sliceS()
-        thread = Thread { try { if (packets != null) bleLoop(packets) else micLoop() } catch (e: Exception) { error = e.toString() } }
-        thread.start()
+        if (!ble) thread = Thread { try { micLoop() } catch (e: Exception) { error = e.toString() } }.also { it.start() }
     }
 
-    fun stop() { android.util.Log.i("live-record", "slicer stop"); running = false; thread.join(5000) }
+    fun stop() { android.util.Log.i("live-record", "slicer stop"); running = false; thread?.join(5000) }
 
     /** One Opus packet at `ptsUs` after `wallMs`: rotates at a frame boundary when the slice length is up, or the
      *  state changed to a shorter slice that is already over. */
@@ -214,7 +210,6 @@ class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: I
         muxer = null
         part?.let { it.renameTo(File(it.path.removeSuffix(".part") + ".ogg")); files++ }
         part = null
-        clock?.let { saveEnd(it.end) }  // a restart after a kill starts after it
     }
 
     private fun micLoop() {
@@ -268,42 +263,5 @@ class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: I
         drain(true)
         closeFile()
         codec.stop(); codec.release()
-    }
-
-    /** The recorder's Opus frames go into the Ogg pieces as they are, timed by `clock` (BleClock): a seq gap, a
-     *  disconnect, frames arriving late or a count running ahead of arrival end the run, and the next frame starts a
-     *  new piece at its own time. */
-    private fun bleLoop(packets: BlockingQueue<Ble.Packet>) {
-        format = Ble.opusFormat()
-        val clock = clock!!
-        var anchor = 0L      // wall ms of the piece's first frame
-        var seq = -1
-        var lastAt = 0L      // arrival of the packet that began the frame being put together
-        val frame = ByteArrayOutputStream()  // the frame being put together from its packets
-        fun breakRun() { frame.reset(); closeFile(); clock.brk() }
-
-        while (running) {
-            val p = packets.poll(200, TimeUnit.MILLISECONDS) ?: continue
-            val d = p.data
-            if (d == null) { breakRun(); seq = -1; continue }  // disconnected
-            if (d.size < 4) continue
-            val s = (d[0].toInt() and 0xff) or ((d[1].toInt() and 0xff) shl 8)
-            if (seq >= 0 && s != (seq + 1) and 0xffff) {
-                android.util.Log.w("live-record", "ble seq gap $seq -> $s")
-                breakRun()
-            }
-            seq = s
-            if (d[2].toInt() == 0) {  // a new frame starts: the one before is whole
-                if (frame.size() > 0) {
-                    val b = frame.toByteArray(); frame.reset()
-                    val (t, fresh) = clock.next(lastAt)
-                    if (fresh) { closeFile(); anchor = t }
-                    write(ByteBuffer.wrap(b), 0, b.size, 0, anchor, (t - anchor) * 1000)
-                }
-                lastAt = p.at
-            } else if (frame.size() == 0) continue  // the rest of a frame whose start was lost
-            frame.write(d, 3, d.size - 3)
-        }
-        closeFile()  // a frame still being put together is dropped: it may be cut
     }
 }
