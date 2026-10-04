@@ -1,6 +1,9 @@
 package com.suyiiyii.live_record
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioFormat
@@ -9,7 +12,9 @@ import android.media.MediaCodec
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaRecorder
+import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
@@ -22,6 +27,14 @@ import java.util.concurrent.BlockingQueue
 import java.util.concurrent.TimeUnit
 
 class MainActivity : FlutterActivity() {
+    private var nearby: Nearby? = null  // the add-recorder page's scan, while it is open
+
+    /** Runtime permissions the BLE recorder needs: scanning and connecting (location before Android 12). */
+    private fun blePermissions() = if (Build.VERSION.SDK_INT >= 31) listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
+                                   else listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+
+    private fun granted(p: String) = checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+
     override fun configureFlutterEngine(engine: FlutterEngine) {
         super.configureFlutterEngine(engine)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)  // the page is meant to be watched
@@ -31,9 +44,7 @@ class MainActivity : FlutterActivity() {
                     if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
                         requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
                     if (call.argument<String>("source") == "ble") {
-                        val need = (if (Build.VERSION.SDK_INT >= 31) listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-                                    else listOf(Manifest.permission.ACCESS_FINE_LOCATION))  // BLE scans need location before Android 12
-                            .filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+                        val need = blePermissions().filterNot(::granted)
                         if (need.isNotEmpty()) {
                             requestPermissions(need.toTypedArray(), 2)
                             return@setMethodCallHandler result.error("permission", "允许蓝牙权限后再点开始", null)
@@ -70,16 +81,57 @@ class MainActivity : FlutterActivity() {
                 "recorder" -> {  // the bound BLE recorder, what it last said, and how a firmware update goes
                     val p = getSharedPreferences("recorder", MODE_PRIVATE)
                     result.success(mapOf("name" to p.getString("bleName", null), "model" to p.getString("bleModel", null),
-                        "fw" to p.getString("bleFw", null), "dfu" to Dfu.state))
+                        "fw" to p.getString("bleFw", null), "dfu" to Dfu.state,
+                        "kicked" to p.getBoolean("bleKicked", false)))
+                }
+                "permissions" -> result.success(mapOf(  // what adding a recorder asks for, and what is granted
+                    "bluetooth" to blePermissions().all(::granted),
+                    "notifications" to (Build.VERSION.SDK_INT < 33 || granted(Manifest.permission.POST_NOTIFICATIONS)),
+                    "battery" to getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName),
+                    "bluetoothOn" to getSystemService(BluetoothManager::class.java).adapter.isEnabled))
+                "askPermission" -> {
+                    when (call.argument<String>("which")) {
+                        "bluetooth" -> requestPermissions(blePermissions().toTypedArray(), 2)
+                        "notifications" -> if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                        // the link lives in the background all day: without this, the system stops it
+                        "battery" -> startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+                    }
+                    result.success(null)
+                }
+                "scan" -> {  // the add-recorder page opens (true) or closes
+                    nearby?.stop(); nearby = null
+                    if (call.argument<Boolean>("on")!! && blePermissions().all(::granted)) nearby = Nearby(this).also { it.start() }
+                    result.success(null)
+                }
+                "nearby" -> result.success(nearby?.list() ?: emptyList<Map<String, Any>>())
+                "bind" -> {  // the recorder the person chose: the link pairs with it next (force: it then forgets its other phones)
+                    val addr = call.argument<String>("address")!!
+                    val d = getSystemService(BluetoothManager::class.java).adapter.getRemoteDevice(addr)
+                    if (d.bondState == BluetoothDevice.BOND_BONDED) Ble.removeBond(d)  // an old bond the recorder may have forgotten
+                    getSharedPreferences("recorder", MODE_PRIVATE).edit().putString("bleName", call.argument<String>("name"))
+                        .putString("bleAddress", addr).putBoolean("bindPending", true).putBoolean("bindForce", call.argument<Boolean>("force")!!)
+                        .remove("bleKicked").remove("bleModel").remove("bleFw").apply()
+                    result.success(null)
                 }
                 "usbDisk" -> {  // the connected board's card to the computer's USB, or back
                     val link = RecorderService.link
                     if (link == null) result.error("none", "先开始录音，连上录音设备", null)
                     else { link.usbDisk(call.argument<Boolean>("on")!!); result.success(null) }
                 }
-                "unbind" -> {  // the next scan takes the first recorder it sees
-                    getSharedPreferences("recorder", MODE_PRIVATE).edit().remove("bleName").remove("bleAddress").remove("bleModel").remove("bleFw").apply()
-                    result.success(null)
+                "unbind" -> Thread {  // the recorder forgets every phone (when connected), then this phone forgets it
+                    val p = getSharedPreferences("recorder", MODE_PRIVATE)
+                    val addr = p.getString("bleAddress", null)
+                    // first: the link must not reconnect when the recorder drops it
+                    p.edit().remove("bleName").remove("bleAddress").remove("bleModel").remove("bleFw").remove("bindPending")
+                        .remove("bindForce").remove("bleKicked").commit()
+                    val forgot = RecorderService.link?.forgetAll() ?: false
+                    if (addr != null && BluetoothAdapter.checkBluetoothAddress(addr))
+                        Ble.removeBond(getSystemService(BluetoothManager::class.java).adapter.getRemoteDevice(addr))
+                    runOnUiThread { result.success(forgot) }
+                }.start()
+                "pause" -> {  // the connected recorder keeps nothing for s seconds (0: records again)
+                    try { RecorderService.link!!.pause(call.argument<Int>("s")!!); result.success(null) }
+                    catch (e: Exception) { result.error("none", "录音设备没连上", null) }
                 }
                 "dfu" -> {  // a package from the server for `model`: only onto a recorder that said it is that model
                     val p = getSharedPreferences("recorder", MODE_PRIVATE)

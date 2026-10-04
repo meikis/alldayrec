@@ -65,7 +65,6 @@ static void print_reset_reason(void)
 }
 
 bool is_connected = false;
-bool is_charging = false;
 extern bool is_off;
 extern bool usb_charge;
 static void boot_led_sequence(void)
@@ -98,35 +97,36 @@ static void boot_led_sequence(void)
 
 void set_led_state()
 {
-    // Recording and connected state - BLUE
-
-    if (usb_charge) {
-        is_charging = !is_charging;
-        if (is_charging) {
-            set_led_green(true);
-        } else {
-            set_led_green(false);
-        }
-    } else {
-        set_led_green(false);
+    // Called every 500 ms. Blue: a phone connected; red: recording to the card; blue blinking: no phone bound yet, not
+    // recording; yellow blinking: paused; green blinking: charging; green twice: just paired. The ProMicro has only
+    // the blue LED.
+    static bool tick;
+    tick = !tick;
+    bool green = usb_charge && tick;
+    if (lr_led_paired) {
+        green = lr_led_paired-- & 1;
     }
     if (is_off) {
+        set_led_green(green);
         set_led_red(false);
         set_led_blue(false);
         return;
     }
-    if (is_connected) {
-        set_led_blue(true);
+    if (!lr_bond_count()) {
+        set_led_green(green);
         set_led_red(false);
+        set_led_blue(tick);
         return;
     }
-
-    // Recording but lost connection - RED
-    if (!is_connected) {
-        set_led_red(true);
+    if (lr_paused()) {
+        set_led_green(tick || green);
+        set_led_red(tick);
         set_led_blue(false);
         return;
     }
+    set_led_green(green);
+    set_led_red(!is_connected);
+    set_led_blue(is_connected);
 }
 
 int main(void)

@@ -68,8 +68,55 @@ object Ble {
     /** A unit's full name (LR-P1-BDAE: board and address); the advertisement alone carries only LR-P1. */
     fun fullName(n: String?) = n != null && Regex("LR-[A-Z0-9]+-[0-9A-F]{4}").matches(n)
 
+    /** A unit's full name without its scan response: the board name in the advertisement (LR-P1) and the last two
+     *  bytes of its address, as the firmware makes it (transport.c lr_set_name). A phone gets few scan responses from
+     *  a recorder busy with another phone (slow non-connectable advertising, 10-04), so the list must not need them. */
+    fun fullName(names: List<String?>, address: String): String? = names.firstOrNull(::fullName)
+        ?: names.firstOrNull { it != null && Regex("LR-[A-Z0-9]+").matches(it) }?.let { "$it-" + address.takeLast(5).replace(":", "") }
+
+    fun fullName(r: ScanResult) = fullName(listOf(r.scanRecord?.deviceName, r.device.name), r.device.address)
+
     /** The name pieces carry and the server sees: safe in a file name (the web gateway cleans it the same way). */
     fun tag(n: String) = n.replace(Regex("[^A-Za-z0-9._-]"), "_")
+
+    /** The recorder's state in its scan response (firmware transport.c lr_status, company 0xFFFF); -1: an older
+     *  firmware without it. */
+    const val BOUND = 1
+    const val CONNECTED = 2
+    const val PAUSED = 4
+    fun state(r: ScanResult) = r.scanRecord?.getManufacturerSpecificData(0xFFFF)?.firstOrNull()?.toInt()?.and(0xff) ?: -1
+
+    /** The phone's own bond goes too (hidden API, as BLE libraries call it): a bond the recorder has forgotten would
+     *  only fail to encrypt when this phone binds it again. */
+    fun removeBond(d: BluetoothDevice): Boolean = try {
+        d.javaClass.getMethod("removeBond").invoke(d) as Boolean
+    } catch (e: Exception) { Log.w("live-record", "ble removeBond: $e"); false }
+}
+
+/** The add-recorder page's list: the recorders around and the state each advertises. */
+@SuppressLint("MissingPermission")
+class Nearby(ctx: Context) {
+    private class Seen(val address: String, val rssi: Int, val state: Int, val busy: Boolean, val at: Long)
+    private val seen = java.util.concurrent.ConcurrentHashMap<String, Seen>()
+    private val scanner = ctx.getSystemService(BluetoothManager::class.java).adapter.bluetoothLeScanner
+    private val cb = object : ScanCallback() {
+        override fun onScanResult(type: Int, r: ScanResult) {
+            val name = Ble.fullName(r) ?: return
+            // the state byte is in the scan response: a result without one keeps the last known; a non-connectable
+            // advertisement is a recorder connected to another phone, scan response or not
+            val st = Ble.state(r).takeIf { it >= 0 } ?: seen[name]?.state ?: -1
+            seen[name] = Seen(r.device.address, r.rssi, st, !r.isConnectable, System.currentTimeMillis())
+        }
+    }
+
+    fun start() = scanner?.startScan(listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(Ble.SERVICE)).build()),
+        ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), cb)
+
+    fun stop() = scanner?.stopScan(cb)
+
+    /** Seen in the last 5 s, nearest first. */
+    fun list() = seen.entries.filter { System.currentTimeMillis() - it.value.at < 5000 }.sortedByDescending { it.value.rssi }
+        .map { (n, s) -> mapOf("name" to n, "address" to s.address, "rssi" to s.rssi, "state" to s.state, "busy" to s.busy) }
 }
 
 /** Wall time of the recorder's live frames. The board has no clock: a run is anchored at the phone's time of its first
@@ -106,17 +153,25 @@ class BleClock(var end: Long) {
 }
 
 /** Finds the recorder by scanning for its service (always: the board's address is random static, and a device made
- *  from a bare address after a Bluetooth restart is tried as public and times out, status 147, 10-03): the bound one
- *  (prefs bleName), or the first full name seen, which becomes bound. Each connection runs a session on its own
- *  thread, one GATT operation at a time: pair (the firmware lets a new phone pair only while it is on USB power or
- *  just reset), set the board's clock, take what it recorded offline (pieces into `chunks`, files deleted from its card
+ *  from a bare address after a Bluetooth restart is tried as public and times out, status 147, 10-03): the one the
+ *  person chose on the add-recorder page (prefs bleName). Each connection runs a session on its own thread, one GATT
+ *  operation at a time: pair, only right after that choice (prefs bindPending; with bindForce the recorder then
+ *  forgets its other phones), set the board's clock, take what it recorded offline (pieces into `chunks`, files deleted from its card
  *  once the phone has them), then subscribe to the live audio and put every notify on `out`; battery and card are read
  *  every minute. A dropped link is reconnected with autoConnect, which waits for the device to come back in range;
- *  each drop puts a null packet so the slicer ends the run. Permissions are checked before the service starts. */
+ *  each drop puts a null packet so the slicer ends the run. Permissions are checked before the service starts.
+ *  Binding is the app's soft limit (issue #56): a recorder that forgot this phone (another phone took it) is not
+ *  paired again behind the person's back; the link stops and says so (prefs bleKicked) until they add it again. */
 @SuppressLint("MissingPermission")
 class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packet>, private val prefs: SharedPreferences,
               private val chunks: File, private val undated: File,
               private val onName: (String) -> Unit, private val report: (String, Map<String, Any?>) -> Unit) {
+    companion object {
+        const val KICKED = "已被其他手机绑定：在「录音设备」页重新添加"
+        // what Android reports when the link cannot be encrypted with the keys it has
+        val AUTH_FAILED = setOf("GATT 5", "GATT 15", "GATT 137")
+    }
+
     @Volatile var state = "正在找录音设备"
     @Volatile var hw: Map<String, Any?> = emptyMap()
     @Volatile private var on = true
@@ -158,8 +213,9 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
 
     private fun scan() {
         val scanner = adapter.bluetoothLeScanner ?: return retry("蓝牙未打开") { scan() }
-        val bound = prefs.getString("bleName", null)
-        state = if (bound != null) "正在找 $bound" else "正在找录音设备"
+        val bound = prefs.getString("bleName", null) ?: run { state = "未绑定录音设备"; return }
+        if (prefs.getBoolean("bleKicked", false)) { state = KICKED; return }
+        state = "正在找 $bound"
         // filtered by service: unfiltered scans are paused while the screen is off
         scanner.startScan(listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(Ble.SERVICE)).build()),
             ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), scanCb)
@@ -167,13 +223,12 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
 
     private val scanCb = object : ScanCallback() {
         override fun onScanResult(type: Int, r: ScanResult) {
-            // the full name (LR-P1-BDAE) comes in the scan response or from the cache; a result with only LR-P1 waits
-            val name = listOfNotNull(r.scanRecord?.deviceName, r.device.name).firstOrNull(Ble::fullName) ?: return
-            val bound = prefs.getString("bleName", null)
-            if (bound != null && bound != name) return
+            val name = Ble.fullName(r) ?: return
+            if (name != prefs.getString("bleName", null)) return
+            val st = Ble.state(r)
+            if (!r.isConnectable) { state = "$name 正连着其他手机"; return }
             adapter.bluetoothLeScanner?.stopScan(this)
-            Log.i("live-record", "ble found ${r.device.address} $name rssi=${r.rssi}")
-            if (bound == null) prefs.edit().putString("bleName", name).apply()  // the first one seen is ours from now on
+            Log.i("live-record", "ble found ${r.device.address} $name rssi=${r.rssi} state=$st")
             prefs.edit().putString("bleAddress", r.device.address).apply()  // for a firmware update
             onName(Ble.tag(name))
             if (on) connect(r.device, false)
@@ -193,8 +248,9 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
         gatt = d.connectGatt(ctx, auto, cb, BluetoothDevice.TRANSPORT_LE) ?: return retry("连接失败") { connect(d, true) }
     }
 
-    @Volatile private var pairingRefused = false
+    @Volatile private var pairingFailed = false
     @Volatile private var lastSeen: String? = null  // HH:mm the link last went down
+    @Volatile var pausedUntil = 0L                   // wall ms the recorder's pause ends (0: recording), as last known
 
     //
     // One GATT operation at a time: the session thread starts one and waits for its callback
@@ -248,8 +304,7 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
 
     private fun le(b: ByteArray) = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
 
-    /** Bonded or not at all: the firmware asks for encryption on connect, so Android pairs by itself (Just Works); a
-     *  phone it refuses stays BOND_NONE. */
+    /** Bonded or not at all: the firmware asks for encryption on connect, so Android pairs by itself (Just Works). */
     private fun bond(d: BluetoothDevice): Boolean {
         if (d.bondState == BluetoothDevice.BOND_BONDED) return true
         state = "正在配对"
@@ -272,22 +327,37 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
         try {
             step("已连接，协商包长") { op("mtu") { g.requestMtu(512) } }  // one frame per notify
             g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)  // a fixed short interval; the result is logged below
-            val bonded = g.device.bondState == BluetoothDevice.BOND_BONDED
-            if (!step(if (bonded) "确认配对" else "正在配对") { bond(g.device) }) {
-                Log.w("live-record", "ble pairing refused by $name")
-                pairingRefused = true
-                state = "配对被录音设备拒绝：把它接上 USB 电源（或重启它后 5 分钟内）再连"
-                g.disconnect()
-                return
+            val adding = prefs.getBoolean("bindPending", false)
+            if (g.device.bondState != BluetoothDevice.BOND_BONDED) {
+                if (!adding) return kicked(g, "this phone's bond is gone")
+                if (!step("正在配对") { bond(g.device) }) {
+                    Log.w("live-record", "ble pairing with $name failed")
+                    pairingFailed = true
+                    state = "配对没有完成，30 秒后重试"
+                    g.disconnect()
+                    return
+                }
             }
             step("读取设备服务") { op("services") { g.discoverServices() } }
-            val codec = read(g, Ble.SERVICE, Ble.CODEC).firstOrNull()?.toInt()?.and(0xff)
+            // the first encrypted read: a recorder that no longer knows this phone fails it
+            val codec = try { read(g, Ble.SERVICE, Ble.CODEC) } catch (e: Exception) {
+                if (!adding && e.message in AUTH_FAILED) return kicked(g, "${e.message}") else throw e
+            }.firstOrNull()?.toInt()?.and(0xff)
             if (codec != Ble.OPUS_16K) { state = "设备编码 $codec 不支持（只支持 16 kHz Opus）"; Log.w("live-record", "ble codec $codec"); return }
             val now = System.currentTimeMillis()
             step("给设备对时") { write(g, Ble.STORE, Ble.TIME, le(ByteArray(8)).putLong(now).array()) }  // the clock its offline audio is dated by
             val st = step("读取设备状态") { status(g, name) }
             Log.i("live-record", "ble status: boot ${st.boot} frame ${st.frame} " + hw.entries.joinToString(" ") { "${it.key}=${it.value}" })
             subscribe(g, Ble.STORE, Ble.CTRL)  // replies to LIST/READ/DELETE and the app's USB disk switch
+            if (adding) {
+                if (prefs.getBoolean("bindForce", false)) step("让录音设备忘掉其他手机") {
+                    ctrl.clear()
+                    write(g, Ble.STORE, Ble.CTRL, byteArrayOf(5))  // FORGET: every phone but this one
+                    Log.i("live-record", "ble forgot other phones: ${ctrl.poll(10, TimeUnit.SECONDS)?.let { le(it).getInt(1) }}")
+                }
+                prefs.edit().remove("bindPending").remove("bindForce").apply()
+                Log.i("live-record", "ble bound $name")
+            }
             if (st.store == 0 || st.store == -28) offline(g, name, Triple(st.boot, st.frame, now))
             else Log.i("live-record", "ble offline sync skipped: card state ${st.store}")
             subscribe(g, Ble.SERVICE, Ble.AUDIO)
@@ -308,6 +378,32 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
     }
 
     private class Status(val boot: Int, val frame: Long, val store: Int)
+
+    /** The recorder no longer knows this phone: no pairing behind the person's back, no reconnecting. */
+    private fun kicked(g: BluetoothGatt, why: String) {
+        Log.w("live-record", "ble kicked: $why")
+        prefs.edit().putBoolean("bleKicked", true).apply()
+        state = KICKED
+        g.disconnect()
+    }
+
+    /** Pause the recording for `s` seconds (0: go on now); the recorder keeps the time itself. */
+    fun pause(s: Int) {
+        if (gatt == null) throw Exception("录音设备没连上")
+        jobs.put { g ->
+            write(g, Ble.STORE, Ble.CTRL, le(ByteArray(5)).put(0x20).putInt(s).array())  // PAUSE
+            pausedUntil = if (s > 0) System.currentTimeMillis() + s * 1000L else 0L
+            Log.i("live-record", "ble pause $s s")
+        }
+    }
+
+    /** Unbinding: the recorder forgets every phone, this one too (FORGET all), and the link goes. False: not connected. */
+    fun forgetAll(): Boolean {
+        if (gatt == null) return false
+        val done = CompletableFuture<Boolean>()
+        jobs.put { g -> done.complete(try { write(g, Ble.STORE, Ble.CTRL, byteArrayOf(5, 1)); true } catch (e: Exception) { false }) }
+        return try { done.get(20, TimeUnit.SECONDS) } catch (e: Exception) { false }
+    }
 
     /** What the app asks of the connected board, run on the session thread between status reads. */
     private val jobs = LinkedBlockingQueue<(BluetoothGatt) -> Unit>()
@@ -342,6 +438,7 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
         val s = Status(t.getShort(0).toInt() and 0xffff, t.getInt(2).toLong() and 0xffffffffL, t.getShort(6).toInt())
         val h = mutableMapOf<String, Any?>("name" to name, "store" to s.store, "free_kb" to (t.getInt(8).toLong() and 0xffffffffL),
             "total_kb" to (t.getInt(12).toLong() and 0xffffffffL), "battery" to read(g, Ble.BAS, Ble.BATTERY).firstOrNull()?.toInt())
+        if (t.limit() >= 47) pausedUntil = t.getInt(43).toLong().let { if (it > 0) System.currentTimeMillis() + it * 1000 else 0L }
         for ((k, c) in listOf("model" to Ble.MODEL, "fw" to Ble.FW_REV))
             h[k] = hw[k] ?: try { String(read(g, Ble.DIS, c)) } catch (e: Exception) { null }
         hw = h
@@ -470,10 +567,11 @@ class BleLink(private val ctx: Context, private val out: BlockingQueue<Ble.Packe
                 gatt = null
                 lastSeen = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())
                 out.put(Ble.Packet(System.currentTimeMillis(), null))
-                // a refused pairing waits longer: the person has to plug the recorder in first
-                val wait = if (pairingRefused) 30_000L else 0L
-                pairingRefused = false
-                if (on) main.postDelayed({ if (on) connect(g.device, true) }, wait)
+                // a pairing that did not finish (a dialog left alone) waits a little; unbound or kicked: no reconnecting
+                val wait = if (pairingFailed) 30_000L else 0L
+                pairingFailed = false
+                if (on && prefs.getString("bleName", null) != null && !prefs.getBoolean("bleKicked", false))
+                    main.postDelayed({ if (on) connect(g.device, true) }, wait)
             }
         }
 

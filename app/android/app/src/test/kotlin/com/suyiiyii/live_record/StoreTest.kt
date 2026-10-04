@@ -43,3 +43,13 @@ class BleClockTest {
         assertEquals(3_010L to true, c.next(2_000))    // after a gap: not before where the last frame ended
     }
 }
+
+/** The list names a recorder without its scan response (10-04: a recorder busy with another phone gave none). */
+class NameTest {
+    @Test fun name() {
+        assertEquals("LR-X1-567E", Ble.fullName(listOf("LR-X1-567E", null), "ED:AF:08:75:56:7E"))  // scan response
+        assertEquals("LR-X1-567E", Ble.fullName(listOf("LR-X1", null), "ED:AF:08:75:56:7E"))       // advertisement only
+        assertEquals("LR-P1-BDAE", Ble.fullName(listOf(null, "LR-P1-BDAE"), "D6:07:F3:A3:BD:AE"))  // the name cache
+        assertEquals(null, Ble.fullName(listOf("Omi", null), "D6:07:F3:A3:BD:AE"))
+    }
+}

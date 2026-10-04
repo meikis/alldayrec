@@ -294,10 +294,18 @@ static const struct bt_data bt_ad[] = {
 
 static char lr_name[CONFIG_BT_DEVICE_NAME_MAX + 1];
 
-// Scan response data (the DIS UUID left out for room: the service itself is still there)
+// The recorder's state for a phone that is only scanning (the app's device list): company 0xFFFF (for tests), then
+// bit 0 bound to a phone, bit 1 a phone connected, bit 2 recording paused
+#define LR_BOUND BIT(0)
+#define LR_CONNECTED BIT(1)
+#define LR_PAUSED BIT(2)
+static uint8_t lr_status[3] = {0xFF, 0xFF, 0};
+
+// Scan response data. The DIS and DFU UUIDs are left out for room: no client looks for them in a scan (the DFU library
+// finds the service once connected), and the services themselves are still there
 static struct bt_data bt_sd[] = {
     {.type = BT_DATA_NAME_COMPLETE, .data_len = 0, .data = (const uint8_t *) lr_name},
-    BT_DATA(BT_DATA_UUID128_ALL, dfu_service_uuid.val, sizeof(dfu_service_uuid.val)),
+    BT_DATA(BT_DATA_MANUFACTURER_DATA, lr_status, sizeof(lr_status)),
 };
 
 /* The unit's name: the board name and the last two bytes of its identity address, which stays with the chip */
@@ -310,6 +318,106 @@ static void lr_set_name(void)
     bt_set_name(lr_name);
     bt_sd[0].data_len = strlen(lr_name);
     LOG_INF("BLE name %s", lr_name);
+}
+
+//
+// Bound, paused, advertising. The recorder keeps nothing until a phone binds it, nor while a phone has paused it
+// (issue #56); the frames are still counted, the frame number being the offline store's clock (lr_store.h).
+// ponytail: mic and codec run while nothing is kept; turn the mic off (and sync the clock again after) to save power.
+//
+
+#define UNENCRYPTED_S 30
+static void unencrypted_check(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(unencrypted_work, unencrypted_check);
+
+volatile uint8_t lr_led_paired;  // main.c: half-seconds of the green "paired" blinks left
+static atomic_t bonds;           // bonded phones
+static volatile bool paused;
+static int64_t pause_end_ms;     // uptime the pause ends at
+
+static void count_bond(const struct bt_bond_info *info, void *n)
+{
+    (*(int *) n)++;
+}
+
+int lr_bond_count(void)
+{
+    return atomic_get(&bonds);
+}
+
+bool lr_paused(void)
+{
+    return paused;
+}
+
+static bool capturing(void)
+{
+    return atomic_get(&bonds) && !lr_paused();
+}
+
+/* Advertising never stops: connectable while no phone is connected; while one is (BT_MAX_CONN=1 leaves no room for
+ * another), scannable only and slowly, so a phone looking for recorders still sees this one, bound and busy. The scan
+ * response carries the state (lr_status). */
+static void adv_restart(struct k_work *work)
+{
+    lr_status[2] = (atomic_get(&bonds) ? LR_BOUND : 0) | (current_connection ? LR_CONNECTED : 0) |
+                   (lr_paused() ? LR_PAUSED : 0);
+    bt_le_adv_stop();
+    int err = current_connection
+                  ? bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_SCANNABLE | BT_LE_ADV_OPT_USE_IDENTITY,
+                                                    BT_GAP_ADV_SLOW_INT_MIN, BT_GAP_ADV_SLOW_INT_MAX, NULL),
+                                    bt_ad, ARRAY_SIZE(bt_ad), bt_sd, ARRAY_SIZE(bt_sd))
+                  : bt_le_adv_start(BT_LE_ADV_CONN_ONE_TIME, bt_ad, ARRAY_SIZE(bt_ad), bt_sd, ARRAY_SIZE(bt_sd));
+    // A connection just gone whose object is not free yet: try again shortly. Not from the recycled() callback: stopping
+    // a connectable advertiser frees its own connection object, which calls recycled() too, and the restart looped
+    // (10-04: the XIAO went unseen when a pause ended while no phone was connected)
+    if (err) {
+        LOG_WRN("advertising: %d", err);
+        k_work_reschedule(k_work_delayable_from_work(work), K_MSEC(500));
+    }
+}
+static K_WORK_DELAYABLE_DEFINE(adv_work, adv_restart);
+
+static void adv_refresh(void)
+{
+    k_work_reschedule(&adv_work, K_NO_WAIT);
+}
+
+static void count_bonds(void)
+{
+    int n = 0;
+    bt_foreach_bond(BT_ID_DEFAULT, count_bond, &n);
+    atomic_set(&bonds, n);
+    LOG_INF("%d bonded phone(s)", n);
+    adv_refresh();
+}
+
+static void pause_end(struct k_work *work)
+{
+    paused = false;
+    LOG_INF("recording again");
+    adv_refresh();
+}
+static K_WORK_DELAYABLE_DEFINE(pause_work, pause_end);
+
+void lr_pause(uint32_t s)
+{
+    if (!s) {
+        k_work_cancel_delayable(&pause_work);
+        pause_end(NULL);
+        return;
+    }
+    s = MIN(s, 24 * 3600);
+    pause_end_ms = k_uptime_get() + s * 1000LL;
+    paused = true;
+    k_work_reschedule(&pause_work, K_SECONDS(s));
+    LOG_INF("paused for %u s", s);
+    adv_refresh();
+}
+
+uint32_t lr_pause_left(void)
+{
+    return paused ? DIV_ROUND_UP(MAX(pause_end_ms - k_uptime_get(), 0), 1000) : 0;
 }
 
 //
@@ -464,14 +572,16 @@ static void _transport_connected(struct bt_conn *conn, uint8_t err)
             info.le.data_len->rx_max_time);
 
     k_work_schedule(&battery_work, K_MSEC(100)); // run immediately
-    // ask for encryption at once: a bonded phone starts it with its keys, a new one pairs (if pairing is open). macOS
-    // does not pair on its own when a read fails for want of encryption (10-03)
+    // ask for encryption at once: a bonded phone starts it with its keys, a new one pairs. macOS does not pair on its
+    // own when a read fails for want of encryption (10-03)
     bt_conn_set_security(conn, BT_SECURITY_L2);
+    k_work_reschedule(&unencrypted_work, K_SECONDS(UNENCRYPTED_S));
 
     is_connected = true;
     lr_store_rotate();  // what was recorded offline becomes closed files the phone can take
     atomic_inc(&connection_generation);
     k_sem_give(&pusher_wake_sem);
+    adv_refresh();
 }
 
 static void _transport_disconnected(struct bt_conn *conn, uint8_t err)
@@ -487,6 +597,7 @@ static void _transport_disconnected(struct bt_conn *conn, uint8_t err)
     }
     current_mtu = 0;
     k_sem_give(&pusher_wake_sem);
+    adv_refresh();
 }
 
 static bool _le_param_req(struct bt_conn *conn, struct bt_le_conn_param *param)
@@ -530,36 +641,17 @@ static void att_mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
 static struct bt_gatt_cb gatt_cb = {.att_mtu_updated = att_mtu_updated};
 
 //
-// Pairing: a stranger nearby must not listen in or take the recordings. Every characteristic but battery and device
-// info needs an encrypted link; a phone pairs (LESC, Just Works) only while the recorder is on USB power, in its first
-// CONFIG_LR_PAIRING_WINDOW_S after a reset, or while it has no bond yet: having the recorder in hand is the
-// permission. Bonded phones reconnect with their keys, no pairing.
+// Pairing: every characteristic but battery and device info needs an encrypted link (LESC, Just Works). Any phone may
+// pair at any time; which recorder a phone binds, and not taking one bound to another phone, is the app's choice
+// (issue #56: development, phones change often). Bonded phones reconnect with their keys, no pairing.
 //
-
-static void count_bond(const struct bt_bond_info *info, void *n)
-{
-    (*(int *) n)++;
-}
-
-bool lr_pairing_open(void)
-{
-    int bonds = 0;
-    bt_foreach_bond(BT_ID_DEFAULT, count_bond, &bonds);
-    return !bonds || nrf_power_usbregstatus_vbusdet_get(NRF_POWER) ||
-           k_uptime_get() < CONFIG_LR_PAIRING_WINDOW_S * 1000LL;
-}
-
-static enum bt_security_err pairing_accept(struct bt_conn *conn, const struct bt_conn_pairing_feat *const feat)
-{
-    bool open = lr_pairing_open();
-    LOG_INF("pairing request: %s", open ? "accepted" : "refused (plug in USB or reset the recorder)");
-    return open ? BT_SECURITY_ERR_SUCCESS : BT_SECURITY_ERR_PAIR_NOT_ALLOWED;
-}
 
 static void pairing_complete(struct bt_conn *conn, bool bonded)
 {
     LOG_INF("paired, bonded %d", bonded);
     lr_log(LR_PAIRED, bonded, 0, 0);
+    lr_led_paired = 4;  // main.c: green twice
+    count_bonds();
 }
 
 static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
@@ -568,21 +660,38 @@ static void pairing_failed(struct bt_conn *conn, enum bt_security_err reason)
     lr_log(LR_PAIR_FAIL, reason, 0, 0);
 }
 
-/* A phone that lost its keys (app reinstalled, Bluetooth reset) cannot encrypt with ours: while pairing is open the
- * old bond goes, so it pairs afresh on its next connection (10-03: the Mac stuck at "PIN or key missing") */
+static void bond_deleted(uint8_t id, const bt_addr_le_t *peer)
+{
+    count_bonds();
+}
+
+/* A phone that lost its keys (app reinstalled, Bluetooth reset) cannot encrypt with ours: the old bond goes, so it
+ * pairs afresh on its next connection (10-03: the Mac stuck at "PIN or key missing") */
 static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_security_err err)
 {
     LOG_INF("security level %d, err %d", level, err);
     lr_log(LR_SECURITY, level, err, 0);
-    if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING && lr_pairing_open()) {
+    if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING) {
         LOG_WRN("stale bond dropped");
         lr_log(LR_FORGET, 1, 1, 0);
         bt_unpair(BT_ID_DEFAULT, bt_conn_get_dst(conn));
     }
 }
 
-static struct bt_conn_auth_cb auth_cb = {.pairing_accept = pairing_accept};
-static struct bt_conn_auth_info_cb auth_info_cb = {.pairing_complete = pairing_complete, .pairing_failed = pairing_failed};
+/* A link still unencrypted this long after connecting (a phone this recorder no longer knows, anything that connects
+ * and never pairs) goes: it would hold the only connection. As long as SMP's own timeout, so a pairing waiting for a
+ * person's tap is not cut. */
+static void unencrypted_check(struct k_work *work)
+{
+    struct bt_conn *conn = current_connection;
+    if (conn && bt_conn_get_security(conn) < BT_SECURITY_L2) {
+        LOG_WRN("still unencrypted after %d s: disconnecting", UNENCRYPTED_S);
+        bt_conn_disconnect(conn, BT_HCI_ERR_AUTH_FAIL);
+    }
+}
+
+static struct bt_conn_auth_info_cb auth_info_cb = {
+    .pairing_complete = pairing_complete, .pairing_failed = pairing_failed, .bond_deleted = bond_deleted};
 
 static struct bt_conn_cb _callback_references = {
     .connected = _transport_connected,
@@ -599,9 +708,12 @@ static struct bt_conn_cb _callback_references = {
 //
 
 #define NET_BUFFER_HEADER_SIZE 3
-#define RING_BUFFER_HEADER_SIZE 6  // size:u16, frame number:u32
+#define RING_BUFFER_HEADER_SIZE 6  // size:u16 (top bit: frames left out before this one), frame number:u32
+#define AFTER_GAP 0x80
 uint32_t transport_frame_no;  // frames the codec has made since boot, the offline store's clock
 static uint32_t tx_frame_no;
+static bool tx_after_gap;  // the loaded frame follows frames left out on purpose (unbound, paused)
+static bool skipped;       // frames have been left out since the last one queued
 // Frames queued by their real size (header + Opus, ~46 B), not in fixed 326 B slots: the same 16 KB hold ~3.5 s, so a
 // card that stalls for most of a second (769 ms seen, 10-04) loses nothing; fixed slots held 320 ms
 static uint8_t tx_queue[16384];
@@ -618,10 +730,15 @@ static bool write_to_tx_queue(uint8_t *data, size_t size)
     if (size > CODEC_OUTPUT_MAX_BYTES) {
         return false;
     }
+    if (!capturing()) {  // unbound or paused: nothing kept, the frame only counted
+        transport_frame_no++;
+        skipped = true;
+        return true;
+    }
 
     // Copy data (TODO: Avoid this copy)
     tx_buffer_2[0] = size & 0xFF;
-    tx_buffer_2[1] = (size >> 8) & 0xFF;
+    tx_buffer_2[1] = ((size >> 8) & 0x7F) | (skipped ? AFTER_GAP : 0);
     sys_put_le32(transport_frame_no++, tx_buffer_2 + 2);  // counted even if the queue is full: a gap, not a shift
     memcpy(tx_buffer_2 + RING_BUFFER_HEADER_SIZE, data, size);
 
@@ -630,6 +747,7 @@ static bool write_to_tx_queue(uint8_t *data, size_t size)
         return false;
     }
     ring_buf_put(&ring_buf, tx_buffer_2, RING_BUFFER_HEADER_SIZE + size);
+    skipped = false;
     k_sem_give(&pusher_wake_sem);
     return true;
 }
@@ -644,9 +762,10 @@ static bool load_tx_frame(void)
         return false;
     }
     ring_buf_get(&ring_buf, tx_buffer, RING_BUFFER_HEADER_SIZE);  // a frame is put whole: its data follows
-    ring_buf_get(&ring_buf, tx_buffer + RING_BUFFER_HEADER_SIZE, tx_buffer[0] + (tx_buffer[1] << 8));
+    tx_buffer_size = tx_buffer[0] + ((tx_buffer[1] & 0x7F) << 8);
+    tx_after_gap = tx_buffer[1] & AFTER_GAP;
+    ring_buf_get(&ring_buf, tx_buffer + RING_BUFFER_HEADER_SIZE, tx_buffer_size);
 
-    tx_buffer_size = tx_buffer[0] + (tx_buffer[1] << 8);
     tx_frame_no = sys_get_le32(tx_buffer + 2);
     tx_frame_pending = true;
     tx_gatt_offset = 0;
@@ -725,7 +844,7 @@ static bool write_to_storage(void)
     }
     k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
     if (is_sd_on()) {
-        lr_store_frame(tx_frame_no, tx_buffer + RING_BUFFER_HEADER_SIZE, tx_buffer_size);
+        lr_store_frame(tx_frame_no, tx_buffer + RING_BUFFER_HEADER_SIZE, tx_buffer_size, tx_after_gap);
     }
     k_mutex_unlock(&write_sdcard_mutex);
     consume_tx_frame();
@@ -815,7 +934,7 @@ int bt_off()
 int bt_on()
 {
     int err = bt_enable(NULL);
-    bt_le_adv_start(BT_LE_ADV_CONN, bt_ad, ARRAY_SIZE(bt_ad), bt_sd, ARRAY_SIZE(bt_sd));
+    adv_refresh();
     sd_on();
     mic_on();
     k_sem_give(&pusher_wake_sem);
@@ -840,7 +959,6 @@ int transport_start()
     }
     LOG_INF("Transport bluetooth initialized");
     settings_load();  // the bonds and the identity
-    bt_conn_auth_cb_register(&auth_cb);
     bt_conn_auth_info_cb_register(&auth_info_cb);
     lr_set_name();
 
@@ -856,13 +974,7 @@ int transport_start()
     // Start advertising
     bt_gatt_service_register(&audio_service);
     bt_gatt_service_register(&dfu_service);
-    err = bt_le_adv_start(BT_LE_ADV_CONN, bt_ad, ARRAY_SIZE(bt_ad), bt_sd, ARRAY_SIZE(bt_sd));
-    if (err) {
-        LOG_ERR("Transport advertising failed to start (err %d)", err);
-        return err;
-    } else {
-        LOG_INF("Advertising successfully started");
-    }
+    count_bonds();  // and advertising starts with what they say
 
     int battErr = 0;
     battErr |= battery_init();

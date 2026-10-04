@@ -137,12 +137,12 @@ static void next_segment(void)
     file_path(path, (uint32_t) boot << 16 | seg);
 }
 
-void lr_store_frame(uint32_t frame_no, const uint8_t *data, uint16_t len)
+void lr_store_frame(uint32_t frame_no, const uint8_t *data, uint16_t len, bool after_gap)
 {
     if (len > 255 || (store_err && store_err != -ENOSPC)) {
         return;  // no card; a full one still takes the frames to the record, which append() then drops
     }
-    if (rec_count && frame_no > rec_next) {
+    if (rec_count && frame_no > rec_next && !after_gap) {
         dropped += frame_no - rec_next;
         lr_log(LR_DROPPED, 0, frame_no - rec_next, dropped);
     }
@@ -167,7 +167,7 @@ void lr_store_frame(uint32_t frame_no, const uint8_t *data, uint16_t len)
 //
 // Commands, handled on the store's own thread: SD access and notifications may block, the BT RX thread must not
 //
-enum { LIST = 1, READ = 2, STOP = 3, DELETE = 4, FORGET = 5, USB_DISK = 6, LOG = 7, SYNC = 0x10, ROTATE = 0x11, UNLEND = 0x12 };
+enum { LIST = 1, READ = 2, STOP = 3, DELETE = 4, FORGET = 5, USB_DISK = 6, LOG = 7, SYNC = 0x10, ROTATE = 0x11, UNLEND = 0x12, PAUSE = 0x20 };
 struct cmd {
     uint8_t op;
     uint32_t file, offset;
@@ -205,7 +205,7 @@ static ssize_t time_read(struct bt_conn *conn, const struct bt_gatt_attr *attr, 
                          uint16_t offset)
 {
     extern int16_t usb_diag[4];
-    uint8_t v[42];
+    uint8_t v[47];
     sys_put_le16(boot, v);
     sys_put_le32(transport_frame_no, v + 2);
     sys_put_le16(store_err, v + 6);
@@ -220,6 +220,8 @@ static ssize_t time_read(struct bt_conn *conn, const struct bt_gatt_attr *attr, 
     sys_put_le16(usb_diag[1], v + 36);
     sys_put_le16(usb_diag[2], v + 38);
     sys_put_le16(usb_diag[3], v + 40);
+    v[42] = MIN(lr_bond_count(), UINT8_MAX);
+    sys_put_le32(lr_pause_left(), v + 43);
     return bt_gatt_attr_read(conn, attr, buf, len, offset, v, sizeof(v));
 }
 
@@ -234,8 +236,12 @@ static ssize_t ctrl_write(struct bt_conn *conn, const struct bt_gatt_attr *attr,
     if (len >= 9) {
         c.offset = sys_get_le32(b + 5);
     }
-    if (c.op == USB_DISK && len >= 2) {
-        c.file = b[1];  // on (1) / off (0)
+    if ((c.op == USB_DISK || c.op == FORGET) && len >= 2) {
+        c.file = b[1];  // USB disk on (1) / off (0); forget every phone, this one too (1)
+    }
+    if (c.op == PAUSE && len >= 5) {  // nothing to do with the card: at once, and on a recorder without one too
+        lr_pause(sys_get_le32(b + 1));
+        return len;
     }
     k_msgq_put(&cmds, &c, K_NO_WAIT);
     return len;
@@ -454,6 +460,9 @@ static void store_thread(void)
         } else if (c.op == USB_DISK) {
             int err = lend(c.file);
             reply(conn, 0x86, c.file, (uint8_t) err, 1);
+        } else if (c.op == FORGET && c.file) {  // unbinding: the reply first, the link goes with this phone's bond
+            reply(conn, 0x85, lr_bond_count(), 0, 0);
+            bt_unpair(BT_ID_DEFAULT, BT_ADDR_LE_ANY);
         } else if (c.op == FORGET) {
             int n = 0;
             bt_foreach_bond(BT_ID_DEFAULT, forget_bond, &(struct forget){conn, &n});

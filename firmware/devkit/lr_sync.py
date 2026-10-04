@@ -144,7 +144,7 @@ async def main(out: Path, delete: bool, name: str, server: str | None, token: st
     async with BleakClient(dev) as c:
         now = int(time.time() * 1000)
         await c.write_gatt_char(TIME, struct.pack("<Q", now), response=True)
-        boot, frame, store, free_kb, total_kb = struct.unpack("<HIhII", await c.read_gatt_char(TIME))
+        boot, frame, store, free_kb, total_kb = struct.unpack_from("<HIhII", await c.read_gatt_char(TIME))
         print(f"boot {boot}, frame {frame} = {dt.datetime.fromtimestamp(now / 1000)}, store {store}, "
               f"card {free_kb / 1024:.0f} of {total_kb / 1024:.0f} MB free")
         if store:

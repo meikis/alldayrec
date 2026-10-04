@@ -94,7 +94,15 @@ class Recorder {
   static Future<String> deviceName() async => (await _ch.invokeMethod('deviceName')) as String;
   // the BLE recorder (Android): which one is bound, what it last said, how a firmware update goes (firmware.dart)
   static Future<Map> recorder() async => (await _ch.invokeMethod('recorder')) as Map;
-  static Future<void> unbind() => _ch.invokeMethod('unbind');
+  /// Unbinding: true when the recorder was connected and forgot every phone, false when only this phone forgot it.
+  static Future<bool> unbind() async => (await _ch.invokeMethod('unbind')) as bool;
+  static Future<Map> permissions() async => (await _ch.invokeMethod('permissions')) as Map;
+  static Future<void> askPermission(String which) => _ch.invokeMethod('askPermission', {'which': which});
+  static Future<void> scan(bool on) => _ch.invokeMethod('scan', {'on': on});  // the add-recorder page's list
+  static Future<List> nearby() async => (await _ch.invokeMethod('nearby')) as List;
+  static Future<void> bind(String name, String address, bool force) =>
+      _ch.invokeMethod('bind', {'name': name, 'address': address, 'force': force});
+  static Future<void> pause(int s) => _ch.invokeMethod('pause', {'s': s});  // 0: record again
   static Future<void> usbDisk(bool on) => _ch.invokeMethod('usbDisk', {'on': on});
   static bool hold = false;  // the link is taken down on purpose (unbind, firmware update): do not bring it back meanwhile
 
@@ -214,6 +222,16 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
     setState(() => page = 0);
   }
 
+  /// The recorder page binds (ble) or unbinds (mic): the source follows, a running recorder of the other source stops;
+  /// with the BLE recorder the ticker starts the link.
+  Future<void> _setSource(String source) async {
+    settings!.source = source;
+    await settings!.save();
+    if (running && status['source'] != source) await _stop();
+    autoStarted = DateTime(2000);
+    if (mounted) setState(() {});
+  }
+
   Future<void> _back() async {  // back key: history inside the page's WebView first, then to 字幕, then leave
     final w = page < webs.length ? webs[page] : null;
     if (w != null && await w.canGoBack()) return w.goBack();
@@ -288,7 +306,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
               for (final w in webs)
                 w == null ? _Empty(onSetup: () => setState(() => page = settingsPage)) : WebViewWidget(controller: w),
               UploadPage(settings: settings!, status: status, visible: page == uploadPage),
-              RecorderPage(visible: page == recorderPage),
+              RecorderPage(visible: page == recorderPage, onSource: _setSource),
               SettingsPage(settings: settings!, onSaved: _saved),
             ]),
       bottomNavigationBar: page == 0 && settings != null ? _controlBar(cs) : null,
@@ -307,7 +325,9 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
             ? (Icons.bluetooth_connected_rounded, Colors.green.shade600)
             : (Icons.bluetooth_searching_rounded, Colors.orange.shade700);
     final small = TextStyle(fontSize: 12, color: cs.onSurfaceVariant);
+    final pausedMin = pauseLeftMin(s);
     final detail = [
+      if (pausedMin > 0) '已暂停，还剩 $pausedMin 分钟',
       hwLine(hw),
       if ((s['pending'] ?? 0) > 0) '待传 ${s['pending']} 块',
     ].where((x) => x.isNotEmpty).join(' · ');
@@ -335,12 +355,17 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
                   if (note.isNotEmpty) Text(note, style: small.copyWith(color: cs.error)),
                 ]),
               ),
+              if (connected) PauseButton(paused: pausedMin > 0, onDone: _pauseNote),
               Icon(Icons.chevron_right_rounded, color: cs.onSurfaceVariant),
             ]),
           ),
         ),
       ),
     );
+  }
+
+  void _pauseNote(String? error) {
+    if (error != null) setState(() => note = error);
   }
 
   Widget _controlBar(ColorScheme cs) {
@@ -666,7 +691,6 @@ class _SettingsPageState extends State<SettingsPage> {
   late final server = TextEditingController(text: widget.settings.server),
       token = TextEditingController(text: widget.settings.token);
   late bool archive = widget.settings.archive;
-  late String source = widget.settings.source;
   bool showToken = false;
 
   Future<void> _save() async {
@@ -675,7 +699,6 @@ class _SettingsPageState extends State<SettingsPage> {
     s.server = server.text.trim().replaceFirst(RegExp(r'/$'), '');
     s.token = token.text.trim();
     s.archive = archive;
-    s.source = source;
     await widget.onSaved();
   }
 
@@ -721,18 +744,6 @@ class _SettingsPageState extends State<SettingsPage> {
               border: OutlineInputBorder()),
           child: Text(widget.settings.device)),
       section('录音'),
-      if (Platform.isAndroid)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 12),
-          child: SegmentedButton<String>(
-            segments: const [
-              ButtonSegment(value: 'mic', icon: Icon(Icons.mic_none), label: Text('手机麦克风')),
-              ButtonSegment(value: 'ble', icon: Icon(Icons.bluetooth), label: Text('BLE 录音硬件')),
-            ],
-            selected: {source},
-            onSelectionChanged: (v) => setState(() => source = v.first),
-          ),
-        ),
       Card.outlined(
         margin: EdgeInsets.zero,
         child: Column(children: [
@@ -806,7 +817,8 @@ class _QrScanPageState extends State<QrScanPage> {
 /// and firmware; the card as a USB disk on a computer, a firmware update from the server (firmware.dart), unbinding.
 class RecorderPage extends StatefulWidget {
   final bool visible;
-  const RecorderPage({super.key, required this.visible});
+  final Future<void> Function(String source) onSource;  // bound: 'ble'; unbound: back to 'mic'
+  const RecorderPage({super.key, required this.visible, required this.onSource});
   @override
   State<RecorderPage> createState() => _RecorderPageState();
 }
@@ -841,6 +853,35 @@ class _RecorderPageState extends State<RecorderPage> {
     } on PlatformException catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message ?? '$e'), behavior: SnackBarBehavior.floating));
     }
+    _load();
+  }
+
+  Future<void> _add() async {
+    final bound = await Navigator.push<bool>(context, MaterialPageRoute(builder: (_) => const AddRecorderPage()));
+    if (bound == true) await widget.onSource('ble');
+    _load();
+  }
+
+  Future<void> _unbind(String name, bool linked) async {
+    final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
+      title: Text('解除绑定 $name？'),
+      content: Text(linked
+          ? '录音设备会忘掉所有手机、停止录音（卡上的录音已取回）。这台手机改用手机麦克风。'
+          : '录音设备不在附近：只在这台手机上解除，它自己还记着绑定、会继续录音。以后可以在添加时强制绑定。'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('取消')),
+        TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('解除绑定')),
+      ],
+    ));
+    if (ok != true) return;
+    await _call(() async {
+      await Recorder.unbind();
+      await widget.onSource('mic');
+    });
+  }
+
+  void _pauseDone(String? error) {
+    if (error != null && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error), behavior: SnackBarBehavior.floating));
     _load();
   }
 
@@ -896,24 +937,47 @@ class _RecorderPageState extends State<RecorderPage> {
                         ? ('出错', '错误 $store')
                         : (_size(free), '可用，共 ${_size(total)}');
 
+    final small = t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant);
+    final add = FilledButton.icon(
+        onPressed: _add, icon: const Icon(Icons.add_rounded), label: Text(name == null ? '添加录音设备' : '重新添加'),
+        style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)));
+    if (name == null) {
+      return ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 32), children: [
+        heroCard(context, icon: Icons.mic_external_on_rounded, title: '未绑定', chips: [stateChip('未绑定', cs.outline, Icons.link_off_rounded)]),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Text('录音设备绑定到这台手机后开始录音：手机在附近时实时上传，不在时存进它的卡里，回来后自动补传。'
+              '没绑定时它不录音，现在用的是手机麦克风。', style: small),
+        ),
+        add,
+      ]);
+    }
+    final pausedMin = pauseLeftMin(st);
+
     return RefreshIndicator(
       onRefresh: _load,
       child: ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 32), children: [
         // the device
-        heroCard(context, icon: Icons.mic_external_on_rounded, title: name ?? '未绑定', chips: [
-          stateChip(chip, chipColor, chipIcon),
+        heroCard(context, icon: Icons.mic_external_on_rounded, title: name, chips: [
+          r['kicked'] == true ? stateChip('已被其他手机绑定', cs.error, Icons.link_off_rounded) : stateChip(chip, chipColor, chipIcon),
           if (model != null) Chip(label: Text(model), visualDensity: VisualDensity.compact),
         ]),
-        if (name == null)
+        if (r['kicked'] == true) ...[
           Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Text('会连上看到的第一台录音设备，之后只连它', style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Text('另一台手机绑定了这台录音设备，这台手机不再连它。要拿回来，就重新添加（原来那台手机会被顶掉）。', style: small),
           ),
+          add,
+        ],
         Padding(
           padding: const EdgeInsets.only(top: 8),
-          child: Text('录音设备开着就一直在录：手机在附近时实时上传，不在时存进它的卡里，回来后自动补传。要停止录音，关掉它的电源。',
-              style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+          child: Text('录音设备开着就一直在录：手机在附近时实时上传，不在时存进它的卡里，回来后自动补传。需要时可以暂停。', style: small),
         ),
+        // pause
+        section('暂停录音', Row(children: [
+          Expanded(child: Text(!linked ? '连上录音设备后可以暂停' : pausedMin > 0 ? '已暂停，还剩 $pausedMin 分钟，到时自动继续' : '正在录音')),
+          if (linked) PauseButton(paused: pausedMin > 0, onDone: _pauseDone, labels: true),
+        ])),
         // battery and card
         const SizedBox(height: 12),
         IntrinsicHeight(
@@ -969,19 +1033,172 @@ class _RecorderPageState extends State<RecorderPage> {
           const Divider(height: 20),
           ListTile(
             contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.phonelink_lock_rounded, color: cs.onSurfaceVariant),
-            title: const Text('配对'),
-            subtitle: const Text('新手机配对时，录音设备需接着 USB 电源，或刚重启 5 分钟内'),
-          ),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.link_off_rounded, color: name != null ? cs.error : cs.outline),
-            title: Text('解除绑定', style: TextStyle(color: name != null ? cs.error : cs.outline)),
-            subtitle: const Text('之后连上看到的第一台录音设备'),
-            onTap: name != null ? () => _call(() => Recorder.withoutLink(Recorder.unbind)) : null,
+            leading: Icon(Icons.link_off_rounded, color: syncing ? cs.outline : cs.error),
+            title: Text('解除绑定', style: TextStyle(color: syncing ? cs.outline : cs.error)),
+            subtitle: Text(syncing ? '正在取回卡上的录音，取完再解除' : '录音设备停止录音，这台手机改用手机麦克风'),
+            onTap: syncing ? null : () => _unbind(name, linked),
           ),
         ])),
       ]),
+    );
+  }
+}
+
+/// Minutes the recorder's pause has left (0: recording), from the link's status.
+int pauseLeftMin(Map status) {
+  final until = (status['pausedUntil'] as num?) ?? 0;
+  final left = until - DateTime.now().millisecondsSinceEpoch;
+  return left > 0 ? (left / 60000).ceil() : 0;
+}
+
+/// Pause the connected recorder for 15 min or 1 h, or go on: a menu (home bar) or two buttons (recorder page).
+class PauseButton extends StatelessWidget {
+  final bool paused, labels;
+  final void Function(String? error) onDone;
+  const PauseButton({super.key, required this.paused, required this.onDone, this.labels = false});
+
+  Future<void> _pause(int s) async {
+    try {
+      await Recorder.pause(s);
+      onDone(null);
+    } on PlatformException catch (e) {
+      onDone(e.message);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (paused) return TextButton.icon(onPressed: () => _pause(0), icon: const Icon(Icons.play_arrow_rounded), label: const Text('继续'));
+    if (labels) {
+      return Row(mainAxisSize: MainAxisSize.min, children: [
+        OutlinedButton(onPressed: () => _pause(900), child: const Text('暂停 15 分钟')),
+        const SizedBox(width: 8),
+        OutlinedButton(onPressed: () => _pause(3600), child: const Text('1 小时')),
+      ]);
+    }
+    return PopupMenuButton<int>(
+      icon: const Icon(Icons.pause_rounded),
+      tooltip: '暂停录音',
+      onSelected: _pause,
+      itemBuilder: (_) => const [
+        PopupMenuItem(value: 900, child: Text('暂停 15 分钟')),
+        PopupMenuItem(value: 3600, child: Text('暂停 1 小时')),
+      ],
+    );
+  }
+}
+
+/// Adding a recorder: the permissions the link needs, then the recorders around (nearest first) with the state each
+/// advertises. An unbound one binds with one tap; one bound to another phone only after a confirmation (it then forgets
+/// that phone); one connected to another phone cannot be reached until that phone lets go. Pops true once one is chosen.
+class AddRecorderPage extends StatefulWidget {
+  const AddRecorderPage({super.key});
+  @override
+  State<AddRecorderPage> createState() => _AddRecorderPageState();
+}
+
+class _AddRecorderPageState extends State<AddRecorderPage> {
+  Map perms = {};
+  List found = [];
+  Timer? timer;
+  bool scanning = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _tick();
+    timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    Recorder.scan(false);
+    super.dispose();
+  }
+
+  int ticks = 0;
+
+  Future<void> _tick() async {
+    final p = await Recorder.permissions();
+    // (re)started once permitted and then every 30 s: a scan started with Bluetooth off finds nothing, and Android
+    // allows an app 5 scan starts in 30 s
+    if (p['bluetooth'] == true && p['bluetoothOn'] == true && (!scanning || ++ticks % 30 == 0)) {
+      scanning = true;
+      await Recorder.scan(true);
+    }
+    final f = await Recorder.nearby();
+    if (mounted) setState(() { perms = p; found = f; });
+  }
+
+  Future<void> _bind(Map d, bool force) async {
+    if (force) {
+      final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
+        title: Text('绑定 ${d['name']}？'),
+        content: const Text('它已经绑定了别的手机。绑定到这台手机后，原来的手机将无法再连接它。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(c, true), child: const Text('强制绑定')),
+        ],
+      ));
+      if (ok != true) return;
+    }
+    await Recorder.withoutLink(() => Recorder.bind(d['name'], d['address'], force));
+    if (mounted) Navigator.pop(context, true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context), cs = t.colorScheme;
+    final small = t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant);
+    Widget perm(String key, String title, String why) => ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: Icon(perms[key] == true ? Icons.check_circle_rounded : Icons.error_outline_rounded,
+              color: perms[key] == true ? Colors.green.shade600 : cs.error),
+          title: Text(title),
+          subtitle: Text(why),
+          trailing: perms[key] == true ? null : TextButton(onPressed: () => Recorder.askPermission(key), child: const Text('允许')),
+        );
+    return Scaffold(
+      appBar: AppBar(title: const Text('添加录音设备')),
+      body: ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 32), children: [
+        if (perms['bluetoothOn'] == false)
+          Padding(padding: const EdgeInsets.only(top: 12), child: Text('蓝牙没有打开：打开后这里会开始找录音设备', style: TextStyle(color: cs.error))),
+        if (['bluetooth', 'notifications', 'battery'].any((k) => perms.isNotEmpty && perms[k] != true))
+          sectionCard(context, '权限', Column(children: [
+            perm('bluetooth', '附近的设备', '找到并连接录音设备'),
+            perm('notifications', '通知', '后台连接录音设备时要显示一条通知'),
+            perm('battery', '后台运行', '不受电池优化限制，录音设备才能整天连着'),
+          ])),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Text('打开录音设备（插上充电线即可）。没绑定的录音设备蓝灯慢闪，名字印在它身上或看信号最强的那台。', style: small),
+        ),
+        if (perms['bluetooth'] == true && found.isEmpty)
+          const Padding(padding: EdgeInsets.all(24), child: Center(child: Text('正在找附近的录音设备…'))),
+        for (final d in found) _row(d, cs),
+      ]),
+    );
+  }
+
+  Widget _row(Map d, ColorScheme cs) {
+    final state = d['state'] as int, rssi = d['rssi'] as int;
+    // busy: not connectable (connected to another phone), told by the advertisement itself; the state byte comes in
+    // the scan response, which a busy recorder seldom gets across
+    final busy = d['busy'] == true || (state >= 0 && state & 2 != 0), bound = state >= 0 && state & 1 != 0;
+    final near = rssi > -60 ? '就在旁边' : rssi > -80 ? '附近' : '较远';
+    final (String what, Widget? action) = busy
+        ? ('正连着其他手机：先在那台手机上解除绑定，或关掉它的蓝牙', null)
+        : bound
+            ? ('已绑定其他手机', TextButton(onPressed: () => _bind(d, true), child: const Text('强制绑定')))
+            : (state < 0 ? '旧固件，状态未知' : '未绑定', FilledButton(onPressed: () => _bind(d, false), child: const Text('绑定')));
+    return Card.outlined(
+      child: ListTile(
+        leading: Icon(Icons.mic_external_on_rounded, color: busy || bound ? cs.outline : cs.primary),
+        title: Text(d['name']),
+        subtitle: Text('$what · $near'),
+        trailing: action,
+      ),
     );
   }
 }
