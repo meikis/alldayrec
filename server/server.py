@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse, Response
+from pydantic import BaseModel
 
 import audio
 import db
@@ -903,7 +904,7 @@ def device_status(device: str, st: dict) -> dict:
 def status() -> dict:
     """What the page's status line shows (the device whose audio came in last), every device's pipeline, and the
     pieces still queued over all devices."""
-    ds = [{**device_status(d, st), "hw": db.kv(f"hw:{d}")} for d, st in state["devices"].items()]
+    ds = [{**device_status(d, st), "hw": db.device_status(d)} for d, st in state["devices"].items()]
     top = max(ds, key=lambda d: d["audio_end"] or "", default={"device": None, "audio_end": None, "behind_s": None, "done_to": None,
                                                                  "last_speech": None, "refine": None, "conversation": None, "latency_s": None})
     summaries = db.conn().execute("SELECT count(*) FROM summaries WHERE status = 'pending'").fetchone()[0]
@@ -954,6 +955,7 @@ DIST = HERE / "static/dist"  # the web app (web/, built by deploy.sh)
 @app.get("/progress")
 @app.get("/connect")
 @app.get("/p/{name}")
+@app.get("/device/{name}")
 async def page(conv_id: str = "", name: str = ""):
     return FileResponse(DIST / "index.html", headers=NO_CACHE)
 
@@ -1002,13 +1004,31 @@ async def chunk_end(device: str, t: int):
 
 
 @app.post("/api/device-status")
-async def device_status_report(device: str, request: Request):
-    """What a client last read from a BLE recorder (battery, card, firmware, model), shown with the device's pipeline."""
-    hw = await request.json()
-    if not isinstance(hw, dict):
-        raise HTTPException(400, "a JSON object")
-    db.put_kv(f"hw:{device}", {**hw, "at": iso(dt.datetime.now())})
+async def device_status_report(device: str, hw: dict):
+    """What a client read from a BLE recorder (battery, card, firmware, model): each one kept, the newest shown with
+    the device's pipeline."""
+    db.add_device_status(device, iso(dt.datetime.now()), hw)
     return {"ok": True}
+
+
+class DeviceEvent(BaseModel):
+    src: str               # "rec": a record of the recorder's own event log (firmware lr_log.h); else the app that wrote it
+    seq: int               # the recorder log's sequence number, or the app's own: unique per device and src
+    at: int | None = None  # epoch ms, put on the clock by the phone (a record's frame by the boot's TIME records); None: unknown
+    data: dict             # rec: {boot, t, code, x, a, b} as recorded; an app's: {kind, text?, ...}
+
+
+@app.post("/api/device-log")
+async def device_log_upload(device: str, events: list[DeviceEvent]):
+    """A batch of a device's events, from the phone that read them; one sent again replaces the one kept."""
+    db.put_device_log(device, [{**e.model_dump(), "at": None if e.at is None else iso(dt.datetime.fromtimestamp(e.at / 1000))} for e in events])
+    return {"ok": True}
+
+
+@app.get("/api/device-log")
+async def device_log(device: str, since: str, until: str | None = None):
+    """A device's events and status reports in [since, until)."""
+    return {"events": db.device_log(device, since, until), "status": db.device_statuses(device, since, until)}
 
 
 @app.get("/api/client-config")

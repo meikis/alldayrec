@@ -11,6 +11,6 @@ cp .env.example .env   # fill in
 cd server && uv sync && set -a && . ../.env && set +a && uv run python server.py
 ```
 
-Page: http://127.0.0.1:8770/ . Data: `LIVE_DATA/live.db` (SQLite: sentences, drafts, conversations, summaries, voices, the upload queue; schema in `server/db.py`), `<date>.passes.jsonl` (raw engine output per pass).
+Page: http://127.0.0.1:8770/ . Data: `LIVE_DATA/live.db` (SQLite: sentences, drafts, conversations, summaries, voices, the upload queue, the recorders' event logs and status reports — page `/device/<name>`; schema in `server/db.py`), `<date>.passes.jsonl` (raw engine output per pass).
 
 Tests and tooling in `server/`: `test_live.py`, `replay_case.py` (replay a case through candidate pipelines), `score_case.py` (score against a case's `gt.jsonl`), `eval_all.sh`.

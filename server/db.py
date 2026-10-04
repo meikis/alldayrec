@@ -39,6 +39,14 @@ CREATE INDEX IF NOT EXISTS pieces_device ON pieces(device, start_ms);  -- each d
 CREATE TABLE IF NOT EXISTS timelines (conversation TEXT PRIMARY KEY, body TEXT NOT NULL);  -- the live analysis as it stood at the close
 CREATE TABLE IF NOT EXISTS feedback (conv TEXT NOT NULL, at TEXT NOT NULL, text TEXT NOT NULL);  -- what the owner says a summary got wrong, read back in batches
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);  -- per device: finalized_to:<d>, draft_to:<d>, open_conversation:<d>, end_at:<d>, live:<d>
+CREATE TABLE IF NOT EXISTS device_log (       -- what happened to a device, as its phone uploads it. src 'rec': the recorder's
+    device TEXT NOT NULL, src TEXT NOT NULL,  -- own event log (firmware lr_log.h), seq that log's, data its record (boot t
+    seq INTEGER NOT NULL, at TEXT,            -- code x a b); any other src: an app's events, seq its own. at: when, put on
+    data TEXT NOT NULL, PRIMARY KEY (device, src, seq));  -- the clock by the phone; NULL when it could not be
+CREATE INDEX IF NOT EXISTS device_log_at ON device_log(device, at);
+CREATE TABLE IF NOT EXISTS device_status (    -- every status a client read from a BLE recorder (battery, card, firmware)
+    device TEXT NOT NULL, at TEXT NOT NULL, body TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS device_status_at ON device_status(device, at);
 """
 
 PATH: Path | None = None
@@ -231,3 +239,37 @@ def kv(key: str):
 
 def put_kv(key: str, value, c: sqlite3.Connection | None = None):
     (c or conn()).execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, json.dumps(value, ensure_ascii=False)))
+
+
+# device log and status history
+
+def put_device_log(device: str, events: list[dict]):
+    """A record sent again replaces the one kept: the same one from a retry, or a new one after the recorder's log was
+    erased and its seq started over."""
+    with tx() as c:
+        c.executemany("INSERT OR REPLACE INTO device_log VALUES (?, ?, ?, ?, ?)",
+                      [(device, e["src"], e["seq"], e["at"], json.dumps(e["data"], ensure_ascii=False)) for e in events])
+
+
+def device_log(device: str, lo: str, hi: str | None = None) -> list[dict]:
+    """Events at [lo, hi) (no upper bound when hi is None), and the recorder's undated records between its dated ones
+    before and after the range (a boot that ended before any phone set its clock), unsorted."""
+    q = """SELECT * FROM device_log WHERE device = :d AND (at >= :lo AND (:hi IS NULL OR at < :hi) OR at IS NULL AND src = 'rec'
+             AND seq > coalesce((SELECT max(seq) FROM device_log WHERE device = :d AND src = 'rec' AND at < :lo), -1)
+             AND seq < coalesce((SELECT min(seq) FROM device_log WHERE device = :d AND src = 'rec' AND at >= :hi), 1 << 62))"""
+    return [{**dict(r), "data": json.loads(r["data"])} for r in conn().execute(q, {"d": device, "lo": lo, "hi": hi})]
+
+
+def add_device_status(device: str, at: str, body: dict):
+    conn().execute("INSERT INTO device_status VALUES (?, ?, ?)", (device, at, json.dumps(body, ensure_ascii=False)))
+
+
+def device_statuses(device: str, lo: str, hi: str | None = None) -> list[dict]:
+    return [{**json.loads(r[1]), "at": r[0]} for r in conn().execute(
+        "SELECT at, body FROM device_status WHERE device = ? AND at >= ? AND (? IS NULL OR at < ?) ORDER BY at", (device, lo, hi, hi))]
+
+
+def device_status(device: str) -> dict | None:
+    """The newest one."""
+    r = conn().execute("SELECT at, body FROM device_status WHERE device = ? ORDER BY at DESC LIMIT 1", (device,)).fetchone()
+    return {**json.loads(r[1]), "at": r[0]} if r else None

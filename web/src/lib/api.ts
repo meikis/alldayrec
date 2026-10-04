@@ -132,6 +132,18 @@ export interface RecorderStatus {
   total_kb?: number;
 }
 
+// GET /api/device-log: a device's events and the status reports its phones sent, in a time range
+export interface DeviceEvent {
+  src: string; // "rec": a record of the recorder's own event log (lib/recorderLog.ts); else the app that wrote it
+  seq: number;
+  at: string | null; // null: the phone could not put it on the clock
+  data: Record<string, unknown>;
+}
+export interface DeviceLog {
+  events: DeviceEvent[];
+  status: RecorderStatus[];
+}
+
 export interface Status {
   device?: string | null;
   behind_s?: number | null;

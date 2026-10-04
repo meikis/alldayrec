@@ -37,6 +37,12 @@ export const router = createRouter({
       meta: { title: "人物" },
     },
     {
+      path: "/device/:name",
+      component: () => import("./pages/Device.vue"),
+      props: true,
+      meta: { title: "设备日志" },
+    },
+    {
       path: "/record",
       component: () => import("./pages/Record.vue"),
       meta: { title: "live-record 录音" },

@@ -46,7 +46,10 @@ const eta = (d: DeviceStatus) => {
   <main>
     <section v-for="d in devices" :key="d.device" class="card">
       <div class="top">
-        <b>{{ d.device }}</b>
+        <span
+          ><b>{{ d.device }}</b>
+          <RouterLink :to="`/device/${encodeURIComponent(d.device)}`">日志</RouterLink></span
+        >
         <span :class="caughtUp(d) ? 'ok' : 'busy'">{{ caughtUp(d) ? "已追上" : "处理中" }}</span>
       </div>
       <div class="grid">
