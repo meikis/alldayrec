@@ -36,6 +36,12 @@ def test_check():
     assert [(h["who"], h["name"], h["kind"], h["by"]) for h in got] == [("S2", "老张", "addressed", "S1"), ("S3", "小李", "self", "S3")]
     assert got[0]["at"] == ROWS[0]["start"]
     assert hints.check(res, ROWS, skip={"S3"})[1:] == []
+    old = [dict(r, speaker="外放媒体") if r["speaker"] == "S2" else r for r in ROWS]  # a history label that is no one
+    assert [h["who"] for h in hints.check({"names": [{**res["names"][0], "who": "外放媒体"}]}, old)] == []
+    got = [dict(h, who="外放媒体") for h in got[:1]] + got
+    spans = [{"from": ROWS[3]["start"], "to": ROWS[3]["start"]}]  # 小李's self-introduction was a video
+    assert [h["who"] for h in hints.shown({"names": got}, {"media_spans": spans})] == ["S2"]
+    assert len(hints.shown({"names": got}, None)) == 3 - 1 and hints.shown(None, None) == []
 
 
 def test_rename_merges_and_suggestions():

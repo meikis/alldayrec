@@ -1367,7 +1367,7 @@ def speaker_groups() -> list[dict]:
     convs = {c["id"]: c for c in all_conversations()}
     al, called = db.aliases(), {}
     for conv, h in db.name_hints().items():
-        for x in h["names"]:
+        for x in hints.shown(h, (convs.get(conv) or {}).get("summary")):
             called.setdefault(f"{conv}|{x['who']}", set()).add(hints.canon(x["name"], al))
     vs, out = db.voices(), []
     for g in speakers.speakers(vs, SPEAKER_LINK, SPEAKER_SUGGEST, db.apart()):
@@ -1479,7 +1479,7 @@ def label_suggestions(c: dict, groups: list[dict], vec: dict, hs: dict | None, a
         n[r.get("speaker")] = n.get(r.get("speaker"), 0) + 1
     labels = [p for p in c["participants"] if p != "S?" and p in n]
     anon = lambda p: bool(speakers.ANON.fullmatch(p))
-    names = [{**x, "canon": hints.canon(x["name"], al)} for x in (hs or {}).get("names", []) if x["who"] in labels]
+    names = [{**x, "canon": hints.canon(x["name"], al)} for x in hints.shown(hs, db.summary(cid)) if x["who"] in labels]
     names = [x for x in names if x["canon"] != x["who"]]  # a name it already has
     merge, seen = [], set()
     def offer(a, b, **why):

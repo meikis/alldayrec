@@ -7,6 +7,7 @@ the model often puts a call on the caller instead of on the one who answers.
 import datetime as dt
 
 import summary
+from conversations import IGNORE
 
 SYSTEM = """你在看一段现场录音的转写，每行「[时间] 说话人: 文本」。说话人标签来自声纹聚类：「我」是录音者本人，S1、S2… 是其他人，同一个人可能被拆成多个标签，S? 是太短没认出来的句子。转写有错别字和同音误识别，按意图理解。
 找出对话里的标签被怎么称呼：名字、昵称、亲属或职务称呼（老王、小李、王哥、张老师、妈）。只收能确定落到某个标签上的：
@@ -32,7 +33,7 @@ def check(res: dict, rows: list[dict], skip: set[str] = frozenset()) -> list[dic
     answer), said by the label itself (self), or said by someone else with the label speaking within 5 rows
     (referred). skip: labels not to name (media voices)."""
     rows = [r for r in rows if r.get("text")]
-    labels = {r.get("speaker") for r in rows} - {"我", "S?", None} - set(skip)
+    labels = {r.get("speaker") for r in rows} - {"我", None} - IGNORE - set(skip)
     out = []
     for h in res.get("names") or []:
         if not isinstance(h, dict):
@@ -60,6 +61,13 @@ def hints(c: dict, rows: list[dict], skip: set[str]) -> dict:
     names = check(res, rows, skip)
     return {"conv": c["id"], "prompt_version": PROMPT_VERSION, "at": dt.datetime.now().isoformat(timespec="seconds"),
             "model": raw.get("model"), "usage": raw.get("usage"), "asked": len(res.get("names") or []), "names": names}
+
+
+def shown(h: dict | None, s: dict | None) -> list[dict]:
+    """The names the pages offer of one conversation's hints (h) with its summary (s): none on a label that is no
+    one (外放媒体 of old history, asked before check skipped them) nor said inside media played aloud."""
+    spans = (s or {}).get("media_spans") or []
+    return [x for x in (h or {}).get("names", []) if x["who"] not in IGNORE and not summary.in_media({"start": x["at"]}, spans)]
 
 
 def canon(name: str, aliases: dict[str, str]) -> str:
