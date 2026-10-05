@@ -6,7 +6,7 @@ import subprocess
 
 import numpy as np
 
-from server import CHUNK_S, QUIET_S, SR, Segmenter, clip_turns, final_rows, merge_drafts, next_cut, overlaps
+from server import CHUNK_S, QUIET_S, SR, Segmenter, clip_turns, final_rows, merge_drafts, next_cut, overlaps, speech_in
 
 CLIP = os.environ.get("TEST_CLIP", "")  # any recorder file with speech; the test skips the audio part without it
 
@@ -125,3 +125,45 @@ def test_zero_context_keeps_first_sentence():
     t0 = dt.datetime(2026, 9, 29, 18)
     lo, hi, rows = final_rows(segs, {"我": "我"}, t0, 20.0, since=1.0)
     assert [r["text"] for r in rows] == ["开头这句", "第二句"] and lo == t0 + dt.timedelta(seconds=1)
+
+
+def test_engine_squeeze(monkeypatch):
+    """The engine gets the window with the long silences cut; its sentences, the partial ones too, come back in window time."""
+    import sys
+    import types
+
+    import server
+    import squeeze
+    squeeze.check()
+    sent = []
+
+    def transcribe(x, partial=None):
+        sent.append(len(x) / SR)
+        us = [{"text": "一", "start_ms": 1600, "end_ms": 3400}, {"text": "二", "start_ms": 5000, "end_ms": 6000}]
+        if partial:
+            partial(us[:1])
+        return us, {}
+    monkeypatch.setitem(sys.modules, "volc_asr", types.SimpleNamespace(transcribe=transcribe))
+    got = []
+    segs = server.engine_segs(np.zeros(60 * SR, np.int16), [(10, 12), (30, 31.5)], got.append)  # kept: 8.5-13.5, 28.5-33
+    assert sent == [9.5]
+    assert [(g["start_ms"], g["end_ms"]) for g in got[0]] == [(10100, 11900)]
+    assert [(g["start_ms"], g["end_ms"], g["engine"]) for g in segs] == [(10100, 11900, "volc"), (28500, 29500, "volc")]
+    monkeypatch.setattr(server, "SQUEEZE_KEEP_S", 0.0)  # off: the window whole, times as the engine gave them
+    assert server.engine_segs(np.zeros(60 * SR, np.int16), [(10, 12)])[1]["start_ms"] == 5000 and sent[-1] == 60
+
+
+def test_speech_in():
+    """What the engine is sent: the loose VAD's speech, in seconds into the window, and the speech still running from
+    its start (a short blip that may not become speech too)."""
+    from types import SimpleNamespace as NS
+    s = object.__new__(Segmenter)
+    s.speech = [(90 * SR, 95 * SR), (105 * SR, 108 * SR)]
+    s.loose = NS(state=NS(name="SILENCE"), frame_cnt=0, speech_cnt=0, pad_start_frame=5, last_speech_start_frame=-1)
+    a0, n = 80 * SR, 40 * SR
+    assert speech_in(s, a0, n) == [(10, 15), (25, 28)]
+    s.loose.state.name, s.loose.last_speech_start_frame = "SPEECH", 11001  # speech from frame 11001 (1-based): 110 s
+    assert speech_in(s, a0, n)[-1] == (30, 40)
+    s.loose.state.name, s.loose.frame_cnt, s.loose.speech_cnt = "POSSIBLE_SPEECH", 11500, 3  # 3 frames in, 5 padded
+    assert speech_in(s, a0, n)[-1] == ((11500 - 3 - 5 - a0 // 160) / 100, 40)
+    assert speech_in(s, a0, 20 * SR)[-1][0] > 20, "speech after the window: nothing to keep"

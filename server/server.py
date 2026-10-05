@@ -10,6 +10,7 @@ each pause for the minutes not final yet; all state is in data/live.db.
 import argparse
 import asyncio
 import base64
+import copy
 import datetime as dt
 import hmac
 import json
@@ -34,6 +35,7 @@ import live
 import profiles
 import recap
 import speakers
+import squeeze
 import summary
 from conversations import IGNORE, Grouper
 
@@ -65,6 +67,8 @@ SLICE_BACKGROUND_S = int(os.environ.get("SLICE_BACKGROUND_S", "20"))  # ... in t
 SLICE_SCREEN_OFF_S = int(os.environ.get("SLICE_SCREEN_OFF_S", "60"))  # ... screen off (Android)
 LIVE_AUDIO_S = 120                         # a device whose audio came this recently is recording now: drafts and live analysis
 ENGINE = os.environ.get("ENGINE", "volc")  # second-layer engine: volc (seed-asr-2.0 streaming API) | stepfun (file-mode service)
+SQUEEZE_KEEP_S = float(os.environ.get("SQUEEZE_KEEP_S", "3"))  # VAD silences longer than this go to the engine cut to this (#87); 0: whole
+SQUEEZE_VAD = float(os.environ.get("SQUEEZE_VAD", "0.3"))  # ... silences by this VAD threshold: 0.5 (cutting pieces) misses short replies
 BUFFER_S = 900                             # audio kept for refinement; pieces are fed only while finalization is within BUFFER_S - 300
 LIVE_EVERY_S = int(os.environ.get("LIVE_EVERY_S", "120"))  # new speech in the open conversation before the live analysis is redone
 TURN_GAP_S = float(os.environ.get("TURN_GAP_S", "1.0"))  # same speaker, closer than this: one final row; 0 keeps the engine's sentences as rows
@@ -84,6 +88,9 @@ class Segmenter:
     def __init__(self):
         from fireredvad import FireRedStreamVad, FireRedStreamVadConfig
         self.vad = FireRedStreamVad.from_pretrained(str(VAD_MODEL), FireRedStreamVadConfig())
+        self.loose = copy.deepcopy(self.vad.postprocessor)  # the same frames at SQUEEZE_VAD: only what the engine is sent
+        self.loose.speech_threshold = SQUEEZE_VAD
+        self.speech: list[tuple[int, int]] = []  # its speech in the buffer (stream samples)
         self.buf = np.zeros(0, np.int16)      # samples not yet turned into frames
         self.audio = np.zeros(0, np.int16)    # recent samples for cutting utterances
         self.audio_base = 0                   # stream sample index of audio[0]
@@ -108,6 +115,9 @@ class Segmenter:
             # Only whole frames, keeping the overlap for the next call: splitting at arbitrary
             # sample counts drops frames at every boundary and the clock drifts ~2 %.
             for r in self.vad.detect_chunk(self.buf[:(k - 1) * FRAME_SHIFT + FRAME_LEN]):
+                q = self.loose.process_one_frame(r.raw_prob)
+                if q.is_speech_end:
+                    self.speech.append(((q.speech_start_frame - 1) * FRAME_SHIFT, (q.speech_end_frame - 1) * FRAME_SHIFT))
                 if r.is_speech_end:
                     out += self._utterance(r.speech_start_frame - 1, r.speech_end_frame - 1)
             self.frames += k
@@ -117,11 +127,20 @@ class Segmenter:
         if keep > self.audio_base:
             self.audio = self.audio[keep - self.audio_base:]
             self.audio_base = keep
+            self.speech = [u for u in self.speech if u[1] > keep]
         return out
 
     def speaking(self) -> bool:
         """An utterance is still open (the VAD is in speech, or one waits for a merge): last_speech does not cover it yet."""
         return self.pending is not None or self.vad.postprocessor.state.name != "SILENCE"
+
+    def open_speech(self) -> int | None:
+        """Stream sample where the loose VAD's speech still running started (None in silence)."""
+        p = self.loose
+        if p.state.name == "SILENCE":
+            return None
+        f = p.frame_cnt - p.speech_cnt + 1 - p.pad_start_frame if p.state.name == "POSSIBLE_SPEECH" else p.last_speech_start_frame
+        return max(0, f - 1) * FRAME_SHIFT
 
     def sample_at(self, t: dt.datetime) -> int:
         i = next((k for k in range(len(self.anchors) - 1, -1, -1) if self.anchors[k][1] <= t), 0)
@@ -172,16 +191,20 @@ def _http(url, data=None, headers=None, method=None) -> bytes:
 FILE_MODELS = tuple(os.environ.get("FILE_MODELS", "stepaudio-2.5-asr-8006,doubao-seedasr-2.0").split(","))  # file-mode engines, in order of preference
 
 
-def engine_segs(x: np.ndarray, partial=None) -> list[dict]:
-    """Sentences with times and speaker ids for a window of audio, from the configured engine. partial(segs): the
-    sentences so far, whenever an answer adds some during the call (volc only)."""
+def engine_segs(x: np.ndarray, speech: list[tuple[float, float]], partial=None) -> list[dict]:
+    """Sentences with times and speaker ids for a window of audio, from the configured engine. speech: the VAD speech
+    in x, (start, end) seconds; the engine gets x with the silences squeezed (squeeze.py), the times come back in x.
+    partial(segs): the sentences so far, whenever an answer adds some during the call (volc only)."""
+    xs, spans = squeeze.squeeze(x, speech, SQUEEZE_KEEP_S)
+    log.info("squeeze: %.1f s -> %.1f s sent", len(x) / SR, len(xs) / SR)
     if ENGINE != "volc":
-        return diarize(x)
+        return squeeze.unsqueeze(diarize(xs), spans)
     import volc_asr
     t = time.perf_counter()
-    utts, info = volc_asr.transcribe(x, partial=partial and (lambda us: partial([{"speaker": "SPEAKER_0", **u, "engine": "volc"} for u in us])))
-    log.info("volc: %.0f s audio in %.1f s, %d utterances, logid %s", len(x) / SR, time.perf_counter() - t, len(utts), info.get("logid"))
-    return [{"speaker": "SPEAKER_0", **u, "engine": "volc"} for u in utts]
+    mark = lambda us: squeeze.unsqueeze([{"speaker": "SPEAKER_0", **u, "engine": "volc"} for u in us], spans)
+    utts, info = volc_asr.transcribe(xs, partial=partial and (lambda us: partial(mark(us))))
+    log.info("volc: %.0f s audio in %.1f s, %d utterances, logid %s", len(xs) / SR, time.perf_counter() - t, len(utts), info.get("logid"))
+    return mark(utts)
 
 
 def diarize(x: np.ndarray, model: str = FILE_MODELS[0]) -> list[dict]:
@@ -309,6 +332,13 @@ def next_cut(utts: list[tuple[float, float]], end: float, speaking: bool, force:
     if force and end > 0.05:
         return end
     return None
+
+
+def speech_in(seg: Segmenter, a0: int, n: int) -> list[tuple[float, float]]:
+    """The loose VAD's speech (SQUEEZE_VAD) in the n samples from stream sample a0, in seconds into them, the speech
+    still running too."""
+    o = seg.open_speech()
+    return [((a - a0) / SR, (b - a0) / SR) for a, b in seg.speech + ([(o, a0 + n)] if o is not None else [])]
 
 
 def overlaps(lv: dict, c: dict) -> bool:
@@ -746,7 +776,7 @@ async def pipeline(device: str):
         was_open = bool(grouper.open)
         m0 = dia.mark()
         try:
-            segs = await asyncio.to_thread(engine_segs, x)
+            segs = await asyncio.to_thread(engine_segs, x, speech_in(seg, a0, len(x)))
             engine = segs[0]["engine"] if segs else None
             marks = await asyncio.to_thread(label_sentences, dia, embed, segs, x)
         except Exception as e:
@@ -866,7 +896,8 @@ async def pipeline(device: str):
             await publish(rows, at(sent))
 
         loop, answers = asyncio.get_running_loop(), asyncio.Queue()
-        call = asyncio.ensure_future(asyncio.to_thread(engine_segs, x, lambda segs: loop.call_soon_threadsafe(answers.put_nowait, segs)))
+        call = asyncio.ensure_future(asyncio.to_thread(engine_segs, x, speech_in(seg, a0, len(x)),
+                                                       lambda segs: loop.call_soon_threadsafe(answers.put_nowait, segs)))
         m0 = ddia.mark()
         try:
             while not call.done():  # a 5 min backfill window: its first sentences in ~3 s, not after the whole call
