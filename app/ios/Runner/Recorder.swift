@@ -195,6 +195,11 @@ enum Recorder {
         if v is NSNull { u.removeObject(forKey: k) } else { u.set(v, forKey: k) }
       }
     }
+    // app/ios/e2e/uitest.sh kill: the process ends itself after LR_E2E_KILL seconds, as when iOS ends it (not the person
+    // swiping it away), to see iOS relaunch it in the background for the recorder (state restoration)
+    if let s = ProcessInfo.processInfo.environment["LR_E2E_KILL"].flatMap(Double.init) {
+      DispatchQueue.main.asyncAfter(deadline: .now() + s) { kill(getpid(), SIGKILL) }
+    }
     DeviceLog.start(dir: dir.deletingLastPathComponent(), prefs: defaults)
     foregroundApp = UIApplication.shared.applicationState != .background
     let fm = FileManager.default
