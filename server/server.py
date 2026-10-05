@@ -10,6 +10,7 @@ each pause for the minutes not final yet; all state is in data/live.db.
 import argparse
 import asyncio
 import base64
+import concurrent.futures as cf
 import copy
 import datetime as dt
 import hmac
@@ -36,6 +37,7 @@ import profiles
 import recap
 import speakers
 import squeeze
+import stepfun_asr
 import summary
 from conversations import IGNORE, Grouper
 
@@ -66,7 +68,9 @@ SLICE_FOREGROUND_S = int(os.environ.get("SLICE_FOREGROUND_S", "1"))   # the apps
 SLICE_BACKGROUND_S = int(os.environ.get("SLICE_BACKGROUND_S", "20"))  # ... in the background             (drafts ~8 s vs ~13 s at 5 s)
 SLICE_SCREEN_OFF_S = int(os.environ.get("SLICE_SCREEN_OFF_S", "60"))  # ... screen off (Android)
 LIVE_AUDIO_S = 120                         # a device whose audio came this recently is recording now: drafts and live analysis
-ENGINE = os.environ.get("ENGINE", "volc")  # second-layer engine: volc (seed-asr-2.0 streaming API) | stepfun (file-mode service)
+ENGINE = os.environ.get("ENGINE") or "volc"  # final layer's ASR provider (PROVIDERS): volc | stepfun | stepfun-sse | stepfun-file
+DRAFT_ENGINE = os.environ.get("DRAFT_ENGINE") or ENGINE  # draft layer's (stepfun-sse: fast, no speakers, drafts are replaced anyway)
+ENGINE_FALLBACK = os.environ.get("ENGINE_FALLBACK", "")  # a window the provider fails on (402, 451, 5xx, timeout) goes here; empty: none
 SQUEEZE_KEEP_S = float(os.environ.get("SQUEEZE_KEEP_S", "3"))  # VAD silences longer than this go to the engine cut to this (#87); 0: whole
 SQUEEZE_VAD = float(os.environ.get("SQUEEZE_VAD", "0.3"))  # ... silences by this VAD threshold: 0.5 (cutting pieces) misses short replies
 BUFFER_S = 900                             # audio kept for refinement; pieces are fed only while finalization is within BUFFER_S - 300
@@ -191,20 +195,50 @@ def _http(url, data=None, headers=None, method=None) -> bytes:
 FILE_MODELS = tuple(os.environ.get("FILE_MODELS", "stepaudio-2.5-asr-8006,doubao-seedasr-2.0").split(","))  # file-mode engines, in order of preference
 
 
-def engine_segs(x: np.ndarray, speech: list[tuple[float, float]], partial=None) -> list[dict]:
-    """Sentences with times and speaker ids for a window of audio, from the configured engine. speech: the VAD speech
-    in x, (start, end) seconds; the engine gets x with the silences squeezed (squeeze.py), the times come back in x.
-    partial(segs): the sentences so far, whenever an answer adds some during the call (volc only)."""
+def engine_segs(x: np.ndarray, speech: list[tuple[float, float]], partial=None, engine: str = ENGINE) -> list[dict]:
+    """Sentences with times and speaker ids for a window of audio, from `engine` (PROVIDERS), or ENGINE_FALLBACK when
+    it fails; each carries `engine`, and `fallback` (why) when it came from ENGINE_FALLBACK. speech: the VAD speech in
+    x, (start, end) seconds; the provider gets x with the silences squeezed (squeeze.py), the times come back in x.
+    partial(segs): the sentences so far, whenever an answer adds some during the call (volc, stepfun*)."""
     xs, spans = squeeze.squeeze(x, speech, SQUEEZE_KEEP_S)
-    log.info("squeeze: %.1f s -> %.1f s sent", len(x) / SR, len(xs) / SR)
-    if ENGINE != "volc":
-        return squeeze.unsqueeze(diarize(xs), spans)
+    why = None
+    for name in dict.fromkeys(filter(None, (engine, ENGINE_FALLBACK))):
+        mark = lambda gs, name=name: squeeze.unsqueeze([{**g, "engine": name, **({"fallback": why} if why else {})} for g in gs], spans)
+        t = time.perf_counter()
+        try:
+            segs = PROVIDERS[name](xs, partial and (lambda gs: partial(mark(gs))))
+        except Exception as e:
+            log.warning("asr %s: %.0f of %.0f s sent, failed after %.1f s: %r", name, len(xs) / SR, len(x) / SR, time.perf_counter() - t, e)
+            why = (f"{why}; " if why else "") + f"{name}: {e!r}"[:200]
+            continue
+        log.info("asr %s: %.0f of %.0f s sent, %.1f s, %d sentences%s", name, len(xs) / SR, len(x) / SR, time.perf_counter() - t,
+                 len(segs), f" (fallback; {why})" if why else "")
+        return mark(segs)
+    raise RuntimeError(why)
+
+
+def volc(x: np.ndarray, partial=None) -> list[dict]:
     import volc_asr
-    t = time.perf_counter()
-    mark = lambda us: squeeze.unsqueeze([{"speaker": "SPEAKER_0", **u, "engine": "volc"} for u in us], spans)
-    utts, info = volc_asr.transcribe(xs, partial=partial and (lambda us: partial(mark(us))))
-    log.info("volc: %.0f s audio in %.1f s, %d utterances, logid %s", len(xs) / SR, time.perf_counter() - t, len(utts), info.get("logid"))
-    return mark(utts)
+    mark = lambda us: [{"speaker": "SPEAKER_0", **u} for u in us]
+    return mark(volc_asr.transcribe(x, partial=partial and (lambda us: partial(mark(us))))[0])
+
+
+def stepfun_sse(x: np.ndarray, partial=None) -> list[dict]:
+    """StepFun's SSE alone (#96 H3): text and character times, sentences cut by punctuation and pauses, no speakers."""
+    return stepfun_asr.sentences(stepfun_asr.sse(x, partial and (lambda ds: partial(stepfun_asr.sentences(ds)))))
+
+
+def stepfun(x: np.ndarray, partial=None) -> list[dict]:
+    """StepFun's SSE text on the sentences and speakers of a file job on the same audio (#96 H1), both at once."""
+    pool = cf.ThreadPoolExecutor(1)
+    file = pool.submit(diarize, x)
+    pool.shutdown(wait=False)  # an SSE failure raises at once: the file job's thread ends on its own
+    deltas = stepfun_asr.sse(x, partial and (lambda ds: partial(stepfun_asr.sentences(ds))))
+    return stepfun_asr.merge(deltas, file.result())
+
+
+# provider(x: 16 kHz int16 PCM, partial=None) -> [{start_ms, end_ms, text, speaker?, words?}], times in x
+PROVIDERS = {"volc": volc, "stepfun": stepfun, "stepfun-sse": stepfun_sse, "stepfun-file": lambda x, partial=None: diarize(x)}
 
 
 def diarize(x: np.ndarray, model: str = FILE_MODELS[0]) -> list[dict]:
@@ -805,11 +839,13 @@ async def pipeline(device: str):
         closed += grouper.advance(hi)
         await commit(closed, rows, iso(lo), hi)
         st["refine"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
-                        "speakers": by_label, "changed": len(rows), "piece_s": round(len(x) / SR),
+                        "engine": engine, "speakers": by_label, "changed": len(rows), "piece_s": round(len(x) / SR),
                         "backlog_s": round((seg.time_at(seg.samples) - hi).total_seconds())}
         log.info("final %s: %s", device, st["refine"])
         note(f"定稿一块：{device} {lo.strftime('%H:%M:%S')}–{hi.strftime('%H:%M:%S')}（{len(x) / SR:.0f} s）给 {engine or ENGINE}，"
              f"{st['refine']['ms'] / 1000:.1f} s，{len(rows)} 句，积压 {st['refine']['backlog_s']} s")
+        if segs and segs[0].get("fallback"):
+            note(f"{device}：定稿引擎失败（{segs[0]['fallback'][:120]}），这一块改用 {engine}", "warn")
         if grouper.open and not was_open:
             note(f"{device}：对话开始 {grouper.open['start'][11:19]}", "state")
         return True
@@ -864,13 +900,13 @@ async def pipeline(device: str):
             return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
         sent, n_rows = since, 0  # seconds into the window up to which rows went out while the call ran
 
-        async def publish(rows: list[dict], upto: dt.datetime):
+        async def publish(rows: list[dict], upto: dt.datetime, engine: str):
             """Store, push and advance draft_to: a crash after this does not redo these rows."""
             nonlocal n_rows
             shown = dt.datetime.now()
             for r in rows:
                 r["id"], r["state"] = "d" + r["id"][1:], "draft"
-                r["source"], r["engine"], r["shown_at"] = device, ENGINE, iso(shown)
+                r["source"], r["engine"], r["shown_at"] = device, engine, iso(shown)
                 st["latency"].append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
             del st["latency"][:-50]
             with db.tx() as t:
@@ -893,11 +929,11 @@ async def pipeline(device: str):
             await asyncio.to_thread(label_sentences, ddia, embed, segs, x)
             rows = final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, t0, len(x) / SR, None, sent, at, 0.0)[2]
             sent = segs[-1]["end_ms"] / 1000
-            await publish(rows, at(sent))
+            await publish(rows, at(sent), segs[0]["engine"])
 
         loop, answers = asyncio.get_running_loop(), asyncio.Queue()
         call = asyncio.ensure_future(asyncio.to_thread(engine_segs, x, speech_in(seg, a0, len(x)),
-                                                       lambda segs: loop.call_soon_threadsafe(answers.put_nowait, segs)))
+                                                       lambda segs: loop.call_soon_threadsafe(answers.put_nowait, segs), DRAFT_ENGINE))
         m0 = ddia.mark()
         try:
             while not call.done():  # a 5 min backfill window: its first sentences in ~3 s, not after the whole call
@@ -925,9 +961,10 @@ async def pipeline(device: str):
         with open(DATA / f"{lo.date()}.passes.jsonl", "a") as f:
             f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"), "layer": "draft", "t0": iso(t0), "since": since,
                                 "early_to": sent, "from": iso(at(since)), "to": iso(hi), "segs": raw}, ensure_ascii=False) + "\n")
-        await publish(rows, hi)
+        engine = raw[0]["engine"] if raw else DRAFT_ENGINE
+        await publish(rows, hi, engine)
         st["draft"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
-                       "changed": n_rows, "early_s": round(sent - since), "to": iso(hi)}
+                       "engine": engine, "changed": n_rows, "early_s": round(sent - since), "to": iso(hi)}
         log.info("draft %s: %s", device, st["draft"])
         if end is not None:  # pauses that came during the pass have set wake again
             return len(x) / SR >= REFINE_WINDOW_S
@@ -997,7 +1034,8 @@ def status() -> dict:
                                                                  "last_speech": None, "refine": None, "conversation": None, "latency_s": None})
     summaries = db.conn().execute("SELECT count(*) FROM summaries WHERE status = 'pending'").fetchone()[0]
     return {**top, "queued": sum(d["queued"] for d in ds), "devices": ds, "summaries_pending": summaries, "summary_queue": summary_q.qsize(),
-            "commit": state["commit"], "chunks": state["chunks"], "engine": ENGINE}
+            "commit": state["commit"], "chunks": state["chunks"],
+            "engine": f"{ENGINE} · 初稿 {DRAFT_ENGINE}" + (f" · 兜底 {ENGINE_FALLBACK}" if ENGINE_FALLBACK else "")}
 
 
 async def status_loop():
@@ -1720,10 +1758,13 @@ def main():
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8770")))
     args = ap.parse_args()
     missing = [k for k in ("ASR_UPLOAD_BRIDGE_TOKEN", "ASR_SERVICE_BASIC_AUTH") if not os.environ.get(k)]
-    if ENGINE == "volc" and not os.environ.get("VOLC_ASR_KEY"):
+    engines = {e for e in (ENGINE, DRAFT_ENGINE, ENGINE_FALLBACK) if e}
+    if engines - PROVIDERS.keys():
+        raise SystemExit(f"ENGINE, DRAFT_ENGINE, ENGINE_FALLBACK must be one of {', '.join(PROVIDERS)}, not {', '.join(engines - PROVIDERS.keys())}")
+    if "volc" in engines and not os.environ.get("VOLC_ASR_KEY"):
         missing.append("VOLC_ASR_KEY")
-    if ENGINE not in ("volc", "stepfun"):
-        raise SystemExit(f"ENGINE must be volc or stepfun, not {ENGINE!r}")
+    if engines & {"stepfun", "stepfun-sse"} and not os.environ.get("STEPFUN_API_KEY"):
+        missing.append("STEPFUN_API_KEY")
     missing += [k for k in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL") if not os.environ.get(k)]
     if missing:
         raise SystemExit(f"not set: {', '.join(missing)} (see .env.example)")

@@ -153,6 +153,63 @@ def test_engine_squeeze(monkeypatch):
     assert server.engine_segs(np.zeros(60 * SR, np.int16), [(10, 12)])[1]["start_ms"] == 5000 and sent[-1] == 60
 
 
+def test_engine_fallback(monkeypatch):
+    """A provider that fails hands the window to ENGINE_FALLBACK (its sentences say so); both failing raises, for the
+    caller's retry. stepfun (H1): the SSE text on the file job's sentences, an SSE failure raising without waiting."""
+    import time
+
+    import pytest
+
+    import server
+    import stepfun_asr
+    stepfun_asr.check()
+    calls, x = [], np.zeros(SR, np.int16)
+
+    def ok(x, partial=None):
+        calls.append("ok")
+        if partial:
+            partial([{"text": "一", "start_ms": 0, "end_ms": 500}])
+        return [{"text": "一", "start_ms": 0, "end_ms": 500}, {"text": "二", "start_ms": 600, "end_ms": 900}]
+
+    def bad(x, partial=None):
+        calls.append("bad")
+        raise RuntimeError("stepfun sse HTTP 402: balance")
+    monkeypatch.setattr(server, "PROVIDERS", {**server.PROVIDERS, "a": bad, "b": ok, "c": bad})
+    monkeypatch.setattr(server, "SQUEEZE_KEEP_S", 0.0)
+    monkeypatch.setattr(server, "ENGINE_FALLBACK", "b")
+    segs = server.engine_segs(x, [], None, "a")
+    assert calls == ["bad", "ok"] and [g["engine"] for g in segs] == ["b", "b"] and "402" in segs[0]["fallback"]
+    got = []
+    assert "fallback" not in server.engine_segs(x, [], got.append, "b")[0] and got[0][0]["engine"] == "b"
+    monkeypatch.setattr(server, "ENGINE_FALLBACK", "c")
+    with pytest.raises(RuntimeError, match="a: .*402.*; c: .*402"):
+        server.engine_segs(x, [], None, "a")
+    monkeypatch.setattr(server, "ENGINE_FALLBACK", "")
+    calls.clear()
+    with pytest.raises(RuntimeError):
+        server.engine_segs(x, [], None, "a")
+    assert calls == ["bad"], "no fallback configured: the error goes to the caller"
+
+    d = lambda t, a, b: {"delta": t, "start_time": a, "end_time": b}
+    monkeypatch.setattr(stepfun_asr, "sse", lambda x, on: [d("你好", 100, 400), d("嗯", 5000, 5100)])
+    monkeypatch.setattr(server, "diarize", lambda x: [{"start_ms": 0, "end_ms": 500, "speaker": "SPEAKER_1", "text": "你号", "words": []}])
+    assert [(g["text"], g.get("speaker"), g["engine"]) for g in server.engine_segs(x, [], None, "stepfun")] == \
+        [("你好", "SPEAKER_1", "stepfun"), ("嗯", None, "stepfun")]
+
+    def slow(x):
+        time.sleep(3)
+        return []
+
+    def refused(x, on):
+        raise RuntimeError("stepfun sse HTTP 451")
+    monkeypatch.setattr(server, "diarize", slow)
+    monkeypatch.setattr(stepfun_asr, "sse", refused)
+    t = time.perf_counter()
+    with pytest.raises(RuntimeError, match="451"):
+        server.stepfun(x)
+    assert time.perf_counter() - t < 1, "the fallback need not wait for the file job"
+
+
 def test_speech_in():
     """What the engine is sent: the loose VAD's speech, in seconds into the window, and the speech still running from
     its start (a short blip that may not become speech too)."""
