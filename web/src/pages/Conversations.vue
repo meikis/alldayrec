@@ -69,6 +69,17 @@ const answer = computed(() => {
     .map((t) => ({ t, s: by.get(t) ?? by.get(t.split("-")[0]) }));
 });
 
+// the newest daily recap (server recap.py, written each morning for the day before), folded to its headline
+interface Recap {
+  date: string;
+  conversations: number;
+  headline: string;
+  highlights: { text: string; conv: string | null }[];
+  todos: { conv: string; text: string; to?: string | null; due?: string | null }[]; // due: as said that day
+  people: { who: string; note: string }[];
+}
+const recap = ref<Recap | null>(null);
+
 const search = (before: string) =>
   get<Conversation[]>("/api/search", {
     q: q.value,
@@ -136,6 +147,7 @@ onMounted(async () => {
   window.addEventListener("scroll", spy, { passive: true });
   io = new IntersectionObserver((es) => es[0].isIntersecting && page());
   if (more.value) io.observe(more.value);
+  get<Recap | null>("/api/recap").then((r) => (recap.value = r));
   get<Record<string, number>>("/api/tags").then(
     (t) => (tags.value = Object.entries(t).slice(0, 40)),
   );
@@ -169,7 +181,7 @@ useSocket((m) => {
         <RouterLink class="cal" to="/calendar">日历</RouterLink>
       </DayPicker>
       <div class="q">
-        <input v-model.trim="q" type="search" placeholder="搜索标题、摘要、待办、原文，或者问 AI" />
+        <input v-model.trim="q" type="search" placeholder="搜索标题、摘要、待办、原文" />
         <button :disabled="!q || asking" @click="askAI">问 AI</button>
       </div>
       <div class="kinds">
@@ -224,6 +236,40 @@ useSocket((m) => {
         >
       </div>
     </div>
+    <details v-if="recap && !q && !tag && !day" class="card recap">
+      <summary>
+        <span class="meta"
+          >{{ recap.date === shiftDay(today(), -1) ? "昨天" : recap.date.slice(5) }}的回顾 ·
+          {{ recap.conversations }} 段对话<template v-if="recap.todos.length">
+            · {{ recap.todos.length }} 条待办</template
+          ></span
+        >
+        <div class="title">{{ recap.headline }}</div>
+      </summary>
+      <ul>
+        <li v-for="(h, i) in recap.highlights" :key="i">
+          <RouterLink v-if="h.conv" :to="'/c/' + h.conv">{{ h.text }}</RouterLink
+          ><template v-else>{{ h.text }}</template>
+        </li>
+      </ul>
+      <template v-if="recap.todos.length">
+        <div class="sub">我要做的</div>
+        <ul>
+          <li v-for="t in recap.todos" :key="t.conv + t.text">
+            <RouterLink :to="'/c/' + t.conv">{{ t.text }}</RouterLink
+            ><span v-if="t.to || t.due" class="muted">
+              · {{ [t.to && "答应" + t.to, t.due].filter(Boolean).join(" · ") }}</span
+            >
+          </li>
+        </ul>
+      </template>
+      <template v-if="recap.people.length">
+        <div class="sub">聊过的人</div>
+        <ul>
+          <li v-for="p in recap.people" :key="p.who">{{ p.who }}：{{ p.note }}</li>
+        </ul>
+      </template>
+    </details>
     <div v-if="open" class="card open">
       <div class="meta">{{ hhmm(open.start) }} 开始 · 进行中 · {{ open.sentences }} 句</div>
       <div class="title muted">对话进行中，结束后生成摘要</div>
@@ -362,6 +408,19 @@ a.card:hover {
 .answer {
   white-space: pre-wrap;
   margin-top: 4px;
+}
+.recap summary {
+  cursor: pointer;
+}
+.recap ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  font-size: 14px;
+}
+.recap .sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 8px;
 }
 .card.open {
   border-style: dashed;

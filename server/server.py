@@ -31,6 +31,7 @@ import db
 import firmware
 import hints
 import live
+import recap
 import speakers
 import summary
 from conversations import IGNORE, Grouper
@@ -452,6 +453,34 @@ async def name_hints(c: dict, media: set[str]):
     if h["names"]:
         _speakers["at"] = 0.0
         note(f"对话 {c['start'][11:19]}：听出 {len(h['names'])} 个称呼，可在对话页确认", "state")
+
+
+RECAP_AT = os.environ.get("RECAP_AT", "10:00")  # yesterday's recap (recap.py) is written then; empty: never
+
+
+async def write_recap(day: str) -> dict | None:
+    r = await asyncio.to_thread(recap.make, day)
+    if r:
+        db.put_kv(f"recap:{day}", r)
+    return r
+
+
+async def recap_loop():
+    """Yesterday's recap at RECAP_AT, or at the start once that has passed and it is missing (a day without summaries
+    gets none); a failed one is tried again in an hour."""
+    at = dt.time.fromisoformat(RECAP_AT)
+    while True:
+        now = dt.datetime.now()
+        day = (now.date() - dt.timedelta(days=1)).isoformat()
+        if now.time() >= at and db.kv(f"recap:{day}") is None:
+            try:
+                await write_recap(day)
+            except Exception as e:  # HTTP errors, timeouts, a reply that is not JSON
+                log.warning("recap %s failed: %r", day, e)
+                await asyncio.sleep(3600)
+                continue
+        nxt = dt.datetime.combine(now.date() + dt.timedelta(days=now.time() >= at), at)
+        await asyncio.sleep(max(1.0, (nxt - dt.datetime.now()).total_seconds()))
 
 
 def iso(t: dt.datetime) -> str:
@@ -1137,6 +1166,32 @@ async def ask_ai(body: dict):
         raise HTTPException(502, f"模型调用失败：{e!r}"[:300])
 
 
+@app.get("/api/recap")
+async def recap_get(date: str = ""):
+    """A day's recap, the newest one when no day is given; null when there is none."""
+    if date:
+        return db.kv(f"recap:{date}")
+    r = db.conn().execute("SELECT value FROM kv WHERE key LIKE 'recap:%' ORDER BY key DESC LIMIT 1").fetchone()
+    return json.loads(r[0]) if r else None
+
+
+@app.post("/api/recap/{date}")
+async def recap_redo(date: str):
+    """Write a day's recap again (15-20 s), e.g. after its summaries were redone."""
+    try:
+        dt.date.fromisoformat(date)
+    except ValueError:
+        raise HTTPException(400, "date is YYYY-MM-DD")
+    try:
+        r = await write_recap(date)
+    except Exception as e:
+        log.warning("recap %s failed: %r", date, e)
+        raise HTTPException(502, f"模型调用失败：{e!r}"[:300])
+    if not r:
+        raise HTTPException(404, "那天没有摘要")
+    return r
+
+
 @app.get("/api/tags")
 async def tags():
     return tag_counts()
@@ -1600,7 +1655,7 @@ def main():
     @app.on_event("startup")
     async def start():
         for name, coro in (("pipeline", pipelines()), ("status", status_loop()), ("summary", summary_worker()),
-                           ("voices", voices_loop())):
+                           ("voices", voices_loop()), *((("recap", recap_loop()),) if RECAP_AT else ())):
             asyncio.create_task(coro, name=name).add_done_callback(
                 lambda t, n=name: log.error("task %s ended: %r", n, t.exception()) if not t.cancelled() else None)
 
