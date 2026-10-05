@@ -431,15 +431,44 @@ static bool send_log(uint32_t seq, uint16_t n, void *conn)
     return notify(conn, DATA_ATTR, pkt, 4 + n * 16);
 }
 
+/* Files go at a 15 ms interval, the shortest iOS grants a peripheral; a shorter one the phone already has (an Android
+ * app asks for its own) is kept. The slow one (30-45 ms), also the GAP preferred parameters Android applies a second
+ * into a link, again once no READ came for 5 s: a catch-up is READ after READ. Both within Apple's rules for a
+ * peripheral's request (min a multiple of 15 ms, timeout 2-6 s), which the old 7.5-15 ms and its 0.42 s timeout broke. */
+#define LINK_FAST BT_LE_CONN_PARAM(12, 12, 0, 400)
+#define LINK_SLOW                                                                                                      \
+    BT_LE_CONN_PARAM(CONFIG_BT_PERIPHERAL_PREF_MIN_INT, CONFIG_BT_PERIPHERAL_PREF_MAX_INT,                             \
+                     CONFIG_BT_PERIPHERAL_PREF_LATENCY, CONFIG_BT_PERIPHERAL_PREF_TIMEOUT)
+
+/* The fast interval, if the link is slower: at a READ's start and on while it goes (the phone may change it, as
+ * Android does with the preferred parameters); at most every 5 s, a request takes a while to land */
+static void link_fast(struct bt_conn *conn)
+{
+    static int64_t asked;
+    struct bt_conn_info info;
+    if (k_uptime_get() - asked > 5000 && !bt_conn_get_info(conn, &info) && info.le.interval > 12) {
+        asked = k_uptime_get();
+        bt_conn_le_param_update(conn, LINK_FAST);
+    }
+}
+
+static void link_slow(struct k_work *work)
+{
+    struct bt_conn *conn = get_current_connection();
+    if (conn) {
+        bt_conn_le_param_update(conn, LINK_SLOW);
+    }
+}
+static K_WORK_DELAYABLE_DEFINE(slow_work, link_slow);
+
 /* Send one file from offset; a newer command (STOP, another READ) ends it early. */
 static void send_file(struct bt_conn *conn, uint32_t file, uint32_t off)
 {
     char p[32];
     struct fs_file_t f;
     fs_file_t_init(&f);
-    // a short interval and 2M PHY while a file goes: the default 30-50 ms interval moves ~17 KB/s
-    bt_conn_le_param_update(conn, BT_LE_CONN_PARAM(6, 12, 0, 400));
-    bt_conn_le_phy_update(conn, BT_CONN_LE_PHY_PARAM_2M);
+    k_work_cancel_delayable(&slow_work);
+    link_fast(conn);
     uint16_t payload = MIN(bt_gatt_get_mtu(conn) - 3 - 4, sizeof(pkt) - 4);
     bool ok = true;
     uint32_t end = UINT32_MAX;
@@ -448,30 +477,37 @@ static void send_file(struct bt_conn *conn, uint32_t file, uint32_t off)
         write_out();
         end = seg_size;
     }
+    // opened once and read on: an open per chunk looked the name up again and its seek walked the cluster chain from
+    // the file's start, slower the further in
+    int n = fs_open(&f, file_path(p, file), FS_O_READ);
+    bool opened = !n;
+    n = n ?: fs_seek(&f, off, FS_SEEK_SET);
     k_mutex_unlock(&write_sdcard_mutex);
-    while (ok && off < end && !k_msgq_num_used_get(&cmds)) {
+    while (!n && ok && off < end && !k_msgq_num_used_get(&cmds)) {
         k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
-        int n = fs_open(&f, file_path(p, file), FS_O_READ);
-        if (!n) {
-            n = fs_seek(&f, off, FS_SEEK_SET) ?: fs_read(&f, chunk, MIN(CHUNK, end - off));
-            fs_close(&f);
-        }
+        int got = fs_read(&f, chunk, MIN(CHUNK, end - off));
         k_mutex_unlock(&write_sdcard_mutex);
-        if (n <= 0) {
+        if (got <= 0) {
             break;  // the end (or a read error: the phone sees where it stopped)
         }
-        for (int i = 0; ok && i < n; i += payload) {
-            uint16_t m = MIN(payload, n - i);
+        link_fast(conn);
+        for (int i = 0; ok && i < got; i += payload) {
+            uint16_t m = MIN(payload, got - i);
             sys_put_le32(off + i, pkt);
             memcpy(pkt + 4, chunk + i, m);
             ok = notify(conn, DATA_ATTR, pkt, 4 + m);
         }
-        off += n;
+        off += got;
+    }
+    if (opened) {
+        k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+        fs_close(&f);
+        k_mutex_unlock(&write_sdcard_mutex);
     }
     if (ok) {
         reply(conn, 0x82, file, off, 4);
     }
-    bt_conn_le_param_update(conn, BT_LE_CONN_PARAM(24, 40, 0, 42));
+    k_work_reschedule(&slow_work, K_SECONDS(5));
 }
 
 struct forget {

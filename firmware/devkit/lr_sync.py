@@ -200,7 +200,8 @@ async def main(out: Path, delete: bool, name: str, follow: float, server: str | 
             t = time.time()
             b, hole = assemble(await read(f, 0))
             ok = hole is None and len(b) == size
-            print(f"{f:08X}: {len(b)} B of {size} in {time.time() - t:.1f} s{'' if ok else '  INCOMPLETE'}")
+            t = time.time() - t
+            print(f"{f:08X}: {len(b)} B of {size} in {t:.1f} s, {len(b) / 1024 / t:.1f} KB/s{'' if ok else '  INCOMPLETE'}")
             if ok:
                 got[f] = b
         if follow:

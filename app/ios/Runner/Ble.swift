@@ -589,12 +589,14 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         guard alive(p) else { throw Gone() }  // stopped: a new link may have this mirror now
         let before = m.have(f)
         try take(p, m, f) { self.syncDoneKb = (done + $0 - from) / 1024 }
+        try pieces(m)
+        // the open file: one READ, up to the stream's end as it began; LIVE (subscribed first) has every record
+        // from there. Reading on never ended while recording: each READ found what the last one took time for (#56)
+        if f == open { break }
         if m.have(f) == before {
-          if f == open { break }  // at the stream's end: LIVE goes on from there
           stalls += 1
           if stalls > 3 { m.noMore(f); break }  // the card has no more of it
         }
-        try pieces(m)
       }
       done += m.have(f) - from
     }

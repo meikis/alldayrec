@@ -288,7 +288,6 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         val name = prefs.getString("bleName", null) ?: g.device.name ?: g.device.address
         try {
             step("已连接，协商包长") { op("mtu") { g.requestMtu(512) } }  // a record per notify
-            g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)  // a fixed short interval; the result is logged below
             val adding = prefs.getBoolean("bindPending", false)
             if (g.device.bondState != BluetoothDevice.BOND_BONDED) {
                 if (!adding) return kicked(g, "this phone's bond is gone")
@@ -471,6 +470,8 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         val todo = m.missing().filter { it.first != open } + listOf(open to m.have(open)).filter { open >= 0 }
         val total = todo.sumOf { (f, from) -> maxOf(0, m.files[f]!!.size - from) }
         Log.i("live-record", "ble LIST: ${r.size} files, open %08X, ${todo.size} to READ, $total B".format(open))
+        // a short interval for it (the result is logged below); the recorder puts its slow one back after the last READ
+        if (total > 0) g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
         var done = 0L
         syncTotalKb = total / 1024; syncDoneKb = 0
         val t0 = android.os.SystemClock.elapsedRealtime()
@@ -480,11 +481,11 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             while (f == open || m.have(f) < m.files[f]!!.size) {
                 val before = m.have(f)
                 take(g, m, f) { syncDoneKb = (done + it - from) / 1024 }
-                if (m.have(f) == before) {
-                    if (f == open) break  // at the stream's end: LIVE goes on from there
-                    if (++stalls > 3) { m.noMore(f); break }  // the card has no more of it
-                }
                 pieces(m)
+                // the open file: one READ, up to the stream's end as it began; LIVE (subscribed first) has every record
+                // from there. Reading on never ended while recording: each READ found what the last one took time for (#56)
+                if (f == open) break
+                if (m.have(f) == before && ++stalls > 3) { m.noMore(f); break }  // the card has no more of it
             }
             done += m.have(f) - from
         }
