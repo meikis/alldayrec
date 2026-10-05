@@ -1,6 +1,7 @@
-"""Ten fixed questions to ask.py against a live.db opened read only, the right conversations for each found from the
+"""Fixed questions to ask.py against a live.db opened read only, the right conversations for each found from the
 data itself (the people, days and tags in the questions are picked by query, so it runs on any instance). One JSON
-line per question, then the totals. Acceptance (#70): cites right >= 8/10, no made-up citation, median < 20 s.
+line per question, then the totals. Acceptance (#70): cites right >= 8 of Q1-Q10, no made-up citation, median < 20 s;
+Q11 (a count, miscounted from the digest after #84 went live) must give the number from the db and cite.
 The lines carry the question and the answer: keep them local, report only the numbers.
 
     uv run python ask_eval.py <live.db> [Q1 Q3 ...]
@@ -87,6 +88,11 @@ def questions(now: dt.datetime) -> dict:
     t2 = next(t for t, _ in collections.Counter(t for c in week for t in S(c).get("tags") or [] if S(c).get("decisions")).most_common()
               if len(tagged[t]) <= 20)  # a topic, not the project every other conversation is tagged with
     out["Q10"] = dict(q=f"最近一次聊到「{t2}」是什么时候？定了什么？", expect=ids(tagged[t2][:2]), allow=ids(tagged[t2]))
+    day1 = {c["id"] for c in convs if c["start"][:10] == d1}
+    n1 = sum(1 for c in convs if c["start"][:10] == d1 and (c.get("kind") or "对话") == "对话")
+    undated = lambda a: re.sub(r"\d{4}-\d{1,2}-\d{1,2}|\d{1,2}月\d{1,2}[日号]|\d{1,2}:\d{2}|c\d{14}\S*", "", a)
+    out["Q11"] = dict(q=f"{d1} 一共有几段对话？", truth=n1,
+                      check=lambda a, cited: bool(re.search(rf"(?<!\d){n1}\s*段", undated(a))) and bool(cited) and set(cited) <= day1)
     return out
 
 

@@ -6,10 +6,15 @@ nothing else is called.
 import collections
 import datetime as dt
 import json
+import logging
 import re
+import time
+import urllib.error
 
 import db
 import summary
+
+log = logging.getLogger("live")
 
 ROUNDS = 8          # tool rounds; the next call must answer
 DIGEST_DAYS = 7     # today and the 6 days before it, by their summaries
@@ -23,6 +28,9 @@ SYSTEM = """你在帮我回答关于我自己过去生活的问题。资料来�
 - 搜不到不等于没有：至少换 2~3 个说法（同义词、同音字、相关的人或事）再搜，也可以用 grep 查原文，之后才能说没找到
 - 找不到就直接说没找到，不要拿相关但对不上的对话凑答案
 - 待办、约定里的「今天」「明天」「今晚」是那段对话当天说的，按那段对话的日期理解
+- 几段、几次、多长时间、哪天最多这类数数和统计的问题，不要自己数上面的摘要（长了会数错）：用 calendar 查每天的段数和时长，用 day 拿某一天的清单和段数，都是查库的准确数字；一段对话算在它开始的那天
+- 问某个人的事（最近一次和 TA 聊、聊过什么、答应过 TA 什么），先用 person 按名字查：它按参与者找，比关键词搜全
+- 每个回答都要带出处，统计的回答也一样：先给数字，再写「出处：」列出数到的对话 [对话 id]（多于 10 个就列 10 个），并说明数字是查哪一天、哪个月得到的
 - 回答简洁，用中文纯文本，不用 Markdown
 今天是 {today}（星期{weekday}）。
 
@@ -68,9 +76,11 @@ def t_search(q="", after="", before="", who="", tag="", limit=20):
 
 
 def t_day(date):
-    return [{**_brief(c), "todos": [t.get("text") for t in (c["summary"] or {}).get("todos") or []],
-             "decisions": [d.get("text") for d in (c["summary"] or {}).get("decisions") or []]}
-            for c in db.conversations(date[:10], _next_day(date))]
+    """The day's conversations by their start, and how many of each kind: the model miscounts a long list."""
+    cs = db.conversations(date[:10], _next_day(date))
+    return {"date": date[:10], "count": dict(collections.Counter(c.get("kind") or "对话" for c in cs)),
+            "conversations": [{**_brief(c), "todos": [t.get("text") for t in (c["summary"] or {}).get("todos") or []],
+                               "decisions": [d.get("text") for d in (c["summary"] or {}).get("decisions") or []]} for c in cs]}
 
 
 def t_conversation(id, with_transcript=True):
@@ -107,8 +117,14 @@ def t_todos(after, before, owner=""):
 
 
 def t_calendar(month):
-    return {d: {"conversations": n, "speech_min": round(s / 60, 1)} for d, n, s in db.conn().execute(
-        "SELECT substr(start, 1, 10), count(*), coalesce(sum(speech_s), 0) FROM conversations WHERE start LIKE ? GROUP BY 1", (month[:7] + "%",))}
+    """Per day: conversations of each kind (对话, 口述) and speech minutes, as the calendar page counts them."""
+    out = {}
+    for d, kind, n, s in db.conn().execute("SELECT substr(start, 1, 10), coalesce(kind, '对话'), count(*), coalesce(sum(speech_s), 0) "
+                                           "FROM conversations WHERE start LIKE ? GROUP BY 1, 2", (month[:7] + "%",)):
+        x = out.setdefault(d, {"speech_min": 0.0})
+        x[kind] = n
+        x["speech_min"] = round(x["speech_min"] + s / 60, 1)
+    return out
 
 
 def t_grep(q, after="", before="", limit=30):
@@ -133,13 +149,13 @@ def _fn(name, desc, props, req=()):
 SPECS = [
     _fn("search", "按关键词找对话（最新的在前）：q 是一个子串，原样匹配标题、摘要、标签、待办、决定，摘要没有时再匹配原文；不分词，一次只放一个词。"
         "可按开始时间 after（含）/ before（不含）、参与者 who、标签 tag 过滤，时间写 YYYY-MM-DD。", {"q": S, "after": S, "before": S, "who": S, "tag": S, "limit": I}),
-    _fn("day", "某一天（YYYY-MM-DD）的全部对话：时间、参与者、标题、摘要、待办、决定。", {"date": S}, ["date"]),
+    _fn("day", "某一天（YYYY-MM-DD）开始的全部对话：count 是每类（对话、口述）的段数，conversations 是每段的时间、参与者、标题、摘要、待办、决定。", {"date": S}, ["date"]),
     _fn("conversation", f"一段对话的完整摘要（议题、每个人说了什么、待办、决定、对 AI 的请求），可带原文（最多 {TRANSCRIPT_CHARS} 字）。",
         {"id": S, "with_transcript": B}, ["id"]),
     _fn("person", "一个有名字的说话人：和我聊过几次、最早最近、最近 12 段对话里 TA 说了什么、TA 的待办、我答应 TA 的事。", {"name": S}, ["name"]),
     _fn("todos", "开始时间在 [after, before) 里的对话摘要中的待办（谁做、答应给谁、内容、原话里的时间、原句）。owner 填「我」只看我的。",
         {"after": S, "before": S, "owner": S}, ["after", "before"]),
-    _fn("calendar", "某月（YYYY-MM）每天的对话数和说话分钟数。", {"month": S}, ["month"]),
+    _fn("calendar", "某月（YYYY-MM）每天开始的对话段数（对话、口述分开）和说话分钟数，查库的准确数字。", {"month": S}, ["month"]),
     _fn("grep", "在原文里找包含某个子串的句子（最新的在前）：时间、说话人、原文、所在对话 id。转写有同音错字，找不到可以换同音或近义的词再试。",
         {"q": S, "after": S, "before": S, "limit": I}, ["q"]),
 ]
@@ -169,16 +185,35 @@ def run_tool(name: str, args: str) -> str:
     return json.dumps(res, ensure_ascii=False)[:TOOL_CHARS]
 
 
+def call(msgs: list[dict], **extra) -> dict:
+    """summary.call, once more after a 429 (the relay's accounts rate-limit for a while): Retry-After seconds, at most 30."""
+    try:
+        return summary.call(msgs, timeout=120, **extra)
+    except urllib.error.HTTPError as e:
+        if e.code != 429:
+            raise
+        wait = (e.headers or {}).get("Retry-After") or ""
+        time.sleep(min(float(wait), 30) if wait.replace(".", "", 1).isdigit() else 5)
+        return summary.call(msgs, timeout=120, **extra)
+
+
+CITE = ("上面的回答没有用 [对话 id] 标出处。内容不变，在结论后面标上出处，id 只用前面资料和工具结果里出现过的；"
+        "确实没有对应的对话（比如什么都没找到）就照原样回答。")
+
+
 def ask(q: str, now: dt.datetime | None = None) -> dict:
-    """{answer, sources, calls: the tool calls made, usage: tokens over all rounds}; raises on HTTP errors."""
+    """{answer, sources, calls: the tool calls made, usage: tokens over all rounds}; raises on HTTP errors. An answer
+    citing no conversation is asked once more for its citations: the prompt alone left counts uncited (10-05)."""
     msgs = [{"role": "system", "content": system(now or dt.datetime.now())}, {"role": "user", "content": q}]
     calls, usage = [], collections.Counter()
-    for i in range(ROUNDS + 1):
-        raw = summary.call(msgs, timeout=120, tools=SPECS, **({"tool_choice": "none"} if i == ROUNDS else {}))
+    def reply(**extra) -> dict:
+        raw = call(msgs, tools=SPECS, **extra)
         u = raw.get("usage") or {}
         usage.update(prompt=u.get("prompt_tokens") or 0, completion=u.get("completion_tokens") or 0,
                      cached=(u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
-        m = raw["choices"][0]["message"]
+        return raw["choices"][0]["message"]
+    for i in range(ROUNDS + 1):
+        m = reply(**({"tool_choice": "none"} if i == ROUNDS else {}))
         if not m.get("tool_calls"):
             break
         msgs.append({"role": "assistant", "content": m.get("content"), "tool_calls": m["tool_calls"]})
@@ -187,6 +222,12 @@ def ask(q: str, now: dt.datetime | None = None) -> dict:
             calls.append({"tool": tc["function"]["name"], "args": tc["function"]["arguments"], "chars": len(out)})
             msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": out})
     answer = m.get("content") or ""
+    if not sources(answer):
+        msgs += [{"role": "assistant", "content": answer}, {"role": "user", "content": CITE}]
+        try:
+            answer = reply(tool_choice="none").get("content") or answer
+        except Exception as e:  # HTTP errors, timeouts: the answer without citations is still the answer
+            log.warning("ask: citations not added: %r", e)
     return {"answer": answer, "sources": sources(answer), "calls": calls, "usage": dict(usage)}
 
 
@@ -215,14 +256,16 @@ if __name__ == "__main__":
     assert "- 待办：我→老王 改存储（周五）" in sp and "- 待办：未知 买菜" in sp and "- 标签：存储" in sp and "体检" not in sp
     assert sorted(x["id"] for x in t_search("按小时")) == ["c20260930100000", "c20260930100000-LR_X1_567E"], "summary words, the other device's transcript"
     assert [x["id"] for x in t_search("复查", before="2026-08-01")] == [] and t_search("复查", after="2026-08-01")[0]["kind"] == "口述"
-    assert [x["id"] for x in t_day("2026-09-30")] == ["c20260930100000", "c20260930100000-LR_X1_567E"] and t_day("2026-09-30")[0]["decisions"] == ["按小时存"]
+    d = t_day("2026-09-30")
+    assert [x["id"] for x in d["conversations"]] == ["c20260930100000", "c20260930100000-LR_X1_567E"] and d["conversations"][0]["decisions"] == ["按小时存"]
+    assert d["count"] == {"对话": 2} and t_day("2026-08-01")["count"] == {"口述": 1} and t_day("2026-08-02") == {"date": "2026-08-02", "count": {}, "conversations": []}
     one = t_conversation("c20260930100000")
     assert one["title"] == "存储方案" and "[10:01:00] 老王: 周五把音频按小时存" in one["transcript"] and "另一台" not in one["transcript"], one
     assert "error" in t_conversation("c1") and "transcript" not in t_conversation("c20260930100000", with_transcript=False)
     p = t_person("老王")
     assert p["count"] == 1 and p["recent"][0]["points"] == ["建议按小时存"] and p["my_todos_to_them"] == [{"id": "c20260930100000", "text": "改存储", "due": "周五"}], p
     assert [t["text"] for t in t_todos("2026-09-01", "2026-10-01")] == ["改存储", "买菜"] and len(t_todos("2026-09-01", "2026-10-01", "我")) == 1
-    assert t_calendar("2026-09") == {"2026-09-30": {"conversations": 2, "speech_min": 15.5}}
+    assert t_calendar("2026-09") == {"2026-09-30": {"speech_min": 15.5, "对话": 2}} and t_calendar("2026-08") == {"2026-08-01": {"speech_min": 10.0, "口述": 1}}
     g = t_grep("按小时")
     assert sorted((x["id"], x["speaker"]) for x in g) == [("c20260930100000", "老王"), ("c20260930100000-LR_X1_567E", "我")], g
     assert t_grep("复查", after="2026-08-02") == [] and t_grep("复查")[0]["id"] == "c20260801090000"
@@ -243,6 +286,34 @@ if __name__ == "__main__":
     assert r["calls"] == [{"tool": "grep", "args": '{"q": "复查"}', "chars": len(run_tool("grep", '{"q": "复查"}'))}] and r["usage"]["prompt"] == 200, r
     assert seen[1][0][-1]["role"] == "tool" and "c20260801090000" in seen[1][0][-1]["content"] and "tool_choice" not in seen[1][1]
     loop = {"tool_calls": [{"id": "t", "type": "function", "function": {"name": "calendar", "arguments": '{"month": "2026-09"}'}}]}
-    replies, seen = iter([loop] * ROUNDS + [{"content": "没找到"}]), []
-    assert ask("一直查", now)["answer"] == "没找到" and len(seen) == ROUNDS + 1 and seen[-1][1]["tool_choice"] == "none"
+    replies, seen = iter([loop] * ROUNDS + [{"content": "没找到"}, {"content": "没找到"}]), []
+    assert ask("一直查", now)["answer"] == "没找到" and len(seen) == ROUNDS + 2 and seen[ROUNDS][1]["tool_choice"] == "none"
+    assert seen[-1][0][-1]["content"] == CITE and seen[-1][0][-2]["content"] == "没找到", "no citation: asked once more, kept when none"
+    replies, seen = iter([{"content": "9 月 30 日有 2 段对话。"}, {"content": "9 月 30 日有 2 段对话。出处：[c20260930100000]"}]), []
+    r = ask("9 月 30 日有几段对话", now)
+    assert [x["id"] for x in r["sources"]] == ["c20260930100000"] and len(seen) == 2 and seen[1][1]["tool_choice"] == "none" and r["usage"]["prompt"] == 200
+    def busy(codes):
+        def f(msgs, timeout=300, **extra):
+            seen.append(extra)
+            if codes:
+                raise urllib.error.HTTPError("u", codes.pop(0), "busy", {"Retry-After": "0"}, None)
+            return {"choices": [{"message": {"content": "好了"}}]}
+        return f
+    summary.call, seen = busy([429]), []
+    assert ask("x", now)["answer"] == "好了" and len(seen) == 3, "one 429: tried again (then once more for citations)"
+    replies, seen = iter([{"content": "有 2 段。"}]), []
+    def once(msgs, timeout=300, **extra):
+        seen.append(extra)
+        if len(seen) == 2:
+            raise urllib.error.HTTPError("u", 502, "bad gateway", {}, None)
+        return {"choices": [{"message": next(replies)}]}
+    summary.call = once
+    assert ask("x", now)["answer"] == "有 2 段。" and len(seen) == 2, "the citation call failing keeps the answer"
+    for codes, n in (([429, 429], 2), ([503], 1)):  # a second 429 and any other error: raised, no more tries
+        summary.call, seen, code = busy(codes), [], codes[-1]
+        try:
+            ask("x", now)
+            raise SystemExit(f"{code} must raise")
+        except urllib.error.HTTPError as e:
+            assert e.code == code and len(seen) == n, (code, len(seen))
     print("ok")
