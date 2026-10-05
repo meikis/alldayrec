@@ -185,9 +185,9 @@ if [ -n "$KILL" ]; then
   sleep $((MINUTES * 30))
   xcrun devicectl device process signal --device "$DEV" --pid "$P" --signal 9 >/dev/null || true
   say "killed the app (pid $P)"
-  Q=
-  for _ in $(seq 30); do sleep 5; Q=$(pid); [ -n "$Q" ] && [ "$Q" != "$P" ] && break; Q=; done
-  say "after the kill: ${Q:+relaunched by iOS in the background (pid $Q)}${Q:-not relaunched within 150 s}"
+  Q= K=$SECONDS
+  while [ $((SECONDS - K)) -lt 300 ]; do sleep 5; Q=$(pid); [ -n "$Q" ] && [ "$Q" != "$P" ] && break; Q=; done
+  say "after the kill: ${Q:+relaunched in the background after $((SECONDS - K)) s (pid $Q)}${Q:-not relaunched within $((SECONDS - K)) s}"
   sleep $((MINUTES * 30))
 else
   sleep $((MINUTES * 60))

@@ -13,9 +13,11 @@ from urllib.parse import parse_qs, urlparse
 
 
 def seconds(body: bytes) -> float | None:
+    """As server/audio.py decode(): what ffmpeg exits 0 on is audio, warnings or not (an Android or iPhone batch of
+    chained Ogg streams makes it warn about timestamps, 10-05)."""
     p = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "s16le", "-ac", "1", "-ar", "16000", "pipe:1"],
                        input=body, capture_output=True)
-    return None if p.returncode or p.stderr else len(p.stdout) / 32000
+    return None if p.returncode or len(p.stdout) < 2 else len(p.stdout) / 32000
 
 
 def serve(host: str, port: int, token: str, out: Path):
@@ -88,11 +90,13 @@ def check(out: Path, device: str) -> int:
     problems = [f"{len(bad)} uploads did not decode"] if bad else []
     end = None
     for r in chunks:  # each request's audio [start, start + seconds): back to back, as the recorder's frames are
+        if r["seconds"] is None:
+            continue  # counted above; the app dropped it (400), so its time shows as a gap
         start = int(r["start"])
         if end is not None and abs(start - end) > 100:  # two TIME writes differ by their BLE latency
             problems.append(f"{'gap' if start > end else 'overlap'} of {abs(start - end)} ms at {start}")
         end = start + round(r["seconds"] * 1000)
-    total = sum(r["seconds"] for r in chunks)
+    total = sum(r["seconds"] or 0 for r in chunks)
     status = [r["body"] for r in recs if r["path"] == "/api/device-status" and r["device"] == device]
     events = sum(len(r["body"] or []) for r in recs if r["path"] == "/api/device-log")
     print(f"{device}: {len(chunks)} uploads, {total:.1f} s of audio, from {chunks[0]['start'] if chunks else '-'} to {end}; "
