@@ -244,10 +244,29 @@ export interface LabelSuggestions {
   clips: Record<string, { clip?: string | null; clip_start?: string | null; clip_end?: string | null }>;
 }
 
+// a profile line with the evidence it came from (a conversation, a todo in it, a row that mentions the person)
+export interface ProfileLine {
+  text: string;
+  src: { id: string; conv: string; at: string | null; start: string; title?: string | null }[];
+}
+export interface Profile {
+  at: string;
+  model?: string | null;
+  upto: string | null; // the newest conversation it saw
+  inputs: { conversations: number; todos: number; mentions: number };
+  who: string;
+  facts: ProfileLine[];
+  recent: ProfileLine[];
+  mentions: ProfileLine[]; // what others said about them
+  open: ProfileLine[];
+}
+
 export interface Person {
   name: string;
   count: number;
   aliases: string[];
+  profile: Profile | null;
+  profile_newer: number; // their conversations after the profile was made
   first: string;
   last: string;
   with: string[];

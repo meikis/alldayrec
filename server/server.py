@@ -31,6 +31,7 @@ import db
 import firmware
 import hints
 import live
+import profiles
 import recap
 import speakers
 import summary
@@ -437,6 +438,13 @@ async def summarize_loop():
         await broadcast({"type": "summary", **res})
         if res["status"] == "done" and res.get("model") and not db.name_hints(c["id"]):
             await name_hints(c, media)
+        if res["status"] == "done":  # a profile kept up to date once it exists
+            for p in c.get("participants") or []:
+                if p != "我" and not speakers.ANON.fullmatch(p) and db.profile(p):
+                    try:
+                        await make_profile(p)
+                    except Exception as e:
+                        log.warning("profile %s failed: %r", p, e)
 
 
 async def name_hints(c: dict, media: set[str]):
@@ -1529,7 +1537,7 @@ async def person(name: str):
         for t in s.get("tags") or []:
             tags[t] = tags.get(t, 0) + 1
         for t in s.get("todos") or []:
-            t = {**t, "conversation": c["id"], "title": s.get("title")}
+            t = {**t, "conversation": c["id"], "title": s.get("title"), "start": c["start"]}
             if t.get("owner") == name:
                 theirs.append(t)
             elif t.get("owner") == "我" and t.get("to") == name:  # to: prompt v4 on; older summaries have none
@@ -1537,9 +1545,53 @@ async def person(name: str):
     if not convs:
         raise HTTPException(404, "no conversation with this name")
     top = lambda d, n: sorted(d, key=lambda k: -d[k])[:n]
+    pf = db.profile(name)
     return {"name": name, "count": len(convs), "first": convs[-1]["start"], "last": convs[0]["start"],
             "aliases": sorted(a for a, n in db.aliases().items() if n == name),
+            "profile": pf, "profile_newer": sum(c["start"] > pf["upto"] for c in convs) if pf and pf.get("upto") else 0,
             "with": top(co, 6), "tags": top(tags, 8), "theirs": theirs, "mine": mine, "conversations": out}
+
+
+def mentions(name: str, limit: int = 30, per_conv: int = 3) -> list[dict]:
+    """Rows of other speakers holding the name or one of its aliases, newest first, each with two rows either side and
+    its conversation; at most per_conv from one conversation (a name said over and over in one talk)."""
+    terms = [name] + [a for a, n in db.aliases().items() if n == name]
+    out, per = [], {}
+    for r in db.conn().execute(f"SELECT start, source FROM sentences WHERE ({' OR '.join('instr(text, ?)' for _ in terms)}) "
+                               "AND coalesce(speaker, '') != ? ORDER BY start DESC", (*terms, name)):
+        c = db.conn().execute("SELECT c.id, s.body FROM conversations c LEFT JOIN summaries s ON s.conversation = c.id WHERE c.start <= ? "
+                              "AND c.end >= ? AND (c.device IS NULL OR c.device IS ?) ORDER BY c.start DESC", (r[0], r[0], r[1])).fetchone()
+        if not c or per.get(c[0], 0) >= per_conv:
+            continue
+        per[c[0]] = per.get(c[0], 0) + 1
+        t = dt.datetime.fromisoformat(r[0])
+        near = db.sentences((t - dt.timedelta(minutes=1)).isoformat(), (t + dt.timedelta(minutes=1)).isoformat(), source=r[1])
+        i = next((k for k, x in enumerate(near) if x["start"] == r[0]), 0)
+        out.append({"conv": c[0], "title": (json.loads(c[1]) if c[1] else {}).get("title"), "at": r[0],
+                    "rows": [x for x in near[max(0, i - 2):i + 3] if x.get("text")]})
+        if len(out) == limit:
+            break
+    return out
+
+
+async def make_profile(name: str) -> dict:
+    """The person's profile from their 40 latest conversations, their todos and mine to them, and 30 mentions."""
+    p = await person(name)
+    ms = await asyncio.to_thread(mentions, name)
+    pf = await asyncio.to_thread(profiles.profile, name, p["conversations"][:40], (p["theirs"] + p["mine"])[:30], ms)
+    db.put_profile(pf)
+    return pf
+
+
+@app.post("/api/person/{name}/profile")
+async def person_profile(name: str):
+    """Made (or made again) now: one chat call, some seconds."""
+    try:
+        return await make_profile(name)
+    except HTTPException:
+        raise
+    except Exception as e:  # the model: HTTP errors, a reply that is not JSON
+        raise HTTPException(502, f"生成失败：{e!r}"[:300])
 
 
 @app.get("/api/voice-clip/{name}")

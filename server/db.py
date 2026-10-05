@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS apart (voice TEXT NOT NULL, grp TEXT NOT NULL, PRIMAR
 CREATE TABLE IF NOT EXISTS people (name TEXT PRIMARY KEY, n INTEGER NOT NULL, e BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS aliases (alias TEXT PRIMARY KEY, name TEXT NOT NULL);  -- another way a person is called (A哥 = A)
 CREATE TABLE IF NOT EXISTS name_hints (conv TEXT PRIMARY KEY, body TEXT NOT NULL);  -- hints.py: what each label was called; suggestions only
+CREATE TABLE IF NOT EXISTS profiles (name TEXT PRIMARY KEY, body TEXT NOT NULL);  -- profiles.py: a named person's profile, every line with its sources
 CREATE TABLE IF NOT EXISTS pieces (           -- uploaded audio pieces, the ingest queue; size bytes at pos of path (the
     device TEXT NOT NULL, start_ms INTEGER NOT NULL, seconds REAL NOT NULL, path TEXT NOT NULL,  -- hour file, relative
     pos INTEGER, size INTEGER, n INTEGER, PRIMARY KEY (start_ms, device));                      -- to the recordings dir;
@@ -264,6 +265,15 @@ def name_hints(conv_id: str | None = None) -> dict[str, dict]:
 
 def put_name_hints(h: dict, c: sqlite3.Connection | None = None):
     (c or conn()).execute("INSERT OR REPLACE INTO name_hints VALUES (?, ?)", (h["conv"], json.dumps(h, ensure_ascii=False)))
+
+
+def profile(name: str) -> dict | None:
+    r = conn().execute("SELECT body FROM profiles WHERE name = ?", (name,)).fetchone()
+    return json.loads(r[0]) if r else None
+
+
+def put_profile(p: dict):
+    conn().execute("INSERT OR REPLACE INTO profiles VALUES (?, ?)", (p["name"], json.dumps(p, ensure_ascii=False)))
 
 
 # pieces and state

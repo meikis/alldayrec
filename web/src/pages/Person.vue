@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import AppHeader from "../components/AppHeader.vue";
-import { get, hhmm, post, type Person } from "../lib/api";
+import { get, hhmm, post, type Person, type Profile } from "../lib/api";
 
 const props = defineProps<{ name: string }>();
 const p = ref<Person | null>(null),
@@ -24,6 +24,28 @@ watch(
   { immediate: true },
 );
 const day = (iso: string) => iso.slice(0, 10);
+
+// the profile: made on a click, then kept up to date as conversations with them close
+const making = ref(false),
+  profileError = ref("");
+async function makeProfile() {
+  making.value = true;
+  profileError.value = "";
+  try {
+    p.value!.profile = await post<Profile>(`/api/person/${encodeURIComponent(props.name)}/profile`);
+    p.value!.profile_newer = 0;
+  } catch (e) {
+    profileError.value = (e as Error).message;
+  } finally {
+    making.value = false;
+  }
+}
+const sections = [
+  { k: "facts", title: "关于 TA" },
+  { k: "recent", title: "最近" },
+  { k: "mentions", title: "别人提到 TA" },
+  { k: "open", title: "没了结的事" },
+] as const;
 
 // other ways this person is called (A哥 for A): a hint with one of them suggests this name
 const newAlias = ref(""),
@@ -77,6 +99,44 @@ const link = (id: string, at: string | null) =>
           >{{ t }}</RouterLink
         >
       </div>
+
+      <section class="profile">
+        <template v-if="p.profile">
+          <p v-if="p.profile.who" class="whois">{{ p.profile.who }}</p>
+          <template v-for="sec in sections" :key="sec.k">
+            <template v-if="p.profile[sec.k].length">
+              <h3>{{ sec.title.replace("TA", p.name) }}</h3>
+              <ul class="items">
+                <li v-for="(x, i) in p.profile[sec.k]" :key="i">
+                  {{ x.text }}
+                  <RouterLink
+                    v-for="s in x.src"
+                    :key="s.id"
+                    class="src"
+                    :title="s.title ?? ''"
+                    :to="link(s.conv, s.at)"
+                    >{{ s.start.slice(5, 10) }}</RouterLink
+                  >
+                </li>
+              </ul>
+            </template>
+          </template>
+          <div class="muted foot">
+            档案由 {{ p.profile.model }} 根据 {{ p.profile.inputs.conversations }} 段对话、{{
+              p.profile.inputs.mentions
+            }}
+            处提及生成 · {{ p.profile.at.slice(5, 16).replace("T", " ") }}
+            <template v-if="p.profile_newer">· 之后又有 {{ p.profile_newer }} 段对话</template>
+            <button :disabled="making" @click="makeProfile">
+              {{ making ? "生成中…" : "更新档案" }}
+            </button>
+          </div>
+        </template>
+        <button v-else :disabled="making" @click="makeProfile">
+          {{ making ? "生成中…（几十秒）" : "生成档案" }}
+        </button>
+        <span class="bad">{{ profileError }}</span>
+      </section>
 
       <template v-if="p.theirs.length">
         <h3>{{ p.name }} 的待办</h3>
@@ -178,6 +238,23 @@ h3 {
 .empty {
   color: var(--muted);
   margin-top: 24px;
+}
+.profile {
+  margin-top: 12px;
+}
+.whois {
+  background: var(--soft);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin: 0;
+}
+.src {
+  font-size: 12px;
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.foot button {
+  margin-left: 8px;
 }
 .aliases {
   display: flex;
