@@ -4,7 +4,8 @@
 #   server/deploy.sh check      # check what runs now (read only)
 #   server/deploy.sh rollback   # put back what the last deploy replaced (code, web, columns it added), restart, check
 # Instances are dir:unit; LR_INSTANCES replaces them (a throwaway test instance). Each deploy keeps a backup with a copy
-# of live.db in <dir>/backup-deploy-<time>, <dir>/backup-last points at it: prune old ones by hand.
+# of live.db in <dir>/backup-deploy-<time>, <dir>/backup-last points at it; a deploy that passes its check keeps only its
+# own and the one before.
 set -euo pipefail
 HOST=suyiiyii@203.0.113.10
 INSTANCES=${LR_INSTANCES:-/opt/lr-prod:lr-prod /opt/live-record:live-record}
@@ -72,7 +73,7 @@ check() {  # dir unit: active, running the commit in its COMMIT, serving the pag
 }
 
 deploy() {  # dir unit: back up, install the release, restart, check
-  local d=$1 u=$2 b off
+  local d=$1 u=$2 b off o
   b=$d/backup-deploy-$RUN
   mkdir -p "$b/old" "$b/new"
   tar -xzf "$TGZ" -C "$b/new" --no-same-owner
@@ -95,7 +96,8 @@ PY
   off=$(stat -c %s "$d/data/server.log")
   systemctl restart "$u"
   echo "  $d: $(cat "$b/old/COMMIT" 2> /dev/null || echo '(no COMMIT)') -> $(cat "$b/new/COMMIT"), backup $b"
-  started "$d" "$u" "$off" && check "$d" "$u"
+  started "$d" "$u" "$off" && check "$d" "$u" || return 1
+  for o in $(printf '%s\n' "$d"/backup-deploy-* | head -n -2); do rm -rf -- "$o"; echo "  removed ${o##*/}"; done  # time-named: sorted
 }
 
 rollback() {  # dir unit: undo the newest deploy run, where it got to installing and is still what is installed
