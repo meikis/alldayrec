@@ -130,9 +130,9 @@ final class Flow: XCTestCase {
     let was = settings.cells.matching(NSPredicate(format: "isSelected == true")).firstMatch
     XCTAssert(was.waitForExistence(timeout: 10), "no Auto-Lock option selected (Low Power Mode holds it at 30 s?)")
     say("autolock was \(was.label)")
-    let want = env["LR_AUTOLOCK"] ?? "永不"
-    tap(settings.descendants(matching: .any).matching(NSPredicate(format: "label == %@", want)).firstMatch)
-    XCTAssert(until(5) { was.label == want }, "Auto-Lock is \(was.label), not \(want)")
+    let want = env["LR_AUTOLOCK"] ?? "永不", wants = want == "永不" ? ["永不", "Never"] : [want]  // the phone's language
+    tap(settings.descendants(matching: .any).matching(NSPredicate(format: "label IN %@", wants)).firstMatch)
+    XCTAssert(until(5) { wants.contains(was.label) }, "Auto-Lock is \(was.label), not \(want)")
     say("autolock now \(was.label)")
     app.activate()
   }

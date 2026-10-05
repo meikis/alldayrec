@@ -48,14 +48,30 @@ unlocked() {
 N=0
 ui() {  # one test of RunnerUITests (testLaunch: ui Launch), VAR=value for it; its LRUI lines into run.log
   local t=$1; shift; local vars=(TEST_RUNNER_LR_NAME="$NAME"); for v in "$@"; do vars+=("TEST_RUNNER_$v"); done
-  unlocked; N=$((N + 1))
-  env "${vars[@]}" DEVELOPER_DIR="$XCODE_UI" xcodebuild test-without-building -xctestrun "$(ls "$W"/dd/Build/Products/*iphoneos*.xctestrun)" \
-    -destination "id=$DEV" -only-testing:"RunnerUITests/Flow/test$t" -resultBundlePath "$R/$N-$t.xcresult" > "$R/$N-$t.log" 2>&1 &
-  local x=$!; (sleep 900; kill $x 2>/dev/null) & local d=$!  # xcodebuild waits on for a runner that went away (10-05)
-  wait $x; local rc=$?; kill $d 2>/dev/null
+  local try rc
+  for try in 1 2 3; do
+    unlocked; runner_gone; N=$((N + 1))
+    env "${vars[@]}" DEVELOPER_DIR="$XCODE_UI" xcodebuild test-without-building -xctestrun "$(ls "$W"/dd/Build/Products/*iphoneos*.xctestrun)" \
+      -destination "id=$DEV" -only-testing:"RunnerUITests/Flow/test$t" -resultBundlePath "$R/$N-$t.xcresult" > "$R/$N-$t.log" 2>&1 &
+    local x=$! k=$SECONDS
+    # a runner that cannot reach xcodebuild exits within ~20 s, xcodebuild then waits on for 10 min (10-06): try again
+    while kill -0 $x 2>/dev/null; do
+      sleep 3
+      if grep -q "Exiting due to IDE disconnection" "$R/$N-$t.log" || [ $((SECONDS - k)) -gt 900 ]; then kill $x 2>/dev/null; break; fi
+    done
+    wait $x; rc=$?
+    grep -q "Exiting due to IDE disconnection" "$R/$N-$t.log" || break
+    log "ui $t: the runner did not reach xcodebuild (try $try)"; rc=1; sleep 10
+  done
   grep -h "^LRUI\|error: -\[RunnerUITests" "$R/$N-$t.log" | tee -a "$R/run.log"
   log "ui $t: $([ $rc = 0 ] && echo passed || echo "FAILED (log $R/$N-$t.log)")"
   return $rc
+}
+runner_gone() {  # no test runner left from the last test (the next one cannot connect while it lingers?)
+  xcrun devicectl device info processes --device "$DEV" --json-output "$W/procs.json" >/dev/null 2>&1
+  python3 -c "import json,sys; print(*[p['processIdentifier'] for p in json.load(open(sys.argv[1]))['result']['runningProcesses'] if 'RunnerUITests-Runner.app/' in p.get('executable', '')])" \
+    "$W/procs.json" 2>/dev/null | xargs -n1 -I{} xcrun devicectl device process terminate --device "$DEV" --pid {} >/dev/null 2>&1
+  return 0
 }
 pid() {  # the test app's pid, if it runs
   xcrun devicectl device info apps --device "$DEV" --bundle-id $APP --json-output "$W/apps.json" >/dev/null 2>&1
