@@ -10,8 +10,8 @@ import os
 import urllib.request
 
 MIN_SPEECH_S = 60
-PROMPT_VERSION = 7  # 2: tags, 3: people, 4: speech to AI told apart from speech to people, 5: media played aloud, 6: no "there was none" lines, fewer people,
-                    # 7: a todo's owner is who does it (not who said it), what I tell an AI is never a todo
+PROMPT_VERSION = 8  # 2: tags, 3: people, 4: speech to AI told apart from speech to people, 5: media played aloud, 6: no "there was none" lines, fewer people,
+                    # 7: a todo's owner is who does it (not who said it), what I tell an AI is never a todo, 8: a todo's due_date (its due on the calendar)
 SYSTEM = """你在整理一段现场录音转写出来的对话。每行是「[时间] 说话人: 文本」。说话人标签来自声纹聚类：「我」是录音者本人，S1、S2… 是其他人，同一个人可能被拆成多个标签，S? 是太短没认出来的句子。转写有错别字和同音误识别，按意图理解。
 「我」说的话有两种听众，先分清再整理：
 - 对人：说给在场或线上的人听，有来有回，别人会接话、回应、提问
@@ -27,13 +27,14 @@ SYSTEM = """你在整理一段现场录音转写出来的对话。每行是「[�
  "tags": ["2~5 个标签：这段对话和什么相关（项目、领域、活动、人际场合），优先沿用已有标签"],
  "topics": [{"title": "议题", "points": ["要点"], "at": "议题开始那一行的时间 HH:MM:SS"}],
  "ai_requests": [{"text": "我让 AI 做的事", "at": "原句那一行的时间 HH:MM:SS"}],
- "todos": [{"owner": "去做这件事的人：我 | S1 | 未知", "to": "答应给谁或替谁做，写说话人标签；不是对人的就写 null", "text": "要做的事", "due": "原话里的时间，没有写 null", "quote": "依据的原句", "at": "原句那一行的时间 HH:MM:SS"}],
+ "todos": [{"owner": "去做这件事的人：我 | S1 | 未知", "to": "答应给谁或替谁做，写说话人标签；不是对人的就写 null", "text": "要做的事", "due": "原话里的时间，没有写 null", "due_date": "due 换算成的日期 YYYY-MM-DD，说不准写 null", "quote": "依据的原句", "at": "原句那一行的时间 HH:MM:SS"}],
  "decisions": [{"text": "定下来的事", "quote": "依据的原句", "at": "原句那一行的时间 HH:MM:SS"}]}
 ai_spans 是我对 AI 说话的连续时间段（第一句和最后一句的时间）。段内只能是我对 AI 说的话：中间夹着别人说话、或我对人说的短句（嗯、对、这个、你让他们上去吧），就在那里断开分成两段；没有就给空数组。
 media_spans 是外放媒体的连续时间段（第一句和最后一句的时间）：中间夹着在场的人说话（包括我对媒体内容的点评），就在那里断开分成两段；没有就给空数组。
 媒体里的话不是任何在场的人说的：不进 people、todos、decisions、topics，不要写成「我」说的或做的；summary 里一句带过在看或听什么（整段都是媒体时，就写在看或听什么、大致讲了什么）。
 对 AI 说的话只进 ai_requests，不进 todos、decisions、people；summary 里一句带过我在让 AI 做什么即可。todos 只收人要做的事：我答应别人的、别人答应的、别人要我做的、我自己说要做的。
 todos 的 owner 是要去做这件事的人，不是说这句话的人：别人要我做的事（我答应了，或者没有拒绝），owner 是「我」、to 是对方；我让在场的 S1 去做的事，owner 是 S1、to 是「我」。
+due_date 按这段对话的日期换算（最后一行写了这段对话哪天几点开始、星期几）：今天、今晚、待会儿是当天，明天、后天往后数，周五、下周一按星期数；原句的时间比开始时间早，说明过了午夜，那句话是第二天说的。「X 之前」「X 之内」取最后一天，「X 之后」取之后的第一天（国庆之后 = 国庆假期结束后的第一天）。说不出是哪一天（过几天、以后、有空、下周、最近）或者 due 是 null 时写 null，不要猜。
 我对 AI 助手的吩咐（帮我查、改、跑、开分支、合并、部署、派人去调研……）说得再像吩咐人，也只进 ai_requests，不是任何人的待办。这种话前后没有人用人的口吻接话，常常是一个人连着说一长段；我的声音有时会被认成 S1 这样的别的标签，同样按对 AI 处理。
 people 只列在这段里说了实质内容的标签（观点、信息、经历、提问、表态），「我」在最前；S?、只有附和的、只说了一两句零碎话（问一句、喊人、接一句玩笑、递东西）的都不列。人多的闲聊挑主要说话的几个，一般不超过 8 个。按这个人自己的话写，不要写成别人对他的评价。
 summary 只写这段里有的事：没有媒体、没有对 AI 说话、没有待办时不要提「没有」。
@@ -60,21 +61,34 @@ def complete(messages: list[dict], timeout: int = 300) -> tuple[dict, dict]:
     return json.loads(raw["choices"][0]["message"]["content"]), raw
 
 
-def instructions(known_tags: list[str]) -> str:
-    return SYSTEM + ("\n已有标签：" + "、".join(known_tags) if known_tags else "")
+def instructions(known_tags: list[str], start: str) -> str:
+    """SYSTEM, the tags in use and the day the conversation started (start: its ISO start), which due_date counts from."""
+    d = dt.datetime.fromisoformat(start)
+    return (SYSTEM + ("\n已有标签：" + "、".join(known_tags) if known_tags else "")
+            + f"\n这段对话开始于 {d:%Y-%m-%d}（周{'一二三四五六日'[d.weekday()]}）{d:%H:%M}。")
 
 
-def chat(text: str, known_tags: list[str]) -> tuple[dict, dict]:
-    return complete([{"role": "system", "content": instructions(known_tags)}, {"role": "user", "content": text}])
+def chat(text: str, known_tags: list[str], start: str) -> tuple[dict, dict]:
+    return complete([{"role": "system", "content": instructions(known_tags, start)}, {"role": "user", "content": text}])
+
+
+def day(x) -> str | None:
+    """A YYYY-MM-DD the model wrote, as it is; None for anything else."""
+    try:
+        return dt.date.fromisoformat(x).isoformat() if isinstance(x, str) and len(x) == 10 else None
+    except ValueError:
+        return None
 
 
 def anchor(res: dict, rows: list[dict]) -> dict:
-    """The model cites HH:MM:SS; turn each into the start of the row it names (null when none matches), topics in time order."""
+    """The model cites HH:MM:SS; turn each into the start of the row it names (null when none matches), topics in time order.
+    A todo's due_date stays only when it is a date and the todo has a due: without words for a time it was made up."""
     starts = [r["start"] for r in rows]
     def at(hms):
         return next((s for s in starts if s[11:19] == hms), None) if isinstance(hms, str) else None
     for k in ("topics", "todos", "decisions", "ai_requests"):
         res[k] = [{**x, "at": at(x.get("at"))} for x in res.get(k) or []]
+    res["todos"] = [{**x, "due_date": day(x.get("due_date")) if x.get("due") else None} for x in res["todos"]]
     for k in ("ai_spans", "media_spans"):
         res[k] = [{"from": at(x.get("from")), "to": at(x.get("to"))} for x in res.get(k) or [] if isinstance(x, dict)]
         res[k] = [x for x in res[k] if x["from"] and x["to"]]
@@ -93,7 +107,7 @@ def summarize(conv: dict, rows: list[dict], known_tags: list[str] = ()) -> dict:
     if conv.get("speech_s", 0) < MIN_SPEECH_S or not rows:
         first = next((r["text"] for r in rows if r.get("text")), "")
         return {**base, "status": "done", "model": None, "title": first[:20], "summary": "", **{k: [] for k in LISTS}}
-    return result(conv, rows, *chat(transcript(rows), list(known_tags)))
+    return result(conv, rows, *chat(transcript(rows), list(known_tags), conv["start"]))
 
 
 def result(conv: dict, rows: list[dict], res: dict, raw: dict) -> dict:
@@ -138,7 +152,11 @@ if __name__ == "__main__":
     rows = [dict(start="2026-09-30T10:00:01.200", text="我们先定一下", speaker="我"), dict(start="2026-09-30T10:02:00.000", text="好", speaker="S1")]
     r = anchor({"topics": [{"title": "b", "at": "10:02:00"}, {"title": "a", "at": "10:00:01"}], "todos": [{"text": "x", "at": "9:99"}]}, rows)
     assert [t["title"] for t in r["topics"]] == ["a", "b"] and r["topics"][0]["at"] == rows[0]["start"]
-    assert r["todos"][0]["at"] is None and r["decisions"] == []
+    assert r["todos"][0]["at"] is None and r["todos"][0]["due_date"] is None and r["decisions"] == []
+    todos = anchor({"todos": [{"due": "明天", "due_date": "2026-10-01"}, {"due": "下周", "due_date": "下周"}, {"due": None, "due_date": "2026-10-01"},
+                              {"due": "周五", "due_date": "2026-10-1"}, {"due": "月底", "due_date": "2026-09-31"}]}, rows)["todos"]
+    assert [t["due_date"] for t in todos] == ["2026-10-01", None, None, None, None], todos
+    assert instructions(["工作"], "2026-10-04T23:50:10.000").endswith("\n已有标签：工作\n这段对话开始于 2026-10-04（周日）23:50。")
     assert anchor({"people": [{"who": "S1", "points": ["a"]}, {"who": "S1", "points": ["b"]}, "x"]}, rows)["people"] == [{"who": "S1", "points": ["a", "b"]}]
     rows = [dict(rows[0], end="2026-09-30T10:00:09.000"), dict(rows[1], end="2026-09-30T10:02:09.000"), dict(start="2026-09-30T10:03:00.000", end="2026-09-30T10:03:30.000", text="欢迎收看", speaker="S2")]
     spans = anchor({"media_spans": [{"from": "10:03:00", "to": "10:03:00"}, {"from": "10:00:01", "to": "bad"}, "x"]}, rows)["media_spans"]

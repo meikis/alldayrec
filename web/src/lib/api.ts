@@ -64,6 +64,7 @@ export interface Summary {
     to?: string | null;
     text: string;
     due?: string | null;
+    due_date?: string | null; // the due on the calendar (YYYY-MM-DD), from summary prompt v8 on
     quote?: string;
   })[];
   ai_requests?: (At & { text: string })[];

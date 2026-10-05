@@ -281,7 +281,10 @@ async function alias(name: string, of: string) {
           <ul class="items">
             <li v-for="(t, i) in s.todos" :key="i">
               <span class="who">{{ t.owner || "未知" }}{{ t.to ? ` → ${t.to}` : "" }}</span
-              >{{ t.text }}<span v-if="t.due" class="due">{{ t.due }}</span>
+              >{{ t.text
+              }}<span v-if="t.due" class="due"
+                >{{ t.due }}{{ t.due_date ? " · " + t.due_date.slice(5) : "" }}</span
+              >
               <a v-if="t.at" class="at" :href="'#' + t.at" @click.prevent="jumpTo(t.at)">{{
                 hhmmss(t.at)
               }}</a>

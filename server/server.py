@@ -469,7 +469,7 @@ def summarize(c: dict, tags: list[str]) -> dict:
     rows = conversation_rows(c)
     tl = db.timeline(c["id"]) if c.get("via_live") else None
     if tl and tl.get("messages") and c.get("speech_s", 0) >= summary.MIN_SPEECH_S:
-        return {**summary.result(c, rows, *live.final(tl, rows, tags)), "via": "live"}
+        return {**summary.result(c, rows, *live.final(tl, rows, tags, c["start"])), "via": "live"}
     return summary.summarize(c, rows, tags)
 
 
