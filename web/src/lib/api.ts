@@ -206,6 +206,7 @@ export interface VoiceSet {
   last: string | null;
   samples: Voice[];
   co: string[];
+  called: { name: string; convs: string[] }[]; // what its voices were called, aliases resolved
   members?: Voice[]; // only from /api/speakers/{id}
 }
 export interface Speaker extends VoiceSet {
@@ -224,9 +225,29 @@ export interface Todo {
   conversation: string;
   title?: string | null;
 }
+// GET /api/conversation/{id}/speakers: suggestions for its labels; each is applied only by a rename the owner clicks
+export interface NameHint {
+  who: string; // the label it was called
+  name: string; // as said
+  canon: string; // the person it is an alias of, else the name
+  kind: "addressed" | "self" | "referred";
+  by: string; // who said it
+  at: string;
+  quote: string;
+}
+export interface LabelSuggestions {
+  asked: boolean; // the hints were asked for this conversation
+  names: NameHint[];
+  merge: { from: string; to: string; score?: number; name?: string }[];
+  like: { who: string; name: string; score: number }[]; // voice near a named speaker
+  elsewhere: { who: string; name: string; convs: number }[]; // its voice was called so in other conversations
+  clips: Record<string, { clip?: string | null; clip_start?: string | null; clip_end?: string | null }>;
+}
+
 export interface Person {
   name: string;
   count: number;
+  aliases: string[];
   first: string;
   last: string;
   with: string[];

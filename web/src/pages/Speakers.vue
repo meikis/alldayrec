@@ -74,6 +74,16 @@ async function name(g: Speaker, to: string, what: string, suggestion?: string) {
     busy.value = false;
   }
 }
+async function addAlias(alias: string, name: string) {
+  busy.value = true;
+  try {
+    await post("/api/aliases", { alias, name });
+    flash.value = `已记下「${alias}」是 ${name} 的别名`;
+    await load();
+  } finally {
+    busy.value = false;
+  }
+}
 async function detach(g: Speaker, v: Voice) {
   busy.value = true;
   try {
@@ -122,6 +132,24 @@ async function detach(g: Speaker, v: Voice) {
         </button>
       </div>
       <p v-if="g.co.length" class="meta">常一起出现：{{ g.co.join("、") }}</p>
+      <p v-if="g.called.some((x) => x.name !== g.name)" class="meta called">
+        {{ g.name ? "也被叫作" : "被叫作" }}：<template
+          v-for="x in g.called.filter((x) => x.name !== g.name)"
+          :key="x.name"
+          >「{{ x.name }}」{{ x.convs.length }} 段
+          <button v-if="!g.name" class="chip" :disabled="busy" @click="name(g, x.name, title(g))">
+            起名 {{ x.name }}
+          </button>
+          <button
+            v-else-if="g.name !== '我'"
+            class="chip"
+            :disabled="busy"
+            @click="addAlias(x.name, g.name)"
+          >
+            记为别名
+          </button></template
+        >
+      </p>
       <ul class="points">
         <li v-for="v in g.samples.filter((v) => v.points.length).slice(0, 2)" :key="voiceId(v)">
           {{ v.points[0] }} <span class="meta">— {{ v.title }}</span>
@@ -152,7 +180,12 @@ async function detach(g: Speaker, v: Voice) {
       </div>
 
       <div v-for="(s, i) in g.suggested" :key="i" class="suggest">
-        <span>可能也是 {{ g.name }}：{{ s.count }} 段对话（相似度 {{ s.score.toFixed(2) }}）</span>
+        <span
+          >可能也是 {{ g.name }}：{{ s.count }} 段对话（相似度 {{ s.score.toFixed(2) }}）<template
+            v-if="s.called.length"
+            >，被叫作{{ s.called.map((x) => `「${x.name}」`).join("") }}</template
+          ></span
+        >
         <button v-for="v in s.samples" :key="voiceId(v)" class="clip" @click="listen(v)">
           {{ player.playing === voiceId(v) ? "■" : "▶" }} {{ v.clip_text || day(v.start) }}
         </button>

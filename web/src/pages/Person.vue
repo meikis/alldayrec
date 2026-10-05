@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
 import AppHeader from "../components/AppHeader.vue";
-import { get, hhmm, type Person } from "../lib/api";
+import { get, hhmm, post, type Person } from "../lib/api";
 
 const props = defineProps<{ name: string }>();
 const p = ref<Person | null>(null),
@@ -24,6 +24,20 @@ watch(
   { immediate: true },
 );
 const day = (iso: string) => iso.slice(0, 10);
+
+// other ways this person is called (A哥 for A): a hint with one of them suggests this name
+const newAlias = ref(""),
+  aliasError = ref("");
+async function setAlias(alias: string, name: string) {
+  aliasError.value = "";
+  try {
+    const all = await post<Record<string, string>>("/api/aliases", { alias, name });
+    p.value!.aliases = Object.keys(all).filter((a) => all[a] === props.name);
+    newAlias.value = "";
+  } catch (e) {
+    aliasError.value = (e as Error).message;
+  }
+}
 const link = (id: string, at: string | null) =>
   `/c/${id}` + (at ? `#${encodeURIComponent(at)}` : "");
 </script>
@@ -44,6 +58,15 @@ const link = (id: string, at: string | null) =>
             ><template v-else>{{ w }}</template></template
           >
         </template>
+      </div>
+      <div class="aliases muted">
+        别名：<span v-for="a in p.aliases" :key="a" class="tag"
+          >{{ a }} <button class="x" title="删掉这个别名" @click="setAlias(a, '')">×</button></span
+        ><input
+          v-model="newAlias"
+          placeholder="添加别名，回车"
+          @keydown.enter="newAlias.trim() && setAlias(newAlias.trim(), p.name)"
+        /><span class="bad">{{ aliasError }}</span>
       </div>
       <div v-if="p.tags.length" class="tags">
         <RouterLink
@@ -155,5 +178,26 @@ h3 {
 .empty {
   color: var(--muted);
   margin-top: 24px;
+}
+.aliases {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.aliases input {
+  font: inherit;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 2px 8px;
+  width: 9em;
+}
+.aliases .x {
+  border: 0;
+  background: none;
+  padding: 0 2px;
+  color: var(--muted);
+  cursor: pointer;
 }
 </style>

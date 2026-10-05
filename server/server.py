@@ -29,6 +29,7 @@ import ask
 import audio
 import db
 import firmware
+import hints
 import live
 import speakers
 import summary
@@ -433,6 +434,24 @@ async def summarize_loop():
         note(f"对话 {c['start'][11:19]} 的摘要" + (f"：{res['title']}" if res["status"] == "done" else f"生成失败：{res['error']}"),
              "state" if res["status"] == "done" else "error")
         await broadcast({"type": "summary", **res})
+        if res["status"] == "done" and res.get("model") and not db.name_hints(c["id"]):
+            await name_hints(c, media)
+
+
+async def name_hints(c: dict, media: set[str]):
+    """What each label was called (hints.py), once per conversation with a summary call (a rename carries them over in
+    apply_rename; backfill_hints.py asks history). A failure is logged and left to the backfill."""
+    if not set(c.get("participants") or []) - {"我", "S?"} - media:
+        return
+    try:
+        h = await asyncio.to_thread(hints.hints, c, conversation_rows(c), media)
+    except Exception as e:
+        log.warning("name hints %s failed: %r", c["id"], e)
+        return
+    db.put_name_hints(h)
+    if h["names"]:
+        _speakers["at"] = 0.0
+        note(f"对话 {c['start'][11:19]}：听出 {len(h['names'])} 个称呼，可在对话页确认", "state")
 
 
 def iso(t: dt.datetime) -> str:
@@ -1196,8 +1215,14 @@ async def apply_rename(conv_id: str, frm: str, to: str) -> dict:
     with db.tx() as t:
         t.execute("UPDATE sentences SET speaker = ? WHERE start >= ? AND start <= ? AND speaker = ?", (to, c["start"], c["end"], frm))
         t.execute("UPDATE conversations SET participants = ? WHERE id = ?", (json.dumps(c["participants"], ensure_ascii=False), conv_id))
-        t.execute("UPDATE OR REPLACE voices SET label = ? WHERE conv = ? AND label = ?", (to, conv_id, frm))  # voices and pins follow
+        if t.execute("SELECT 1 FROM voices WHERE conv = ? AND label = ?", (conv_id, to)).fetchone():
+            t.execute("DELETE FROM voices WHERE conv = ? AND label = ?", (conv_id, frm))  # a merge: the label's own voice stays
+        else:
+            t.execute("UPDATE voices SET label = ? WHERE conv = ? AND label = ?", (to, conv_id, frm))  # voices and pins follow
         t.execute("UPDATE OR REPLACE apart SET voice = ? WHERE voice = ?", (f"{conv_id}|{to}", f"{conv_id}|{frm}"))
+        if h := db.name_hints(conv_id).get(conv_id):  # the names it was called go with it
+            h["names"] = [{**x, **{k: to for k in ("who", "by") if x.get(k) == frm}} for x in h["names"]]
+            db.put_name_hints(h, t)
     _speakers["at"] = 0.0
     queue_summary(c, keep=True)
     learnt = 0
@@ -1230,7 +1255,10 @@ ENROLL = 20
 VOICES = DATA / "voices"  # clips/: the history voices' samples
 SPEAKER_LINK = float(os.environ.get("SPEAKER_LINK", "0.5"))  # cosine (device-centred) to join an anonymous group
 SPEAKER_SUGGEST = float(os.environ.get("SPEAKER_SUGGEST", "0.6"))  # cosine to offer an anonymous group to a name
-_speakers = {"at": 0.0, "groups": None}
+# cosine (device-centred) to offer merging two labels of one conversation: in the history's named voices 0.4 % of
+# two people's pairs reach 0.45, and 36 % of one person's (10-05)
+MERGE_SUGGEST = float(os.environ.get("MERGE_SUGGEST", "0.45"))
+_speakers = {"at": 0.0, "groups": None, "vec": {}}
 
 
 def conv_start(conv_id: str) -> str:
@@ -1243,18 +1271,22 @@ def speaker_groups() -> list[dict]:
     if _speakers["groups"] is not None and time.time() - _speakers["at"] < 600:
         return _speakers["groups"]
     convs = {c["id"]: c for c in all_conversations()}
-    out = []
-    for g in speakers.speakers(db.voices(), SPEAKER_LINK, SPEAKER_SUGGEST, db.apart()):
-        out.append({"id": g["id"], "name": g["name"], **describe(g["members"], convs),
-                    "suggested": [{"id": speakers.key(s["members"][0]), "score": s["score"], **describe(s["members"], convs)}
+    al, called = db.aliases(), {}
+    for conv, h in db.name_hints().items():
+        for x in h["names"]:
+            called.setdefault(f"{conv}|{x['who']}", set()).add(hints.canon(x["name"], al))
+    vs, out = db.voices(), []
+    for g in speakers.speakers(vs, SPEAKER_LINK, SPEAKER_SUGGEST, db.apart()):
+        out.append({"id": g["id"], "name": g["name"], **describe(g["members"], convs, called),
+                    "suggested": [{"id": speakers.key(s["members"][0]), "score": s["score"], **describe(s["members"], convs, called)}
                                   for s in g["suggested"]]})
     order = lambda g: (g["name"] is not None, g["name"] == "我", -g["count"])  # unnamed and frequent first, 我 last
     out.sort(key=order)
-    _speakers.update(at=time.time(), groups=out)
+    _speakers.update(at=time.time(), groups=out, vec=speakers.centered(vs))
     return out
 
 
-def describe(members: list[dict], convs: dict) -> dict:
+def describe(members: list[dict], convs: dict, called: dict[str, set[str]]) -> dict:
     ms = []
     for v in members:
         c = convs.get(v["conv"]) or {}
@@ -1265,14 +1297,18 @@ def describe(members: list[dict], convs: dict) -> dict:
                    "title": s.get("title"), "points": pts[:2],
                    "with": [p for p in c.get("participants") or [] if p != v["label"]]})
     ms.sort(key=lambda m: m["start"], reverse=True)
-    co = {}
+    co, names = {}, {}
     for m in ms:
         for p in m["with"]:
             if not speakers.ANON.fullmatch(p):
                 co[p] = co.get(p, 0) + 1
+        for n in called.get(f"{m['conv']}|{m['label']}", ()):
+            names.setdefault(n, []).append(m["conv"])
     return {"count": len(ms), "speech_s": round(sum(m["speech_s"] for m in ms), 1), "last": ms[0]["start"] if ms else None,
             "samples": ms[:: max(1, len(ms) // 4)][:4],  # spread over time: a group that mixes people sounds mixed
-            "co": sorted(co, key=lambda k: -co[k])[:4], "members": ms}
+            "co": sorted(co, key=lambda k: -co[k])[:4], "members": ms,
+            # what its voices were called (hints.py, aliases resolved), in the most conversations first
+            "called": [{"name": n, "convs": cs} for n, cs in sorted(names.items(), key=lambda kv: -len(kv[1]))][:5]}
 
 
 @app.get("/api/speakers")
@@ -1338,6 +1374,89 @@ async def speaker_detach(body: dict):
     return {"key": key}
 
 
+def label_suggestions(c: dict, groups: list[dict], vec: dict, hs: dict | None, al: dict[str, str]) -> dict:
+    """What the page offers for one conversation's labels, each applied only by a click (a rename): names it was called
+    here (hints.py; a named label called by another name offers that name as an alias), two labels to merge (voices
+    alike, or both called the same), and per unnamed label the named speaker its voice is near and the names its
+    voice was called in other conversations."""
+    cid, rows = c["id"], conversation_rows(c)
+    n = {}
+    for r in rows:
+        n[r.get("speaker")] = n.get(r.get("speaker"), 0) + 1
+    labels = [p for p in c["participants"] if p != "S?" and p in n]
+    anon = lambda p: bool(speakers.ANON.fullmatch(p))
+    names = [{**x, "canon": hints.canon(x["name"], al)} for x in (hs or {}).get("names", []) if x["who"] in labels]
+    names = [x for x in names if x["canon"] != x["who"]]  # a name it already has
+    merge, seen = [], set()
+    def offer(a, b, **why):
+        """One person in two labels: the unnamed one into the named one, else the one with fewer rows into the other;
+        two names were told apart by the owner. A label is offered into one other only, the first (most alike)."""
+        if not anon(a) and not anon(b):
+            return
+        frm, to = (a, b) if anon(a) and (not anon(b) or n[a] < n[b]) else (b, a)
+        if frm not in seen:
+            seen.add(frm)
+            merge.append({"from": frm, "to": to, **why})
+    for score, a, b in speakers.close_pairs([f"{cid}|{p}" for p in labels], vec, MERGE_SUGGEST):
+        offer(a.split("|", 1)[1], b.split("|", 1)[1], score=round(score, 2))
+    by_name = {}
+    for x in names:
+        if anon(x["who"]):
+            by_name.setdefault(x["canon"], set()).add(x["who"])
+    for name, ls in by_name.items():
+        ls = sorted(ls, key=lambda p: -n[p])
+        for p in ls[1:]:
+            offer(p, ls[0], name=name)
+    where = {}  # voice key: (its group, the suggestion of a named group it is in)
+    for g in groups:
+        for m in g["members"]:
+            where[f"{m['conv']}|{m['label']}"] = (g, None)
+        for sg in g["suggested"]:
+            for m in sg["members"]:
+                where[f"{m['conv']}|{m['label']}"] = (g, sg)
+    like, elsewhere = [], []
+    for p in filter(anon, labels):
+        g, sg = where.get(f"{cid}|{p}", (None, None))
+        if sg:
+            like.append({"who": p, "name": g["name"], "score": sg["score"]})
+        for x in (sg or g or {}).get("called", []):
+            if len(others := {v for v in x["convs"] if v != cid}) >= 2 and x["name"] != g["name"] and \
+                    not any(y["who"] == p and y["canon"] == x["name"] for y in names):  # one other is too often a mixed group
+                elsewhere.append({"who": p, "name": x["name"], "convs": len(others)})
+    clips = {r[0]: {"clip": r[1], "clip_start": r[2], "clip_end": r[3]} for r in db.conn().execute(
+        "SELECT label, clip, clip_start, clip_end FROM voices WHERE conv = ? AND e IS NOT NULL", (cid,))}  # to hear a label
+    return {"names": names, "merge": merge, "like": like, "elsewhere": elsewhere, "clips": clips, "asked": hs is not None}
+
+
+@app.get("/api/conversation/{conv_id}/speakers")
+async def conversation_speakers(conv_id: str):
+    c = find_conversation(conv_id)
+    if not c:
+        raise HTTPException(404, "no such conversation")
+    groups = await asyncio.to_thread(speaker_groups)
+    return label_suggestions(c, groups, _speakers["vec"], db.name_hints(conv_id).get(conv_id), db.aliases())
+
+
+@app.get("/api/aliases")
+async def alias_list():
+    return db.aliases()
+
+
+@app.post("/api/aliases")
+async def alias_set(body: dict):
+    """Another way a person is called (A哥 for A): hints with it suggest the name. No name drops the alias."""
+    alias, name = (body.get("alias") or "").strip(), (body.get("name") or "").strip()
+    if not alias or len(alias) > 20 or alias == name:
+        raise HTTPException(400, "bad alias")
+    if name:
+        check_name(name)
+        db.conn().execute("INSERT OR REPLACE INTO aliases VALUES (?, ?)", (alias, name))
+    else:
+        db.conn().execute("DELETE FROM aliases WHERE alias = ?", (alias,))
+    _speakers["at"] = 0.0
+    return db.aliases()
+
+
 @app.get("/api/person/{name}")
 async def person(name: str):
     """Everything about one named speaker: their conversations newest first with what they said there, the todos they
@@ -1364,6 +1483,7 @@ async def person(name: str):
         raise HTTPException(404, "no conversation with this name")
     top = lambda d, n: sorted(d, key=lambda k: -d[k])[:n]
     return {"name": name, "count": len(convs), "first": convs[-1]["start"], "last": convs[0]["start"],
+            "aliases": sorted(a for a, n in db.aliases().items() if n == name),
             "with": top(co, 6), "tags": top(tags, 8), "theirs": theirs, "mine": mine, "conversations": out}
 
 

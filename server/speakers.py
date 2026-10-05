@@ -48,6 +48,13 @@ def cluster(voices: list[dict], vec: dict[str, np.ndarray], link: float, apart: 
     return [g[1] for g in groups]
 
 
+def close_pairs(keys: list[str], vec: dict[str, np.ndarray], at: float) -> list[tuple[float, str, str]]:
+    """Pairs of the voices (keys) with a cosine of at least `at`, most alike first; keys without a voice are left out."""
+    ks = [k for k in keys if k in vec]
+    pairs = ((float(vec[a] @ vec[b]), a, b) for i, a in enumerate(ks) for b in ks[i + 1:])
+    return sorted((p for p in pairs if p[0] >= at), reverse=True)
+
+
 def speakers(voices: list[dict], link: float, suggest: float, apart: set[tuple[str, str]]) -> list[dict]:
     """Named groups (with anonymous groups that sound like them as suggestions), then anonymous groups."""
     vec = centered(voices)
@@ -83,4 +90,6 @@ if __name__ == "__main__":
     assert [g["name"] for g in sp if g["name"]] == ["我"]
     two = cluster([vs[2], vs[3]], centered(vs), 0.6, {("c2|S1", "c1|S1")})
     assert len(two) == 2  # a pin keeps them apart
+    pairs = close_pairs(["c3|S2", "c3|S1", "c3|S9"], centered(vs), 0.6)
+    assert pairs == [] and close_pairs(["c1|S1", "c2|S1", "c1|我"], centered(vs), 0.6)[0][1:] == ("c1|S1", "c2|S1")
     print("ok")

@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS voices (           -- one label of one conversation; 
     clip TEXT, clip_start TEXT, clip_end TEXT, clip_text TEXT, UNIQUE (conv, label));
 CREATE TABLE IF NOT EXISTS apart (voice TEXT NOT NULL, grp TEXT NOT NULL, PRIMARY KEY (voice, grp));
 CREATE TABLE IF NOT EXISTS people (name TEXT PRIMARY KEY, n INTEGER NOT NULL, e BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS aliases (alias TEXT PRIMARY KEY, name TEXT NOT NULL);  -- another way a person is called (A哥 = A)
+CREATE TABLE IF NOT EXISTS name_hints (conv TEXT PRIMARY KEY, body TEXT NOT NULL);  -- hints.py: what each label was called; suggestions only
 CREATE TABLE IF NOT EXISTS pieces (           -- uploaded audio pieces, the ingest queue; size bytes at pos of path (the
     device TEXT NOT NULL, start_ms INTEGER NOT NULL, seconds REAL NOT NULL, path TEXT NOT NULL,  -- hour file, relative
     pos INTEGER, size INTEGER, n INTEGER, PRIMARY KEY (start_ms, device));                      -- to the recordings dir;
@@ -223,7 +225,7 @@ def add_feedback(conv_id: str, text: str):
     conn().execute("INSERT INTO feedback VALUES (?, ?, ?)", (conv_id, dt.datetime.now().isoformat(timespec="seconds"), text))
 
 
-# voices, apart pins, people bank
+# voices, apart pins, people bank, aliases, name hints
 
 V_COLS = ("conv", "label", "device", "n", "speech_s", "k", "e", "clip", "clip_start", "clip_end", "clip_text")
 
@@ -248,6 +250,20 @@ def apart() -> set[tuple[str, str]]:
 
 def people() -> dict[str, tuple[int, np.ndarray]]:
     return {r["name"]: (r["n"], vec(r["e"])) for r in conn().execute("SELECT * FROM people")}
+
+
+def aliases() -> dict[str, str]:
+    return {r[0]: r[1] for r in conn().execute("SELECT alias, name FROM aliases")}
+
+
+def name_hints(conv_id: str | None = None) -> dict[str, dict]:
+    """By conversation: one's, or every one's."""
+    q = "SELECT conv, body FROM name_hints" + (" WHERE conv = ?" if conv_id else "")
+    return {r[0]: json.loads(r[1]) for r in conn().execute(q, (conv_id,) if conv_id else ())}
+
+
+def put_name_hints(h: dict, c: sqlite3.Connection | None = None):
+    (c or conn()).execute("INSERT OR REPLACE INTO name_hints VALUES (?, ?)", (h["conv"], json.dumps(h, ensure_ascii=False)))
 
 
 # pieces and state
