@@ -17,8 +17,11 @@
 # 2 min: the real app loses its recorder meanwhile (the recorder records to its card, the app catches up after).
 # Env: LR_DEVICE (the iPhone), LR_NAME (the recorder, default LR-P1-BDAE), LOCK=1 (background: the lock button instead
 # of home; the phone then needs a second unlock). Needs Xcode, flutter, ffmpeg, cloudflared, uv; LR-P1 not held by
-# another phone, its card backlog cleared, this Mac without a bond to it.
+# another phone, its card backlog cleared, this Mac without a bond to it. The UI tests build and run with XCODE_UI
+# (default Xcode 27: the iPhone runs iOS 27, which Xcode 26.6's XCTest cannot drive, 10-05); everything else uses the
+# selected Xcode.
 set -uo pipefail
+XCODE_UI=${XCODE_UI:-/Applications/Xcode-27.app/Contents/Developer}
 cd "$(dirname "$0")"
 E=$PWD
 W=${TMPDIR:-/tmp}/lr-uitest; R=$W/$(date +%m%d-%H%M); mkdir -p "$R"
@@ -46,7 +49,7 @@ N=0
 ui() {  # one test of RunnerUITests (testLaunch: ui Launch), VAR=value for it; its LRUI lines into run.log
   local t=$1; shift; local vars=(TEST_RUNNER_LR_NAME="$NAME"); for v in "$@"; do vars+=("TEST_RUNNER_$v"); done
   unlocked; N=$((N + 1))
-  env "${vars[@]}" xcodebuild test-without-building -xctestrun "$(ls "$W"/dd/Build/Products/*iphoneos*.xctestrun)" \
+  env "${vars[@]}" DEVELOPER_DIR="$XCODE_UI" xcodebuild test-without-building -xctestrun "$(ls "$W"/dd/Build/Products/*iphoneos*.xctestrun)" \
     -destination "id=$DEV" -only-testing:"RunnerUITests/Flow/test$t" -resultBundlePath "$R/$N-$t.xcresult" > "$R/$N-$t.log" 2>&1 &
   local x=$!; (sleep 900; kill $x 2>/dev/null) & local d=$!  # xcodebuild waits on for a runner that went away (10-05)
   wait $x; local rc=$?; kill $d 2>/dev/null
@@ -86,7 +89,7 @@ step_setup() {  # build/install if asked, server + tunnel, adverts watched (or t
     [ "$id" = $APP ] || { verdict setup FAIL "built $id, not $APP: not installed"; exit 1; }  # never over the real app
     xcrun devicectl device install app --device "$DEV" ../../build/ios/iphoneos/Runner.app >> "$R/build.log" 2>&1 \
       || { verdict setup FAIL "install (build.log)"; exit 1; }
-    xcodebuild build-for-testing -project ../Runner.xcodeproj -scheme RunnerUITests -destination generic/platform=iOS \
+    DEVELOPER_DIR="$XCODE_UI" xcodebuild build-for-testing -project ../Runner.xcodeproj -scheme RunnerUITests -destination generic/platform=iOS \
       -derivedDataPath "$W/dd" -allowProvisioningUpdates >> "$R/build.log" 2>&1 || { verdict setup FAIL "UI test build (build.log)"; exit 1; }
   fi
   ls "$W"/dd/Build/Products/*iphoneos*.xctestrun >/dev/null 2>&1 || { verdict setup FAIL "no UI test build: --build"; exit 1; }
