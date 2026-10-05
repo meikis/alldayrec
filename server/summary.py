@@ -10,7 +10,8 @@ import os
 import urllib.request
 
 MIN_SPEECH_S = 60
-PROMPT_VERSION = 6  # 2: tags, 3: people, 4: speech to AI told apart from speech to people, 5: media played aloud, 6: no "there was none" lines, fewer people
+PROMPT_VERSION = 7  # 2: tags, 3: people, 4: speech to AI told apart from speech to people, 5: media played aloud, 6: no "there was none" lines, fewer people,
+                    # 7: a todo's owner is who does it (not who said it), what I tell an AI is never a todo
 SYSTEM = """你在整理一段现场录音转写出来的对话。每行是「[时间] 说话人: 文本」。说话人标签来自声纹聚类：「我」是录音者本人，S1、S2… 是其他人，同一个人可能被拆成多个标签，S? 是太短没认出来的句子。转写有错别字和同音误识别，按意图理解。
 「我」说的话有两种听众，先分清再整理：
 - 对人：说给在场或线上的人听，有来有回，别人会接话、回应、提问
@@ -26,12 +27,14 @@ SYSTEM = """你在整理一段现场录音转写出来的对话。每行是「[�
  "tags": ["2~5 个标签：这段对话和什么相关（项目、领域、活动、人际场合），优先沿用已有标签"],
  "topics": [{"title": "议题", "points": ["要点"], "at": "议题开始那一行的时间 HH:MM:SS"}],
  "ai_requests": [{"text": "我让 AI 做的事", "at": "原句那一行的时间 HH:MM:SS"}],
- "todos": [{"owner": "我 | S1 | 未知", "to": "答应给谁或替谁做，写说话人标签；不是对人的就写 null", "text": "要做的事", "due": "原话里的时间，没有写 null", "quote": "依据的原句", "at": "原句那一行的时间 HH:MM:SS"}],
+ "todos": [{"owner": "去做这件事的人：我 | S1 | 未知", "to": "答应给谁或替谁做，写说话人标签；不是对人的就写 null", "text": "要做的事", "due": "原话里的时间，没有写 null", "quote": "依据的原句", "at": "原句那一行的时间 HH:MM:SS"}],
  "decisions": [{"text": "定下来的事", "quote": "依据的原句", "at": "原句那一行的时间 HH:MM:SS"}]}
 ai_spans 是我对 AI 说话的连续时间段（第一句和最后一句的时间）。段内只能是我对 AI 说的话：中间夹着别人说话、或我对人说的短句（嗯、对、这个、你让他们上去吧），就在那里断开分成两段；没有就给空数组。
 media_spans 是外放媒体的连续时间段（第一句和最后一句的时间）：中间夹着在场的人说话（包括我对媒体内容的点评），就在那里断开分成两段；没有就给空数组。
 媒体里的话不是任何在场的人说的：不进 people、todos、decisions、topics，不要写成「我」说的或做的；summary 里一句带过在看或听什么（整段都是媒体时，就写在看或听什么、大致讲了什么）。
 对 AI 说的话只进 ai_requests，不进 todos、decisions、people；summary 里一句带过我在让 AI 做什么即可。todos 只收人要做的事：我答应别人的、别人答应的、别人要我做的、我自己说要做的。
+todos 的 owner 是要去做这件事的人，不是说这句话的人：别人要我做的事（我答应了，或者没有拒绝），owner 是「我」、to 是对方；我让在场的 S1 去做的事，owner 是 S1、to 是「我」。
+我对 AI 助手的吩咐（帮我查、改、跑、开分支、合并、部署、派人去调研……）说得再像吩咐人，也只进 ai_requests，不是任何人的待办。这种话前后没有人用人的口吻接话，常常是一个人连着说一长段；我的声音有时会被认成 S1 这样的别的标签，同样按对 AI 处理。
 people 只列在这段里说了实质内容的标签（观点、信息、经历、提问、表态），「我」在最前；S?、只有附和的、只说了一两句零碎话（问一句、喊人、接一句玩笑、递东西）的都不列。人多的闲聊挑主要说话的几个，一般不超过 8 个。按这个人自己的话写，不要写成别人对他的评价。
 summary 只写这段里有的事：没有媒体、没有对 AI 说话、没有待办时不要提「没有」。
 没有就给空数组，不编造原文里没有的内容。"""
