@@ -174,6 +174,26 @@ def conversations(lo: str | None = None, hi: str | None = None) -> list[dict]:
             for r in conn().execute(q + (" ORDER BY c.start" if lo else " ORDER BY c.start DESC"), args)]
 
 
+def search(q: str = "", tag: str = "", kind: str = "", who: str = "", after: str = "", before: str = "", limit: int = 30) -> list[dict]:
+    """Closed conversations newest first, filtered by a tag and by words in the title, summary, tags or todos (and in
+    the transcript when the summary does not match), by a participant, a kind, and by start time in [after, before)."""
+    out = []
+    for c in conversations():
+        s = c["summary"] or {}
+        if after and c["start"] < after:
+            break
+        if before and c["start"] >= before or who and who not in (c.get("participants") or []) or tag and tag not in (s.get("tags") or []) or kind and c.get("kind", "对话") != kind:
+            continue
+        if q:
+            meta = json.dumps([s.get(k) for k in ("title", "summary", "tags", "todos", "decisions")], ensure_ascii=False)
+            if q.lower() not in meta.lower() and not has_text(c["start"], c["end"], q, c.get("device")):
+                continue
+        out.append(c)
+        if len(out) == limit:
+            break
+    return out
+
+
 def summary(conv_id: str) -> dict | None:
     r = conn().execute("SELECT body FROM summaries WHERE conversation = ?", (conv_id,)).fetchone()
     return json.loads(r["body"]) if r else None

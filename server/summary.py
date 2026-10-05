@@ -42,13 +42,18 @@ def transcript(rows: list[dict]) -> str:
     return "\n".join(f'[{r["start"][11:19]}] {r.get("speaker") or "S?"}: {r["text"]}' for r in rows if r.get("text"))
 
 
-def complete(messages: list[dict], timeout: int = 300) -> tuple[dict, dict]:
-    """One chat call answering a JSON object: (parsed reply, raw response); raises on HTTP errors and on a reply that is not JSON."""
-    req = {"model": os.environ["LLM_MODEL"], "response_format": {"type": "json_object"}, "messages": messages}
+def call(messages: list[dict], timeout: int = 300, **extra) -> dict:
+    """One chat call, extra fields as they are (tools, response_format): the raw response; raises on HTTP errors."""
+    req = {"model": os.environ["LLM_MODEL"], "messages": messages, **extra}
     r = urllib.request.urlopen(urllib.request.Request(
         os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions", json.dumps(req).encode(),
         {"Authorization": f'Bearer {os.environ["LLM_API_KEY"]}', "Content-Type": "application/json"}), timeout=timeout)
-    raw = json.load(r)
+    return json.load(r)
+
+
+def complete(messages: list[dict], timeout: int = 300) -> tuple[dict, dict]:
+    """One chat call answering a JSON object: (parsed reply, raw response); raises on HTTP errors and on a reply that is not JSON."""
+    raw = call(messages, timeout, response_format={"type": "json_object"})
     return json.loads(raw["choices"][0]["message"]["content"]), raw
 
 

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, useTemplateRef, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppHeader from "../components/AppHeader.vue";
 import DayPicker from "../components/DayPicker.vue";
-import { get, hhmm, minutes, MOSTLY_MEDIA, type Conversation, type Status } from "../lib/api";
+import { get, hhmm, minutes, MOSTLY_MEDIA, post, type Conversation, type Status } from "../lib/api";
 import { shiftDay, today } from "../lib/calendar";
 import { useSocket } from "../lib/socket";
 
@@ -26,6 +26,48 @@ const loading = ref(false),
   done = ref(false);
 const more = useTemplateRef<HTMLElement>("more");
 let seq = 0;
+
+// 问 AI: the words in the search box as a question (POST /api/ask, 10-30 s); [c…] in the answer link to the conversation.
+// The answer is kept for the tab: back from a cited conversation it is still there
+interface Reply {
+  answer: string;
+  sources: { id: string; start: string; title?: string | null }[];
+  calls: unknown[];
+  secs: number;
+}
+const kept = () => {
+  try {
+    return JSON.parse(sessionStorage.getItem("ask") ?? "null") as Reply | null;
+  } catch {
+    return null;
+  }
+};
+const reply = ref<Reply | null>(kept()),
+  asking = ref(false),
+  askErr = ref("");
+watch(reply, (r) => {
+  try {
+    sessionStorage.setItem("ask", JSON.stringify(r));
+  } catch {}
+});
+async function askAI() {
+  asking.value = true;
+  askErr.value = "";
+  const t0 = Date.now();
+  try {
+    const r = await post<Reply>("/api/ask", { q: q.value });
+    reply.value = { ...r, secs: Math.round((Date.now() - t0) / 1000) };
+  } catch (e) {
+    askErr.value = String((e as Error).message ?? e);
+  }
+  asking.value = false;
+}
+const answer = computed(() => {
+  const by = new Map((reply.value?.sources ?? []).map((s) => [s.id, s]));
+  return (reply.value?.answer ?? "")
+    .split(/(c\d{14}(?:-[A-Za-z0-9_]+)?)/)
+    .map((t) => ({ t, s: by.get(t) ?? by.get(t.split("-")[0]) }));
+});
 
 const search = (before: string) =>
   get<Conversation[]>("/api/search", {
@@ -126,7 +168,10 @@ useSocket((m) => {
       <DayPicker :day="seen || day || today()" @pick="pick">
         <RouterLink class="cal" to="/calendar">日历</RouterLink>
       </DayPicker>
-      <input v-model.trim="q" type="search" placeholder="搜索标题、摘要、待办、原文" />
+      <div class="q">
+        <input v-model.trim="q" type="search" placeholder="搜索标题、摘要、待办、原文，或者问 AI" />
+        <button :disabled="!q || asking" @click="askAI">问 AI</button>
+      </div>
       <div class="kinds">
         <button
           v-for="[k, label] in [
@@ -151,6 +196,32 @@ useSocket((m) => {
         >
           {{ t }} {{ n }}
         </button>
+      </div>
+    </div>
+    <div v-if="asking || reply || askErr" class="card ask">
+      <div class="meta">
+        问 AI<template v-if="!asking && reply">
+          · 查了 {{ reply.calls.length }} 次 · {{ reply.secs }} 秒</template
+        >
+        <button
+          class="x"
+          @click="
+            reply = null;
+            askErr = '';
+          "
+        >
+          ×
+        </button>
+      </div>
+      <div v-if="asking" class="muted">正在查……一般要 10~30 秒</div>
+      <div v-else-if="askErr" class="bad">{{ askErr }}</div>
+      <div v-else class="answer">
+        <template v-for="(p, i) in answer" :key="i"
+          ><RouterLink v-if="p.s" :to="'/c/' + p.s.id" :title="p.s.title ?? ''">{{
+            p.s.start.slice(5, 16).replace("T", " ")
+          }}</RouterLink
+          ><template v-else>{{ p.t }}</template></template
+        >
       </div>
     </div>
     <div v-if="open" class="card open">
@@ -195,7 +266,7 @@ useSocket((m) => {
         </template>
       </RouterLink>
     </template>
-    <div v-if="done && !items.length && !open" class="empty">
+    <div v-if="done && !items.length && !open && !reply && !asking" class="empty">
       {{ q || tag ? "没有匹配的对话" : "还没有对话" }}
     </div>
     <button v-show="!done" ref="more" class="more" @click="page">
@@ -216,9 +287,17 @@ useSocket((m) => {
   margin-left: auto;
   font-size: 13px;
 }
-.find input {
+.q {
+  display: flex;
+  gap: 6px;
   margin-top: 8px;
-  width: 100%;
+}
+.q button {
+  white-space: nowrap;
+}
+.find input {
+  flex: 1;
+  min-width: 0;
   font: inherit;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -270,6 +349,19 @@ useSocket((m) => {
 }
 a.card:hover {
   border-color: var(--accent);
+}
+.card.ask {
+  border-color: var(--accent);
+}
+.ask .x {
+  float: right;
+  border: 0;
+  padding: 0 4px;
+  line-height: 1;
+}
+.answer {
+  white-space: pre-wrap;
+  margin-top: 4px;
 }
 .card.open {
   border-style: dashed;
