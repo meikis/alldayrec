@@ -37,6 +37,13 @@
  *    22 HEARTBEAT   x battery mV / 20, a free card KB, b frames dropped this boot (every 10 min)
  *    23 STACKS      a codec << 16 | pusher, b store << 16 | BT RX: bytes of stack never used (0xFFFF: no thread)
  *    24 SD_RESET    a R1 to CMD12, b R1 to CMD0 (0x01: idle) of the SPI reset before the first mount
+ *    25 SD_WRITES   the card appends of the last 10 minutes, by the first append after them: x how many took over
+ *                   200 ms (each a SLOW too), a ms all took (bits 0-19) | the slowest's ms << 20, b how many took
+ *                   under 20 ms | 20-49 ms << 10 | 50-200 ms << 20; every field saturates
+ *    26 READ        a READ's end (one that sent anything): x connection interval then (1.25 ms, 255: longer),
+ *                   a bytes sent, b ms it took (bits 0-21) | bytes a DATA notification carries << 22
+ *    27 READ_TIME   that READ's ms on the card (a: open, seek, fs_read) and in notify (b: sending, waiting for a TX
+ *                   buffer); the rest of READ's ms is the SD mutex (recording's appends) and the open file's write-out
  *
  * Each record has a sequence number, one more than the last, across boots: a reader asks for those from the last
  * it has. Records gather in RAM (__noinit: a crash or watchdog reset keeps them for the next boot) and go to flash
@@ -48,7 +55,7 @@
 enum {
     LR_BOOT = 1, LR_FAULT, LR_MOUNT, LR_STORE, LR_SLOW, LR_APPEND_ERR, LR_CARD_FULL, LR_USB_DISK, LR_CONNECT,
     LR_DISCONNECT, LR_PARAM, LR_MTU, LR_PHY, LR_TIME, LR_SECURITY, LR_PAIRED, LR_PAIR_FAIL, LR_FORGET, LR_DROPPED,
-    LR_SEGMENT, LR_DFU, LR_HEARTBEAT, LR_STACKS, LR_SD_RESET,
+    LR_SEGMENT, LR_DFU, LR_HEARTBEAT, LR_STACKS, LR_SD_RESET, LR_SD_WRITES, LR_READ, LR_READ_TIME,
     LR_UPTIME = 0x80,
 };
 

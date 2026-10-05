@@ -1,5 +1,6 @@
 // Host check of the record stream in src/lr_store.c: what a following phone gets (LIVE) and what the card gets are the
-// same bytes at the same file and offset, through batches, 'T' records, frame gaps and a card that stops taking writes.
+// same bytes at the same file and offset, through batches, 'T' records, frame gaps and a card that stops taking writes;
+// the timing events (SD_WRITES, READ, READ_TIME) on a fake clock.
 //   d=$(mktemp -d) && mkdir -p $d/zephyr/{bluetooth,fs,sys,logging,drivers,random} && for h in bluetooth/conn \
 //   bluetooth/gatt bluetooth/uuid fs/fs kernel logging/log sys/byteorder drivers/sensor random/random; do
 //   touch $d/zephyr/$h.h; done && cc -O1 -w -I$d -o $d/store_check test/store_check.c && $d/store_check
@@ -29,6 +30,7 @@
 #define K_SECONDS(x) (x)
 #define K_PRIO_PREEMPT(x) (x)
 #define K_MSGQ_DEFINE(name, ...) static int name
+#define K_WORK_DELAYABLE_DEFINE(name, fn) int name  // after "static"
 #define K_THREAD_STACK_DEFINE(name, n) static char name[n]
 #define K_THREAD_STACK_SIZEOF(s) sizeof(s)
 #define BT_GATT_SERVICE_DEFINE(name, ...) static struct bt_gatt_attr name##_attrs[12]; static struct { struct bt_gatt_attr *attrs; } name = {name##_attrs}
@@ -51,6 +53,8 @@ struct k_mutex { int x; };
 struct sensor_value { int v; };
 struct k_thread { int x; };
 struct bt_conn { int x; };
+struct bt_conn_info { struct { uint16_t interval; } le; };
+struct k_work { int x; };
 struct bt_gatt_attr { int x; };
 typedef struct { uint8_t a; } bt_addr_le_t;
 struct bt_bond_info { bt_addr_le_t addr; };
@@ -75,7 +79,11 @@ static int k_msgq_get(int *q, void *c, int t) { return -1; }
 static int k_msgq_num_used_get(int *q) { return 0; }
 static void k_sleep(int t) {}
 static uint32_t sys_rand32_get(void) { return 0x1234; }
-static int64_t k_uptime_get(void) { return 0; }
+static int64_t now_ms;  // the clock: card writes, card reads and notifications take time
+static int write_ms, read_ms, notify_ms;
+static int64_t k_uptime_get(void) { return now_ms; }
+static void k_work_cancel_delayable(int *w) {}
+static void k_work_reschedule(int *w, int d) {}
 static void k_thread_create(struct k_thread *t, char *s, size_t n, k_thread_entry_t e, void *a, void *b, void *c, int p, int o, int d) {}
 static struct bt_conn the_conn;
 struct bt_conn *get_current_connection(void) { return &the_conn; }
@@ -83,6 +91,7 @@ static struct bt_conn *bt_conn_ref(struct bt_conn *c) { return c; }
 static void bt_conn_unref(struct bt_conn *c) {}
 static int bt_conn_le_param_update(struct bt_conn *c, int p) { return 0; }
 static int bt_conn_le_phy_update(struct bt_conn *c, int p) { return 0; }
+static int bt_conn_get_info(struct bt_conn *c, struct bt_conn_info *i) { i->le.interval = 12; return 0; }
 static const bt_addr_le_t *bt_conn_get_dst(struct bt_conn *c) { return 0; }
 static bool bt_addr_le_eq(const bt_addr_le_t *a, const bt_addr_le_t *b) { return true; }
 static int bt_unpair(int id, const bt_addr_le_t *a) { return 0; }
@@ -99,7 +108,14 @@ void usb_reattach(void) {}
 int mount_sd_card(void) { return 0; }
 static int mounts;  // tries of the card again (retry_card)
 int mount_sd_card_once(void) { mounts++; return 0; }
-void lr_log(uint8_t code, uint8_t x, uint32_t a, uint32_t b) {}
+static struct { uint8_t code, x; uint32_t a, b; } logged[16];
+static int n_logged;
+void lr_log(uint8_t code, uint8_t x, uint32_t a, uint32_t b)
+{
+    if (n_logged < 16) {
+        logged[n_logged].code = code, logged[n_logged].x = x, logged[n_logged].a = a, logged[n_logged++].b = b;
+    }
+}
 uint32_t lr_log_read(uint32_t from, uint8_t *buf, uint16_t max, bool (*send)(uint32_t, uint16_t, void *), void *arg) { return 0; }
 void unmount_sd_card(void) {}
 
@@ -107,11 +123,23 @@ void unmount_sd_card(void) {}
 #define FILES 8
 static uint8_t phone[FILES][1 << 16];
 static uint32_t phone_len[FILES];
+static const struct bt_gatt_attr *data_attr, *ctrl_attr;  // READ's: DATA offset:u32 bytes..., CTRL replies
+static uint32_t data_next;                                // the offset the next DATA notification must have
 static int bt_gatt_notify(struct bt_conn *c, const struct bt_gatt_attr *a, const void *data, uint16_t len)
 {
     const uint8_t *p = data;
+    assert(len <= bt_gatt_get_mtu(c) - 3);
+    if (a == ctrl_attr) {
+        return 0;
+    }
+    if (a == data_attr) {
+        assert(sys_get_le32(p) == data_next);
+        data_next += len - 4;
+        now_ms += notify_ms;
+        return 0;
+    }
     uint32_t file = sys_get_le32(p) & 0xffff, off = sys_get_le32(p + 4);
-    assert(len <= bt_gatt_get_mtu(c) - 3 && file < FILES);
+    assert(file < FILES);
     assert(off == phone_len[file]);  // the stream has no holes while the phone follows
     memcpy(phone[file] + off, p + 8, len - 8);
     phone_len[file] = off + len - 8;
@@ -134,10 +162,18 @@ static ssize_t fs_write(struct fs_file_t *f, const void *d, size_t n)
         memcpy(card[f->f] + card_len[f->f], d, n);
         card_len[f->f] += n;
     }
+    now_ms += write_ms;
     return n;
 }
-static ssize_t fs_read(struct fs_file_t *f, void *d, size_t n) { return 0; }
-static int fs_seek(struct fs_file_t *f, long o, int w) { return 0; }
+static ssize_t fs_read(struct fs_file_t *f, void *d, size_t n)
+{
+    n = MIN(n, card_len[f->f] - f->pos);
+    memcpy(d, card[f->f] + f->pos, n);
+    f->pos += n;
+    now_ms += read_ms;
+    return n;
+}
+static int fs_seek(struct fs_file_t *f, long o, int w) { f->pos = o; return 0; }
 static int fs_sync(struct fs_file_t *f) { return -EIO; }  // as NCS 2.7 does
 static void fs_file_t_init(struct fs_file_t *f) {}
 static void fs_dir_t_init(struct fs_dir_t *d) {}
@@ -239,6 +275,44 @@ int main(void)
     frames(2833, 100);
     flush();
     assert(card_len[2] > phone_len[2]);
+
+    // card appends over 10 minutes, one SD_WRITES: x over 200 ms, a total | slowest << 20, b <20 | 20-49 << 10 | 50-200 << 20
+    memset(&wr, 0, sizeof(wr));
+    wr.start = now_ms = 1000;
+    n_logged = 0;
+    int took[] = {5, 5, 19, 20, 49, 50, 200, 250};
+    for (int i = 0; i < ARRAY_SIZE(took); i++) {
+        write_ms = took[i];
+        assert(append("x", 1) == 0);
+    }
+    assert(n_logged == 1 && logged[0].code == LR_SLOW && logged[0].a == 250);
+    now_ms = 1000 + 10 * 60 * 1000;
+    write_ms = 3;
+    assert(append("x", 1) == 0);
+    assert(n_logged == 2 && logged[1].code == LR_SD_WRITES && logged[1].x == 1);
+    assert(logged[1].a == (601 | 250 << 20) && logged[1].b == (4 | 2 << 10 | 2 << 20));
+    assert(wr.start == now_ms && wr.ms == 0);
+    write_ms = 0;
+
+    // a READ of a finished file from offset 100: READ (interval, bytes, ms | payload << 22) and READ_TIME (card, notify)
+    data_attr = DATA_ATTR;
+    ctrl_attr = CTRL_ATTR;
+    n_logged = 0;
+    read_ms = 7, notify_ms = 2;
+    data_next = 100;
+    int64_t t0 = now_ms;
+    send_file(&the_conn, 1 << 16, 100);
+    uint32_t bytes = card_len[0] - 100, payload = 185 - 3 - 4;
+    uint32_t reads = (bytes + CHUNK - 1) / CHUNK + 1, sends = 0;  // the last read finds the end
+    for (uint32_t off = 0; off < bytes; off += CHUNK) {
+        sends += (MIN(CHUNK, bytes - off) + payload - 1) / payload;
+    }
+    assert(data_next == card_len[0] && n_logged == 2);
+    assert(logged[0].code == LR_READ && logged[0].x == 12 && logged[0].a == bytes);
+    assert(logged[0].b == ((now_ms - t0) | payload << 22) && now_ms - t0 == reads * 7 + sends * 2);
+    assert(logged[1].code == LR_READ_TIME && logged[1].a == reads * 7 && logged[1].b == sends * 2);
+    send_file(&the_conn, 1 << 16, card_len[0]);  // nothing to send: no event
+    assert(n_logged == 2);
     printf("store_check ok: %u + %u + %u B on the card\n", card_len[0], card_len[1], card_len[2]);
     return 0;
 }

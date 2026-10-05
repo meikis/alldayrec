@@ -275,6 +275,18 @@ def stack(v):
     return "-" if v == 0xFFFF else str(v)
 
 
+def sd_writes(x, a, b):
+    n = [b & 0x3FF, b >> 10 & 0x3FF, b >> 20 & 0x3FF, x]
+    return (f"{sum(n)} appends, {a & 0xFFFFF} ms in all, slowest {a >> 20} ms; "
+            f"under 20 ms {n[0]}, 20-49 ms {n[1]}, 50-200 ms {n[2]}, over 200 ms {n[3]}")
+
+
+def read_done(x, a, b):
+    ms = b & 0x3FFFFF
+    return (f"{a / 1024:.1f} KB in {ms / 1000:.1f} s ({a / 1024 / max(ms, 1) * 1000:.1f} KB/s), "
+            f"{b >> 22} B a packet, interval {x * 1.25:g} ms")
+
+
 EVENTS = {
     1: ("BOOT", lambda x, a, b: f"reset {reas(a)} (0x{a:x}), battery {x * 20} mV, fw {b & 0xFFFFFFF:07x}{'+' * (b >> 28 & 1)}"),
     2: ("FAULT", lambda x, a, b: f"{FAULT[a] if a < len(FAULT) else a}, PC 0x{b:08x} (previous boot)"),
@@ -301,6 +313,9 @@ EVENTS = {
     23: ("STACKS", lambda x, a, b: f"unused: codec {stack(a >> 16)}, pusher {stack(a & 0xFFFF)}, "
                                    f"store {stack(b >> 16)}, BT RX {stack(b & 0xFFFF)} B"),
     24: ("SD_RESET", lambda x, a, b: f"CMD12 r1 0x{a:02x}, CMD0 r1 0x{b:02x}" + (" (idle)" if b == 1 else " (no idle: card not answering)")),
+    25: ("SD_WRITES", sd_writes),
+    26: ("READ", read_done),
+    27: ("READ_TIME", lambda x, a, b: f"card {a} ms, notify {b} ms"),
 }
 
 
@@ -388,6 +403,11 @@ def selftest():
         (5004, when(1_700_000_000_000), 8, "TIME", when(1_700_000_000_000)),
         (5005, when(1_700_000_010_000), 8, "DISCONNECT", "0x13 remote user terminated"),
         (5006, when(1_700_000_011_000), 8, "0x63", "x 1 a 2 b 3")], got
+    assert EVENTS[25][1](1, 601 | 250 << 20, 4 | 2 << 10 | 2 << 20) == \
+        "9 appends, 601 ms in all, slowest 250 ms; under 20 ms 4, 20-49 ms 2, 50-200 ms 2, over 200 ms 1"
+    assert EVENTS[26][1](12, 409600, 10000 | 491 << 22) == \
+        "400.0 KB in 10.0 s (40.0 KB/s), 491 B a packet, interval 15 ms"
+    assert EVENTS[27][1](0, 3000, 6500) == "card 3000 ms, notify 6500 ms"
     print("selftest ok")
 
 

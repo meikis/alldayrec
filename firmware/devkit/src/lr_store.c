@@ -88,6 +88,26 @@ static void close_segment(void)
 
 static bool append_failed;  // only the first failure of a run goes to the event log
 
+/* Appends summed up for 10 minutes into one SD_WRITES event: how long the card keeps the chip busy (power, #95) */
+static struct {
+    int64_t start;
+    uint32_t ms, max, n[4];  // under 20 ms, 20-49, 50-200, over 200
+} wr;
+
+static void count_write(uint32_t ms)
+{
+    wr.ms += ms;
+    wr.max = MAX(wr.max, ms);
+    wr.n[ms < 20 ? 0 : ms < 50 ? 1 : ms <= 200 ? 2 : 3]++;
+    int64_t now = k_uptime_get();
+    if (now - wr.start >= 10 * 60 * 1000) {
+        lr_log(LR_SD_WRITES, MIN(wr.n[3], 0xFF), MIN(wr.ms, 0xFFFFF) | MIN(wr.max, 0xFFF) << 20,
+               MIN(wr.n[0], 0x3FF) | MIN(wr.n[1], 0x3FF) << 10 | MIN(wr.n[2], 0x3FF) << 20);
+        memset(&wr, 0, sizeof(wr));
+        wr.start = now;
+    }
+}
+
 /* The next segment, if this one has anything. A file on the card is always the start of the stream's file of that
  * name: after bytes the card did not take (no card, full, lent, a failed write) it goes on in a new one. */
 static void restart_segment(void)
@@ -126,6 +146,7 @@ static int append(const void *data, uint32_t len)
         if (ms > 200) {
             lr_log(LR_SLOW, 0, ms, len);
         }
+        count_write(ms);
         if (n > 0) {
             free_kb -= MIN(free_kb, DIV_ROUND_UP(n, 1024));
         }
@@ -461,12 +482,15 @@ static void link_slow(struct k_work *work)
 }
 static K_WORK_DELAYABLE_DEFINE(slow_work, link_slow);
 
-/* Send one file from offset; a newer command (STOP, another READ) ends it early. */
+/* Send one file from offset; a newer command (STOP, another READ) ends it early. Where the time went: READ and
+ * READ_TIME events (lr_log.h). */
 static void send_file(struct bt_conn *conn, uint32_t file, uint32_t off)
 {
     char p[32];
     struct fs_file_t f;
     fs_file_t_init(&f);
+    int64_t t0 = k_uptime_get(), t;
+    uint32_t from = off, card_ms = 0, send_ms = 0;
     k_work_cancel_delayable(&slow_work);
     link_fast(conn);
     uint16_t payload = MIN(bt_gatt_get_mtu(conn) - 3 - 4, sizeof(pkt) - 4);
@@ -479,24 +503,30 @@ static void send_file(struct bt_conn *conn, uint32_t file, uint32_t off)
     }
     // opened once and read on: an open per chunk looked the name up again and its seek walked the cluster chain from
     // the file's start, slower the further in
+    t = k_uptime_get();
     int n = fs_open(&f, file_path(p, file), FS_O_READ);
     bool opened = !n;
     n = n ?: fs_seek(&f, off, FS_SEEK_SET);
+    card_ms += k_uptime_get() - t;
     k_mutex_unlock(&write_sdcard_mutex);
     while (!n && ok && off < end && !k_msgq_num_used_get(&cmds)) {
         k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+        t = k_uptime_get();
         int got = fs_read(&f, chunk, MIN(CHUNK, end - off));
+        card_ms += k_uptime_get() - t;
         k_mutex_unlock(&write_sdcard_mutex);
         if (got <= 0) {
             break;  // the end (or a read error: the phone sees where it stopped)
         }
         link_fast(conn);
+        t = k_uptime_get();
         for (int i = 0; ok && i < got; i += payload) {
             uint16_t m = MIN(payload, got - i);
             sys_put_le32(off + i, pkt);
             memcpy(pkt + 4, chunk + i, m);
             ok = notify(conn, DATA_ATTR, pkt, 4 + m);
         }
+        send_ms += k_uptime_get() - t;
         off += got;
     }
     if (opened) {
@@ -506,6 +536,13 @@ static void send_file(struct bt_conn *conn, uint32_t file, uint32_t off)
     }
     if (ok) {
         reply(conn, 0x82, file, off, 4);
+    }
+    if (off > from) {
+        struct bt_conn_info info = {0};
+        bt_conn_get_info(conn, &info);
+        lr_log(LR_READ, MIN(info.le.interval, 0xFF), off - from,
+               MIN(k_uptime_get() - t0, 0x3FFFFF) | (uint32_t) payload << 22);
+        lr_log(LR_READ_TIME, 0, card_ms, send_ms);
     }
     k_work_reschedule(&slow_work, K_SECONDS(5));
 }

@@ -89,6 +89,21 @@ const param = (a: number, b: number) =>
 const stack = (v: number) => (v === 0xffff ? "-" : String(v));
 const phy = (v: number) => ({ 1: "1M", 2: "2M", 4: "Coded" })[v] ?? String(v);
 const clock = (ms: number) => new Date(ms).toLocaleString("zh-CN", { hour12: false });
+const kb = (b: number) => (b / 1024).toFixed(1);
+function sdWrites(r: Rec) {
+  const n = [r.b & 0x3ff, (r.b >>> 10) & 0x3ff, (r.b >>> 20) & 0x3ff, r.x];
+  return (
+    `${n[0] + n[1] + n[2] + n[3]} 次，共 ${r.a & 0xfffff} ms，最长 ${r.a >>> 20} ms；` +
+    `<20 ms ${n[0]}，20–49 ms ${n[1]}，50–200 ms ${n[2]}，>200 ms ${n[3]}`
+  );
+}
+function readDone(r: Rec) {
+  const ms = r.b & 0x3fffff;
+  return (
+    `${kb(r.a)} KB，用时 ${(ms / 1000).toFixed(1)} s（${kb((r.a / Math.max(ms, 1)) * 1000)} KB/s），` +
+    `每包 ${r.b >>> 22} B，连接间隔 ${r.x * 1.25} ms`
+  );
+}
 
 // code: [name, what it means, its arguments in words]
 const EVENTS: Record<number, [string, string, (r: Rec) => string]> = {
@@ -144,9 +159,12 @@ const EVENTS: Record<number, [string, string, (r: Rec) => string]> = {
     (r) =>
       `CMD12 r1 0x${hex(r.a, 2)}，CMD0 r1 0x${hex(r.b, 2)}${r.b === 1 ? "（空闲）" : "（卡没响应）"}`,
   ],
+  25: ["SD_WRITES", "写卡统计（10 分钟）", sdWrites],
+  26: ["READ", "补传一次", readDone],
+  27: ["READ_TIME", "补传耗时", (r) => `读卡 ${r.a} ms，蓝牙发送 ${r.b} ms`],
 };
 // every few minutes or every connection: hidden unless asked for
-const ROUTINE = new Set([9, 11, 12, 13, 14, 15, 20, 22, 23]);
+const ROUTINE = new Set([9, 11, 12, 13, 14, 15, 20, 22, 23, 25]);
 
 export interface Said {
   name: string;

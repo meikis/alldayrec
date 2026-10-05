@@ -83,3 +83,18 @@ jobs:
       - run: west init -m https://github.com/nrfconnect/sdk-nrf --mr v2.7.0 $NCS && cd $NCS && west update --narrow -o=--depth=1
       - run: firmware/devkit/lr.sh build sdmod     # LR-X1 (XIAO nRF52840 Sense)
       - run: firmware/devkit/lr.sh build promicro  # LR-P1 (ProMicro nRF52840)
+
+  firmware-check:  # host checks of the firmware's logic: the record stream and its timing events (test/store_check.c)
+    needs: changes
+    if: needs.changes.outputs.firmware == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: firmware/devkit
+    steps:
+      - uses: actions/checkout@v7
+      - run: |  # the Zephyr headers lr_store.c includes, empty: the check defines what it uses
+          d=$(mktemp -d) && mkdir -p $d/zephyr/{bluetooth,fs,sys,logging,drivers,random}
+          for h in bluetooth/conn bluetooth/gatt bluetooth/uuid fs/fs kernel logging/log sys/byteorder drivers/sensor random/random; do touch $d/zephyr/$h.h; done
+          cc -O1 -w -I$d -o $d/store_check test/store_check.c && $d/store_check
