@@ -143,7 +143,7 @@ static int append(const void *data, uint32_t len)
         fs_sync(&seg_file);  // on the card now (power can go any time); NCS 2.7 reports -EIO for a sync that worked
         uint32_t ms = k_uptime_get() - t0;
         append_max = MAX(append_max, (uint16_t) MIN(ms, UINT16_MAX));
-        if (ms > 200) {
+        if (ms > 1000) {  // SD_WRITES counts those over 200 ms: one event each filled LR-P1's log in 80 min (#99)
             lr_log(LR_SLOW, 0, ms, len);
         }
         count_write(ms);

@@ -17,7 +17,7 @@
  *     2 FAULT       a reason, b PC of the crash that ended the previous boot
  *     3 MOUNT       x try, a error: one per SD mount try
  *     4 STORE       a the audio's boot number (file names BBBBSSSS), b free KB: the offline store is up
- *     5 SLOW        a ms, b bytes: an SD append slower than 200 ms
+ *     5 SLOW        a ms, b bytes: an SD append slower than 1000 ms
  *     6 APPEND_ERR  a error, b bytes: the first failed SD append of a run
  *     7 CARD_FULL   x 1 recording stopped / 0 resumed, a free KB
  *     8 USB_DISK    x 1 card lent to USB / 0 back, a error
@@ -38,8 +38,8 @@
  *    23 STACKS      a codec << 16 | pusher, b store << 16 | BT RX: bytes of stack never used (0xFFFF: no thread)
  *    24 SD_RESET    a R1 to CMD12, b R1 to CMD0 (0x01: idle) of the SPI reset before the first mount
  *    25 SD_WRITES   the card appends of the last 10 minutes, by the first append after them: x how many took over
- *                   200 ms (each a SLOW too), a ms all took (bits 0-19) | the slowest's ms << 20, b how many took
- *                   under 20 ms | 20-49 ms << 10 | 50-200 ms << 20; every field saturates
+ *                   200 ms (over 1000 ms each a SLOW too), a ms all took (bits 0-19) | the slowest's ms << 20, b how
+ *                   many took under 20 ms | 20-49 ms << 10 | 50-200 ms << 20; every field saturates
  *    26 READ        a READ's end (one that sent anything): x connection interval then (1.25 ms, 255: longer),
  *                   a bytes sent, b ms it took (bits 0-21) | bytes a DATA notification carries << 22
  *    27 READ_TIME   that READ's ms on the card (a: open, seek, fs_read) and in notify (b: sending, waiting for a TX

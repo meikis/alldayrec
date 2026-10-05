@@ -280,17 +280,17 @@ int main(void)
     memset(&wr, 0, sizeof(wr));
     wr.start = now_ms = 1000;
     n_logged = 0;
-    int took[] = {5, 5, 19, 20, 49, 50, 200, 250};
+    int took[] = {5, 5, 19, 20, 49, 50, 200, 250, 1001};
     for (int i = 0; i < ARRAY_SIZE(took); i++) {
         write_ms = took[i];
         assert(append("x", 1) == 0);
     }
-    assert(n_logged == 1 && logged[0].code == LR_SLOW && logged[0].a == 250);
+    assert(n_logged == 1 && logged[0].code == LR_SLOW && logged[0].a == 1001);  // over 1000 ms only
     now_ms = 1000 + 10 * 60 * 1000;
     write_ms = 3;
     assert(append("x", 1) == 0);
-    assert(n_logged == 2 && logged[1].code == LR_SD_WRITES && logged[1].x == 1);
-    assert(logged[1].a == (601 | 250 << 20) && logged[1].b == (4 | 2 << 10 | 2 << 20));
+    assert(n_logged == 2 && logged[1].code == LR_SD_WRITES && logged[1].x == 2);
+    assert(logged[1].a == (1602 | 1001 << 20) && logged[1].b == (4 | 2 << 10 | 2 << 20));
     assert(wr.start == now_ms && wr.ms == 0);
     write_ms = 0;
 
