@@ -557,16 +557,31 @@ static void bond_deleted(uint8_t id, const bt_addr_le_t *peer)
     count_bonds();
 }
 
-/* A phone that lost its keys (app reinstalled, Bluetooth reset) cannot encrypt with ours: the old bond goes, so it
- * pairs afresh on its next connection (10-03: the Mac stuck at "PIN or key missing") */
+struct bond_find {
+    const bt_addr_le_t *addr;
+    bool found;
+};
+
+static void bond_find(const struct bt_bond_info *info, void *data)
+{
+    struct bond_find *f = data;
+    f->found |= bt_addr_le_eq(&info->addr, f->addr);
+}
+
+/* "PIN or key missing": keys that do not match. A bond of ours the phone no longer has (app reinstalled, Bluetooth
+ * reset) goes, so it pairs afresh on its next connection (10-03: the Mac stuck at "PIN or key missing"). A phone this
+ * recorder does not know (another phone bound it, issue #56) keeps its link, unencrypted: the app's first encrypted
+ * read fails and it shows it was kicked; the unencrypted timeout ends the link if nothing does. bt_unpair here dropped
+ * the link at once, so a kicked phone never got that far and came back every 2 s (10-05). */
 static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_security_err err)
 {
     LOG_INF("security level %d, err %d", level, err);
     lr_log(LR_SECURITY, level, err, 0);
-    if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING) {
+    struct bond_find f = {.addr = bt_conn_get_dst(conn)};
+    if (err == BT_SECURITY_ERR_PIN_OR_KEY_MISSING && (bt_foreach_bond(BT_ID_DEFAULT, bond_find, &f), f.found)) {
         LOG_WRN("stale bond dropped");
         lr_log(LR_FORGET, 1, 1, 0);
-        bt_unpair(BT_ID_DEFAULT, bt_conn_get_dst(conn));
+        bt_unpair(BT_ID_DEFAULT, f.addr);
     }
 }
 

@@ -393,7 +393,8 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         if (gatt == null) return false
         val done = CompletableFuture<Boolean>()
         jobs.put { g -> done.complete(try { write(g, Ble.STORE, Ble.CTRL, byteArrayOf(5, 1)); true } catch (e: Exception) { false }) }
-        return try { done.get(20, TimeUnit.SECONDS) } catch (e: Exception) { false }
+        // 5 s: a session that runs no jobs (still taking the card) would hold the unbinding up for nothing
+        return try { done.get(5, TimeUnit.SECONDS) } catch (e: Exception) { false }
     }
 
 

@@ -827,6 +827,7 @@ class RecorderPage extends StatefulWidget {
 class _RecorderPageState extends State<RecorderPage> {
   Map r = {}, st = {};
   Timer? timer;
+  bool unbinding = false;
 
   @override
   void initState() {
@@ -874,10 +875,17 @@ class _RecorderPageState extends State<RecorderPage> {
       ],
     ));
     if (ok != true) return;
-    await _call(() async {
-      await Recorder.unbind();
-      await widget.onSource('mic');
-    });
+    // until it is all done, no adding: the page shows 添加录音设备 as soon as the binding is off the prefs, and a bind
+    // started then lost its new bond to this unbind's late removeBond (10-05)
+    setState(() => unbinding = true);
+    try {
+      await _call(() async {
+        await Recorder.unbind();
+        await widget.onSource('mic');
+      });
+    } finally {
+      if (mounted) setState(() => unbinding = false);
+    }
   }
 
   void _pauseDone(String? error) {
@@ -938,7 +946,7 @@ class _RecorderPageState extends State<RecorderPage> {
 
     final small = t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant);
     final add = FilledButton.icon(
-        onPressed: _add, icon: const Icon(Icons.add_rounded), label: Text(name == null ? '添加录音设备' : '重新添加'),
+        onPressed: unbinding ? null : _add, icon: const Icon(Icons.add_rounded), label: Text(name == null ? '添加录音设备' : '重新添加'),
         style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)));
     if (name == null) {
       return ListView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 32), children: [
