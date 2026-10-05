@@ -46,6 +46,8 @@ export interface Feedback {
   at: string;
   text: string;
 }
+// 完成 / 不对 on a todo is a feedback line: the mark, then the todo's text (server db.TODO_MARKS)
+export const TODO_MARK = { done: "待办完成：", wrong: "待办不对：" } as const;
 
 export interface At {
   at: string | null;

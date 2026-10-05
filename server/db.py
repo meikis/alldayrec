@@ -226,6 +226,26 @@ def add_feedback(conv_id: str, text: str):
     conn().execute("INSERT INTO feedback VALUES (?, ?, ?)", (conv_id, dt.datetime.now().isoformat(timespec="seconds"), text))
 
 
+TODO_MARKS = ("待办完成：", "待办不对：")  # 完成 / 不对 on one todo is a feedback line: the mark, then the todo's text (web TodoMarks.vue)
+
+
+def closed_todos() -> set[tuple[str, str]]:
+    """(conversation, todo text) of the todos marked done or wrong: they leave the due list and the recaps."""
+    # ponytail: keyed by the todo's text, so a redone summary that rewords a todo brings it back
+    return {(r[0], r[1][len(m):]) for r in conn().execute("SELECT conv, text FROM feedback") for m in TODO_MARKS if r[1].startswith(m)}
+
+
+def due_todos(day: str) -> list[dict]:
+    """My todos due on day (YYYY-MM-DD) or before and not closed, oldest due first. Only summaries from prompt v8 on date them."""
+    closed = closed_todos()
+    out = [{"conv": r[0], **{k: t.get(k) for k in ("text", "to", "due", "due_date", "at")}}
+           for r in conn().execute("SELECT s.conversation, s.body FROM summaries s JOIN conversations c ON c.id = s.conversation"
+                                   " WHERE s.prompt_version >= 8 AND s.status = 'done'")
+           for t in json.loads(r[1]).get("todos") or []
+           if t.get("owner") == "我" and t.get("due_date") and t["due_date"] <= day and (r[0], t.get("text")) not in closed]
+    return sorted(out, key=lambda t: (t["due_date"], t["conv"]))
+
+
 # voices, apart pins, people bank, aliases, name hints
 
 V_COLS = ("conv", "label", "device", "n", "speech_s", "k", "e", "clip", "clip_start", "clip_end", "clip_text")

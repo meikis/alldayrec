@@ -1245,11 +1245,22 @@ async def ask_ai(body: dict):
 
 @app.get("/api/recap")
 async def recap_get(date: str = ""):
-    """A day's recap, the newest one when no day is given; null when there is none."""
+    """A day's recap, the newest one when no day is given; null when there is none. A todo marked done or wrong since is left out."""
     if date:
-        return db.kv(f"recap:{date}")
-    r = db.conn().execute("SELECT value FROM kv WHERE key LIKE 'recap:%' ORDER BY key DESC LIMIT 1").fetchone()
-    return json.loads(r[0]) if r else None
+        r = db.kv(f"recap:{date}")
+    else:
+        row = db.conn().execute("SELECT value FROM kv WHERE key LIKE 'recap:%' ORDER BY key DESC LIMIT 1").fetchone()
+        r = json.loads(row[0]) if row else None
+    if r:
+        closed = db.closed_todos()
+        r["todos"] = [t for t in r["todos"] if (t["conv"], t["text"]) not in closed]
+    return r
+
+
+@app.get("/api/todos/due")
+async def todos_due():
+    """My todos due today or before, not marked done or wrong (完成 / 不对 go to /api/conversation/{id}/feedback)."""
+    return db.due_todos(dt.date.today().isoformat())
 
 
 @app.post("/api/recap/{date}")

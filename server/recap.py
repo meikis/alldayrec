@@ -1,7 +1,8 @@
 """A day's recap, for a card on the conversations page the morning after: one call over that day's summaries (ask.digest)
-and a numbered list of that day's todos of mine (only that day's: a todo is never repeated on the next days). The model
-picks todos by number, so each is one a summary holds, owned by 我 (never 未知), with its conversation and its due as
-said that day. Kept in kv recap:<date> by server.py. The model is summary.py's; nothing is pushed anywhere.
+and a numbered list of that day's todos of mine (only that day's: a todo is never repeated on the next days; none marked
+done or wrong). The model picks todos by number, so each is one a summary holds, owned by 我 (never 未知), with its
+conversation and its due as said that day; its text stays the summary's (完成 / 不对 name a todo by it), short is the
+model's wording. Kept in kv recap:<date> by server.py. The model is summary.py's; nothing is pushed anywhere.
 
     uv run python recap.py                          # self-check
     uv run python recap.py <live.db> <date>...      # recaps of those days from a db opened read only, as JSON lines
@@ -34,8 +35,9 @@ def make(day: str) -> dict | None:
     convs = [c for c in db.conversations(day, _next(day)) if (c["summary"] or {}).get("status") == "done" and c["summary"].get("title")]
     if not convs:
         return None
+    closed = db.closed_todos()
     todos = [{"conv": c["id"], "text": t.get("text") or "", "to": t.get("to"), "due": t.get("due")}
-             for c in convs for t in c["summary"].get("todos") or [] if t.get("owner") == "我"]
+             for c in convs for t in c["summary"].get("todos") or [] if t.get("owner") == "我" and (c["id"], t.get("text") or "") not in closed]
     listing = "\n".join(f"#{i}{' →' + t['to'] if t['to'] else ''} {t['text']}{'（' + t['due'] + '）' if t['due'] else ''}"
                         for i, t in enumerate(todos, 1)) or "（没有）"
     res, raw = summary.complete([{"role": "system", "content": SYSTEM},
@@ -45,7 +47,7 @@ def make(day: str) -> dict | None:
     for x in res.get("todos") or []:
         n = x.get("n") if isinstance(x, dict) else None
         if isinstance(n, int) and 1 <= n <= len(todos) and n not in picked:
-            picked[n] = {**todos[n - 1], "text": str(x.get("text") or todos[n - 1]["text"])}
+            picked[n] = {**todos[n - 1], "short": str(x.get("text") or todos[n - 1]["text"])}
     return {"date": day, "created_at": dt.datetime.now().isoformat(timespec="seconds"), "model": raw.get("model"), "usage": raw.get("usage"),
             "conversations": len(convs), "headline": str(res.get("headline") or ""),
             "highlights": [{"text": str(h["text"]), "conv": h.get("conv") if h.get("conv") in ids else None}
@@ -72,13 +74,15 @@ if __name__ == "__main__":
         for cid, start, body in [
                 ("c20260925090000", "2026-09-25T09:00:00.000", {"todos": [{"owner": "我", "text": "太早了"}]}),
                 ("c20260928090000", "2026-09-28T09:00:00.000", {"todos": [{"owner": "我", "to": "老王", "text": "寄设备", "due": "国庆之后"}]}),
-                ("c20261004100000", "2026-10-04T10:00:00.000", {"todos": [{"owner": "未知", "text": "买菜"}, {"owner": "我", "text": "改存储"}]}),
+                ("c20261004100000", "2026-10-04T10:00:00.000", {"todos": [{"owner": "未知", "text": "买菜"}, {"owner": "我", "text": "改存储"},
+                                                                          {"owner": "我", "text": "已做完"}]}),
                 ("c20261004120000", "2026-10-04T12:00:00.000", None),
                 ("c20261005010000", "2026-10-05T01:00:00.000", {"todos": [{"owner": "我", "text": "第二天的"}]})]:
             db.insert_conversation(c, dict(id=cid, start=start, end=start[:14] + "30:00.000", participants=["我", "老王"], speech_s=600, sentences=1))
             if body:
                 db.put_summary({"conversation": cid, "status": "done", "title": "t" + cid[-6:], "summary": "s", **body}, c)
         db.put_summary({"conversation": "c20261004120000", "status": "pending"}, c)
+    db.add_feedback("c20261004100000", db.TODO_MARKS[0] + "已做完")
     seen = []
     def fake(msgs, timeout=300):
         seen.append(msgs)
@@ -89,10 +93,10 @@ if __name__ == "__main__":
     r = make("2026-10-04")
     assert "## [c20261004100000]" in seen[0][1]["content"] and "c20261004120000" not in seen[0][1]["content"], "pending summaries left out"
     listing = seen[0][1]["content"].split("待办清单")[1]
-    assert listing == "：\n#1 改存储", "only the day's own todos of mine: not 未知, not the days before or after"
+    assert listing == "：\n#1 改存储", "only the day's own todos of mine: not 未知, not the days before or after, not marked done"
     assert r["conversations"] == 1 and r["headline"] == "改存储" and r["model"] == "m"
     assert r["highlights"] == [{"text": "定了存储", "conv": "c20261004100000"}, {"text": "编的", "conv": None}], r["highlights"]
-    assert r["todos"] == [{"conv": "c20261004100000", "text": "改存储方案", "to": None, "due": None}], r["todos"]
+    assert r["todos"] == [{"conv": "c20261004100000", "text": "改存储", "to": None, "due": None, "short": "改存储方案"}], r["todos"]
     assert r["people"] == [{"who": "老王", "note": "聊存储"}]
     assert make("2026-10-03") is None and len(seen) == 1, "a day without summaries: no call"
     print("ok")

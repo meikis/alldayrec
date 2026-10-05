@@ -4,6 +4,7 @@ import { useRoute } from "vue-router";
 import AppHeader from "../components/AppHeader.vue";
 import MediaFold from "../components/MediaFold.vue";
 import Timeline from "../components/Timeline.vue";
+import TodoMarks from "../components/TodoMarks.vue";
 import TranscriptRow from "../components/TranscriptRow.vue";
 import {
   fold,
@@ -13,6 +14,7 @@ import {
   hhmmss,
   minutes,
   post,
+  TODO_MARK,
   type Conversation,
   type Feedback,
   type LabelSuggestions,
@@ -109,6 +111,13 @@ async function sendNote() {
     sending.value = false;
   }
 }
+// a todo marked 完成 or 不对 (TodoMarks) shows how instead of the buttons
+const marked = (text: string) =>
+  c.value?.feedback.some((f) => f.text === TODO_MARK.done + text)
+    ? "已完成"
+    : c.value?.feedback.some((f) => f.text === TODO_MARK.wrong + text)
+      ? "已标不对"
+      : "";
 
 // renaming one speaker of this conversation
 const editing = ref(""),
@@ -288,6 +297,8 @@ async function alias(name: string, of: string) {
               <a v-if="t.at" class="at" :href="'#' + t.at" @click.prevent="jumpTo(t.at)">{{
                 hhmmss(t.at)
               }}</a>
+              <span v-if="marked(t.text)" class="muted"> · {{ marked(t.text) }}</span>
+              <TodoMarks v-else :conv="id" :text="t.text" @marked="(f) => (c!.feedback = f)" />
               <div v-if="t.quote" class="quote">「{{ t.quote }}」</div>
             </li>
           </ul>

@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from "vu
 import { useRoute, useRouter } from "vue-router";
 import AppHeader from "../components/AppHeader.vue";
 import DayPicker from "../components/DayPicker.vue";
+import TodoMarks from "../components/TodoMarks.vue";
 import { get, hhmm, minutes, MOSTLY_MEDIA, post, type Conversation, type Status } from "../lib/api";
 import { shiftDay, today } from "../lib/calendar";
 import { useSocket } from "../lib/socket";
@@ -75,10 +76,29 @@ interface Recap {
   conversations: number;
   headline: string;
   highlights: { text: string; conv: string | null }[];
-  todos: { conv: string; text: string; to?: string | null; due?: string | null }[]; // due: as said that day
+  // text: the summary's (完成 / 不对 name it by it), short: the recap's wording (a recap written before there was a
+  // short holds the wording in text: no buttons, they would name no todo); due: as said that day
+  todos: { conv: string; text: string; short?: string; to?: string | null; due?: string | null }[];
   people: { who: string; note: string }[];
 }
 const recap = ref<Recap | null>(null);
+
+// my todos due today or before (summary prompt v8 dates them), not marked done or wrong
+interface Due {
+  conv: string;
+  text: string;
+  to?: string | null;
+  due?: string | null;
+  due_date: string;
+  at?: string | null;
+}
+const due = ref<Due[]>([]);
+// a todo marked 完成 or 不对 leaves both cards at once (the server leaves it out from now on)
+function closed(conv: string, text: string) {
+  due.value = due.value.filter((t) => t.conv !== conv || t.text !== text);
+  if (recap.value)
+    recap.value.todos = recap.value.todos.filter((t) => t.conv !== conv || t.text !== text);
+}
 
 const search = (before: string) =>
   get<Conversation[]>("/api/search", {
@@ -148,6 +168,7 @@ onMounted(async () => {
   io = new IntersectionObserver((es) => es[0].isIntersecting && page());
   if (more.value) io.observe(more.value);
   get<Recap | null>("/api/recap").then((r) => (recap.value = r));
+  get<Due[]>("/api/todos/due").then((d) => (due.value = d));
   get<Record<string, number>>("/api/tags").then(
     (t) => (tags.value = Object.entries(t).slice(0, 40)),
   );
@@ -236,6 +257,18 @@ useSocket((m) => {
         >
       </div>
     </div>
+    <div v-if="due.length && !q && !tag && !day" class="card due">
+      <div class="meta">到期的待办 · {{ due.length }} 条</div>
+      <ul>
+        <li v-for="t in due" :key="t.conv + t.text">
+          <RouterLink :to="'/c/' + t.conv + (t.at ? '#' + t.at : '')">{{ t.text }}</RouterLink
+          ><span class="muted">
+            · {{ t.due_date === today() ? "今天" : "已过期 " + t.due_date.slice(5)
+            }}{{ t.to ? " · 答应" + t.to : "" }}</span
+          ><TodoMarks :conv="t.conv" :text="t.text" @marked="closed(t.conv, t.text)" />
+        </li>
+      </ul>
+    </div>
     <details v-if="recap && !q && !tag && !day" class="card recap">
       <summary>
         <span class="meta"
@@ -256,10 +289,15 @@ useSocket((m) => {
         <div class="sub">我要做的</div>
         <ul>
           <li v-for="t in recap.todos" :key="t.conv + t.text">
-            <RouterLink :to="'/c/' + t.conv">{{ t.text }}</RouterLink
+            <RouterLink :to="'/c/' + t.conv">{{ t.short ?? t.text }}</RouterLink
             ><span v-if="t.to || t.due" class="muted">
               · {{ [t.to && "答应" + t.to, t.due].filter(Boolean).join(" · ") }}</span
-            >
+            ><TodoMarks
+              v-if="t.short"
+              :conv="t.conv"
+              :text="t.text"
+              @marked="closed(t.conv, t.text)"
+            />
           </li>
         </ul>
       </template>
@@ -412,7 +450,8 @@ a.card:hover {
 .recap summary {
   cursor: pointer;
 }
-.recap ul {
+.recap ul,
+.due ul {
   margin: 6px 0 0;
   padding-left: 20px;
   font-size: 14px;
