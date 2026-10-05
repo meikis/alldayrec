@@ -28,7 +28,7 @@ object Dfu {
             override fun onDfuCompleted(a: String) { state = "升级完成，录音设备已重启"; busy = false; DfuServiceListenerHelper.unregisterProgressListener(ctx, this) }
             override fun onDfuAborted(a: String) { state = "升级已取消"; busy = false; DfuServiceListenerHelper.unregisterProgressListener(ctx, this) }
             override fun onError(a: String, error: Int, errorType: Int, message: String?) {
-                state = "升级失败：$message（录音设备留在升级模式时再点一次升级，或插 USB 刷）"; busy = false
+                state = "升级失败：$message（录音设备还在就再试一次，不见了就插 USB 用 lr.sh flash 刷）"; busy = false
                 android.util.Log.w("live-record", "dfu error $error type $errorType: $message")
                 DfuServiceListenerHelper.unregisterProgressListener(ctx, this)
             }

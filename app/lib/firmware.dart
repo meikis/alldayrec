@@ -95,7 +95,7 @@ class _FirmwareTileState extends State<FirmwareTile> {
             line(Icons.usb_off_rounded, '先拔掉录音设备的 USB：插着 USB 升级会卡在擦除'),
             line(Icons.battery_charging_full_rounded, '电量保持在 30% 以上${battery == null ? '' : '（现在 $battery%）'}', low ? cs.error : null),
             line(Icons.phonelink_ring_rounded, '升级要几分钟：手机放在录音设备旁边，别关 App；期间不录音也不同步'),
-            line(Icons.info_outline_rounded, '中途失败时录音设备会停在升级模式：再点一次升级，或插 USB 用 lr.sh flash 刷'),
+            line(Icons.info_outline_rounded, '中途失败、录音设备不见了：插 USB 用 lr.sh flash 刷（升级模式下的录音设备换了地址，再点升级连不上）'),
           ]),
         ),
         actions: [
@@ -110,13 +110,17 @@ class _FirmwareTileState extends State<FirmwareTile> {
   Widget build(BuildContext context) {
     final t = Theme.of(context), cs = t.colorScheme;
     final m = latest, wait = busy || widget.dfuBusy;
+    // LR-P1's bootloader (nice!nano 0.6.0) erases the firmware when the transfer starts, and a reset midway leaves it
+    // in USB-only update mode: a failed Bluetooth update always ends on USB (10-05), so it is updated over USB only
+    final usbOnly = widget.model == 'LR-P1';
     final lines = [
       widget.fw ?? '—',
       if (m != null && newer) '可升级到 ${m['version']}（构建于 ${'${m['built']}'.replaceFirst('T', ' ').split('+').first}）',
       if (m != null && newer && '${m['notes'] ?? ''}'.isNotEmpty) '${m['notes']}',
       ?note,
       ?widget.dfu,
-      if (Platform.isIOS) 'iPhone 上不能升级固件：用 Android 手机的 App，或插 USB 用 lr.sh flash',
+      if (Platform.isIOS) 'iPhone 上不能升级固件：用 Android 手机的 App，或插 USB 用 lr.sh flash'
+      else if (usbOnly) 'LR-P1 只能插 USB 升级：lr.sh flash promicro（蓝牙升级中途一断，只能插 USB 救回）',
     ];
     return ListTile(
       contentPadding: EdgeInsets.zero,
@@ -127,7 +131,7 @@ class _FirmwareTileState extends State<FirmwareTile> {
           ? const SizedBox.square(dimension: 24, child: CircularProgressIndicator(strokeWidth: 2.5))
           : widget.model == null || Platform.isIOS
               ? null
-              : newer
+              : newer && !usbOnly
                   ? FilledButton.tonalIcon(onPressed: _update, icon: const Icon(Icons.system_update_alt_rounded, size: 18), label: const Text('升级'))
                   : TextButton(onPressed: _check, child: const Text('检查更新')),
     );
