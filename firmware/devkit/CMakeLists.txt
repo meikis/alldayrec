@@ -22,6 +22,7 @@ target_sources(app PRIVATE
 	# src/nfc.c future release
 )
 target_sources_ifdef(CONFIG_LR_SWITCH app PRIVATE src/lr_switch.c)
+target_sources_ifdef(CONFIG_LR_POWER_TRACE app PRIVATE src/lr_power.c)
 
 target_sources_ifdef(CONFIG_OMI_CODEC_OPUS app PRIVATE
     src/lib/opus-1.2.1/A2NLSF.c

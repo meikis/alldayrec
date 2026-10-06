@@ -18,7 +18,8 @@ extern struct k_thread codec_thread, pusher_thread, store_thread_data;
 #define MAGIC 0x4C524C47
 #define ID FIXED_PARTITION_ID(lr_log_partition)
 // written to flash at once: what explains a reset must be there if the next one comes before the batch is full
-#define URGENT (BIT(LR_BOOT) | BIT(LR_FAULT) | BIT(LR_MOUNT) | BIT(LR_APPEND_ERR) | BIT(LR_CARD_FULL) | BIT(LR_PAIR_FAIL))
+#define URGENT (BIT(LR_BOOT) | BIT(LR_FAULT) | BIT(LR_MOUNT) | BIT(LR_APPEND_ERR) | BIT(LR_CARD_FULL) | BIT(LR_PAIR_FAIL) | \
+                BIT(LR_POWER))  // the last minute before power is lost
 
 struct rec {
     uint16_t boot;

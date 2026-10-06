@@ -23,7 +23,8 @@ case $V in
             EXTRA+=(-DCONFIG_LR_BATTERY_VDDH=y "-DCONFIG_LR_NAME_PREFIX=\"$M\"" "-DCONFIG_BT_DEVICE_NAME=\"$M\""
                     "-DCONFIG_BT_DIS_MODEL=\"$M\"" '-DCONFIG_BT_DIS_HW_REV_STR="ProMicro nRF52840"'
                     -DCONFIG_CLOCK_CONTROL_NRF_K32SRC_100PPM=y)  # its 32.768 kHz crystals run +47..+81 ppm (#110)
-            [ "$V" != promicro-p3 ] || EXTRA+=(-DCONFIG_LR_SWITCH=y) ;;  # only LR-P3 has the switch on P1.15 (#122)
+            # only LR-P3 has the switch on P1.15 (#122), and keeps a power trail while its battery cuts out (#137)
+            [ "$V" != promicro-p3 ] || EXTRA+=(-DCONFIG_LR_SWITCH=y -DCONFIG_LR_POWER_TRACE=y) ;;
   *) echo "unknown variant $V" >&2; exit 2 ;;
 esac
 # LR_LOG=1 ./lr.sh build V: logs on the USB serial port (cat /dev/cu.usbmodem*), in build/lr-V-log

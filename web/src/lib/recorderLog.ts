@@ -168,6 +168,11 @@ const EVENTS: Record<number, [string, string, (r: Rec) => string]> = {
     (r) =>
       `${r.x ? "开" : "关"}：${["录音", "关机（System OFF，拨开或插 USB 唤醒）", "插着 USB，不录音", "重启"][r.a] ?? r.a}`,
   ],
+  29: [
+    "POWER",
+    "电源",
+    (r) => (r.a ? "掉电预警：VDDH 低于 3.3 V 或 VDD 低于 2.8 V" : `电池供电，VDDH ${r.x * 20} mV`),
+  ],
 };
 // every few minutes or every connection: hidden unless asked for
 const ROUTINE = new Set([9, 11, 12, 13, 14, 15, 20, 22, 23, 25]);
@@ -195,6 +200,7 @@ export function describe(r: Rec): Said {
     (code === 3 && r.a !== 0) ||
     (code === 7 && r.x !== 0) ||
     (code === 24 && r.b !== 1) ||
+    (code === 29 && r.a !== 0) || // the power-fail warning
     (code === BOOT && (r.a & 0b1010) !== 0); // the last boot ended by the watchdog or a lockup
   const warn = [BOOT, DISCONNECT, DFU, 5, 8, 18].includes(code);
   return {
@@ -202,7 +208,7 @@ export function describe(r: Rec): Said {
     label,
     text: fmt(r) + (r.code & UPTIME ? `（开机后 ${(r.t / 1000).toFixed(1)} s）` : ""),
     level: bad ? "bad" : warn ? "warn" : "",
-    routine: ROUTINE.has(code),
+    routine: ROUTINE.has(code) || (code === 29 && !r.a),
   };
 }
 
