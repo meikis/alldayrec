@@ -1,17 +1,20 @@
+<script lang="ts">
+let stopOther = () => {}; // the card listening now
+</script>
+
 <script setup lang="ts">
 // Listening in on a recorder (how its mic and box sound): /api/listen polled every second for the device's pieces
 // newer than the last, played back to back through Web Audio, with their spectrum. Latency is the phone's piece
 // length (the server's SLICE_*: 1 s with the app in front, 20 s in the background, 60 s with Android's screen off) +
 // upload + the poll + LEAD_S. Started by a tap (iOS plays nothing otherwise); a page that goes to the background
-// stops (iOS suspends it anyway).
+// stops (iOS suspends it anyway). One per device card on the progress page; one listening on the page at a time.
 import { onUnmounted, ref } from "vue";
-import type { DeviceStatus } from "../lib/api";
 
-defineProps<{ devices: DeviceStatus[] }>();
+const { device } = defineProps<{ device: string }>();
 const LEAD_S = 1; // played this far behind the newest piece's arrival: pieces come late by their upload's jitter
 const MAX_AHEAD_S = 3; // more than this still to play when a piece comes: skip to it (the first piece was an old one)
 const MAX_HZ = 8000; // the audio is 16 kHz
-const on = ref(""),
+const on = ref(false),
   note = ref(""),
   canvas = ref<HTMLCanvasElement | null>(null);
 let ctx: AudioContext | null = null,
@@ -22,9 +25,10 @@ let ctx: AudioContext | null = null,
   queued = new Set<AudioBufferSourceNode>(),
   raf = 0;
 
-function start(device: string) {
-  stop();
-  on.value = device;
+function start() {
+  stopOther();
+  stopOther = stop;
+  on.value = true;
   note.value = "连接中…";
   // inside the tap: iOS lets only a gesture start audio; "playback" plays with the ring switch on silent (Safari 16.4+)
   const session = (navigator as { audioSession?: { type: string } }).audioSession;
@@ -48,7 +52,7 @@ function start(device: string) {
 
 function stop(why = "") {
   run++;
-  on.value = "";
+  on.value = false;
   note.value = why;
   cancelAnimationFrame(raf);
   void ctx?.close();
@@ -170,14 +174,7 @@ onUnmounted(() => {
 
 <template>
   <div class="listen">
-    <button
-      v-for="d in devices"
-      :key="d.device"
-      :class="{ on: on === d.device }"
-      @click="on === d.device ? stop() : start(d.device)"
-    >
-      {{ on === d.device ? "停止" : "收听" }} {{ d.device }}
-    </button>
+    <button :class="{ on }" @click="on ? stop() : start()">{{ on ? "停止" : "收听" }}</button>
     <span v-if="note" class="note">{{ note }}</span>
     <canvas
       v-if="on"

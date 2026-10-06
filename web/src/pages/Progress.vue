@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import AppHeader from "../components/AppHeader.vue";
+import Listen from "../components/Listen.vue";
 import { get, type DeviceStatus, type RecorderStatus, type Status } from "../lib/api";
 import { useSocket } from "../lib/socket";
 
@@ -79,6 +80,7 @@ const eta = (d: DeviceStatus) => {
           <span>上报于</span><span>{{ at(d.hw.at) }}</span>
         </template>
       </div>
+      <Listen class="listen" :device="d.device" />
     </section>
     <section v-if="status" class="card">
       <div class="top"><b>摘要</b></div>
@@ -117,6 +119,9 @@ const eta = (d: DeviceStatus) => {
   gap: 2px 12px;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
+}
+.listen {
+  margin-top: 8px;
 }
 .grid span:nth-child(odd) {
   color: var(--muted);
