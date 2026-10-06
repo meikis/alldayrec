@@ -46,12 +46,17 @@ type Item =
   | { k: "conv"; key: string; c: Conversation }
   | { k: "gap"; key: string; at: string }
   | { k: "catchup"; key: string; device: string; from: string; to: string; eta: number | null };
+// a device's finalized time: the status's, or its last final message's (it comes before the next status, every 2 s)
+function doneTo(device: string) {
+  const s = status.value?.devices?.find((d) => d.device === device)?.done_to ?? "",
+    f = finalTo[device] ?? "";
+  return s > f ? s : f;
+}
 // Per device, the time between its final rows and its drafts (or, with none, its newest audio): the drafts follow
 // what is said now while a backlog (a phone back after hours offline) is finalized in order, so this time is not lost
 const catchups = computed(() =>
   (live.value ? (status.value?.devices ?? []) : []).flatMap((d) => {
-    const ft = finalTo[d.device] ?? ""; // a final message comes before the next status (every 2 s)
-    const from = d.done_to && d.done_to > ft ? d.done_to : ft;
+    const from = doneTo(d.device);
     if (!from) return [];
     const to =
       rows.value
@@ -338,7 +343,8 @@ const convLink = (c: Conversation) =>
     <div v-if="current" class="pane">
       <div ref="paneBox" class="pane-body" :style="{ height: paneH + 'px' }">
         <div class="pane-meta">
-          实时分析 · 对话 {{ hhmmss(current.start) }} 起 · 更新于 {{ hhmmss(current.at) }} · 到
+          实时分析{{ current.start > doneTo(current.device) ? "（基于最新初稿）" : "" }} · 对话
+          {{ hhmmss(current.start) }} 起 · 更新于 {{ hhmmss(current.at) }} · 到
           {{ hhmmss(current.upto) }} 共 {{ current.sentences }} 句
         </div>
         <Timeline :topics="current.topics" open @jump="jump" />

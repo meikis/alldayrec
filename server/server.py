@@ -754,12 +754,15 @@ async def pipeline(device: str):
             await broadcast({"type": "live", "device": device, "live": None})
 
     def live_due() -> bool:
-        """A page is in front, the conversation going on has a minute of speech, this is the present and not a backlog,
-        and LIVE_EVERY_S of new speech came (or any, when a page just came to the front)."""
-        o, lv, now = open_view(), st["live"], time.time()
+        """A page is in front, the device is recording now, the conversation going on has a minute of speech and is the
+        present: during a backlog the drafts of what is said now (open_view starts one of them after the gap), not the
+        old conversation the final layer is still on; and LIVE_EVERY_S of new speech came (or any, when a page just
+        came to the front)."""
+        o, lv, now, edge = open_view(), st["live"], time.time(), st["edge_end"]
         if not o or o["speech_s"] < summary.MIN_SPEECH_S or now > state["watch_until"] or now - live_failed < 120:
             return False
-        if not st["audio_end"] or (dt.datetime.now() - st["audio_end"]).total_seconds() > LIVE_AUDIO_S:
+        if not edge or (dt.datetime.now() - edge).total_seconds() > LIVE_AUDIO_S or \
+                (edge - dt.datetime.fromisoformat(o["end"])).total_seconds() > grouper.gap:
             return False
         if not lv or not overlaps(lv, o):
             return True

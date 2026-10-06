@@ -1,11 +1,14 @@
-"""A backlog does not hold back the drafts (10-06: a phone back after 3 h offline sent them at once and the live page
-showed nothing new until all of it was final). While the final layer is still busy at the start of a 3 h backlog and
-audio of now keeps coming, the drafts follow what is said now; the backlog is never drafted (no engine call spent on
-it); once the final layer goes on, it finalizes every utterance of the backlog in order, none lost, none twice.
-Real audio store, streams and pipeline; FireRed's own stream postprocessor on frame energy for the VAD (no
-checkpoint in CI), a fixed voiceprint and fake engines that read back which tone they hear."""
+"""A backlog does not hold back the drafts or the live analysis (10-06: a phone back after 3 h offline sent them at
+once and the live page showed nothing new until all of it was final). While the final layer is still busy at the start
+of a 3 h backlog and audio of now keeps coming, the drafts follow what is said now and the live analysis takes them as
+the conversation going on; the backlog is never drafted (no engine call spent on it) nor analyzed live; once the final
+layer goes on, it finalizes every utterance of the backlog in order, none lost, none twice, and the same live analysis
+goes on without seeing a sentence twice. Real audio store, streams and pipeline; FireRed's own stream postprocessor on
+frame energy for the VAD (no checkpoint in CI), a fixed voiceprint, fake engines that read back which tone they hear
+and a fake LLM that adds a topic per turn."""
 import asyncio
 import datetime as dt
+import re
 import subprocess
 import threading
 import time
@@ -58,8 +61,15 @@ def test_backlog_does_not_hold_drafts(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "DATA", tmp_path)
     monkeypatch.setattr(server, "DRAFT_ENGINE", "stepfun-sse")
     monkeypatch.setattr(server, "ENGINE_FALLBACK", "")
-    monkeypatch.setattr(server.summary, "MIN_SPEECH_S", 1e9)  # no live analysis (an LLM call)
-    busy, sent = threading.Event(), {"draft": 0.0}  # the final layer's engine answers once busy is set
+    monkeypatch.setattr(server.summary, "MIN_SPEECH_S", 3)
+    monkeypatch.setattr(server, "LIVE_EVERY_S", 1)
+    busy, sent, fed = threading.Event(), {"draft": 0.0}, []  # the final layer's engine answers once busy is set
+
+    def llm(messages, timeout=None):  # each turn's new sentences (their tone numbers), one topic added
+        new = [int(t) for t in re.findall(r"^\[[\d:]{8}\] [^:]+: (\d+)$", messages[-1]["content"], re.M)]
+        fed.append(new)
+        return {"ops": [{"op": "add", "title": f"t{new[0]}"}]}, {"choices": [{"message": {"content": "{}"}}]}
+    monkeypatch.setattr(server.live, "complete", llm)
 
     def final_engine(x, partial=None):
         busy.wait()
@@ -105,6 +115,13 @@ def test_backlog_does_not_hold_drafts(tmp_path, monkeypatch):
             edge = live0 - dt.timedelta(seconds=PIECE_S + server.DRAFT_BACK_S)
             assert all(r["start"] >= server.iso(edge) for r in drafts), "the backlog is not drafted"
             assert sent["draft"] < server.DRAFT_BACK_S + LIVE_S, sent
+            for _ in range(20):  # the analysis of the last pause's drafts
+                if fed and fed[-1] and fed[-1][-1] == N + LIVE_S // 5 - 1:
+                    break
+                await asyncio.sleep(0.5)
+            lv = st()["live"]
+            assert lv and lv["start"] >= server.iso(edge) and lv["topics"], lv and server.live.public(lv)
+            assert fed and fed[-1][-1] == N + LIVE_S // 5 - 1 and min(min(f) for f in fed) >= N - server.DRAFT_BACK_S // PIECE_S - 1, fed
 
             busy.set()
             finals = lambda: db.sentences(server.iso(t0), server.iso(live0), source=DEVICE)
@@ -113,6 +130,9 @@ def test_backlog_does_not_hold_drafts(tmp_path, monkeypatch):
                     break
                 await asyncio.sleep(0.5)
             assert [r["text"] for r in finals()] == [str(i) for i in range(N)], [r["text"] for r in finals()][:20]
+            await asyncio.sleep(3)  # the final layer's turn of the live analysis, now that the conversation is final
+            assert st()["live"]["start"] == lv["start"], "the same live analysis goes on"
+            assert len(sum(fed, [])) == len(set(sum(fed, []))), fed
             pipe.cancel()
         finally:
             busy.set()  # a failed check leaves the final layer's call waiting, and asyncio.run waits for its thread
