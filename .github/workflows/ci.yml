@@ -97,5 +97,5 @@ jobs:
       - uses: actions/checkout@v7
       - run: |  # the Zephyr headers lr_store.c includes, empty: the check defines what it uses
           d=$(mktemp -d) && mkdir -p $d/zephyr/{bluetooth,fs,sys,logging,drivers,random}
-          for h in bluetooth/conn bluetooth/gatt bluetooth/uuid fs/fs kernel logging/log sys/byteorder drivers/sensor random/random; do touch $d/zephyr/$h.h; done
+          for h in bluetooth/conn bluetooth/gatt bluetooth/uuid fs/fs kernel logging/log sys/byteorder sys/ring_buffer drivers/sensor random/random; do touch $d/zephyr/$h.h; done
           cc -O1 -w -I$d -o $d/store_check test/store_check.c && $d/store_check

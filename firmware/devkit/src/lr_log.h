@@ -49,6 +49,8 @@
  *                   System OFF is the next BOOT's RESETREAS (OFF: the switch, VBUS: USB)
  *    29 POWER       LR-P3's power trail (lr_power.c): x VDDH mV / 20, a 0: once a minute on battery, 1: the chip's
  *                   power-fail warning (VDDH under 3.3 V or VDD under 2.8 V; x 0, not measured in the interrupt)
+ *    30 LIVE_LOST   a records, b bytes left out of LIVE in a row (its queue full: the link stalled), by the next one
+ *                   that goes; on the card all the same, the phone READs them (#133)
  *
  * Each record has a sequence number, one more than the last, across boots: a reader asks for those from the last
  * it has. Records gather in RAM (__noinit: a crash or watchdog reset keeps them for the next boot) and go to flash
@@ -61,7 +63,7 @@ enum {
     LR_BOOT = 1, LR_FAULT, LR_MOUNT, LR_STORE, LR_SLOW, LR_APPEND_ERR, LR_CARD_FULL, LR_USB_DISK, LR_CONNECT,
     LR_DISCONNECT, LR_PARAM, LR_MTU, LR_PHY, LR_TIME, LR_SECURITY, LR_PAIRED, LR_PAIR_FAIL, LR_FORGET, LR_DROPPED,
     LR_SEGMENT, LR_DFU, LR_HEARTBEAT, LR_STACKS, LR_SD_RESET, LR_SD_WRITES, LR_READ, LR_READ_TIME, LR_SWITCH,
-    LR_POWER,
+    LR_POWER, LR_LIVE_LOST,
     LR_UPTIME = 0x80,
 };
 

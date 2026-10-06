@@ -11,6 +11,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/ring_buffer.h>
 
 #include "lr_log.h"
 #include "sdcard.h"
@@ -369,29 +370,89 @@ BT_GATT_SERVICE_DEFINE(lr_svc,
 #define DATA_ATTR (&lr_svc.attrs[7])
 #define LIVE_ATTR (&lr_svc.attrs[10])
 
-/* A record as it enters the stream, to the phone if it follows (LIVE): file, offset, bytes, split to the MTU. Called
- * with the SD mutex held (one packet buffer). A notify waits for a TX buffer, so a busy link slows the pusher (its
- * queue holds ~3.5 s); one that fails (the link going) leaves a gap the phone fills with READ. */
+/* LIVE goes out on a thread of its own (live_thread). The pusher only queues a finished record here, never waiting for
+ * Bluetooth with the SD mutex held: a notify waits for a TX buffer, and a link that stalls (going down: up to the
+ * supervision timeout; coming up: MTU, security, PHY) held the pusher until the codec's queue overflowed and frames
+ * were lost from the card too (#133: 2.5-4.5 s at each drop of the X1's link). Now a stalled link fills this queue
+ * (~2 s) and the records after are left out of LIVE only: the phone READs the gap from the card. One producer (the
+ * pusher, SD mutex held), one consumer: no lock (ring_buf_put publishes the whole record at once). */
+#define LIVE_QUEUE (8 * 1024)
+RING_BUF_DECLARE(live_rb, LIVE_QUEUE);
+static K_SEM_DEFINE(live_sem, 0, 1);
+struct live_rec {
+    uint32_t file, offset;
+    uint16_t len;
+} __packed;
+static uint32_t live_lost, live_lost_bytes;  // records left out of LIVE in a row: logged once one goes again
+
+/* n bytes into the queue, claimed only: the record goes out whole at ring_buf_put_finish */
+static void live_claim(const void *d, uint32_t n)
+{
+    while (n) {
+        uint8_t *dst;
+        uint32_t k = ring_buf_put_claim(&live_rb, &dst, n);
+        memcpy(dst, d, k);
+        d = (const uint8_t *) d + k;
+        n -= k;
+    }
+}
+
 static void live(const uint8_t *b, uint32_t len, uint32_t offset)
 {
-    static uint8_t p[8 + 512];
     struct bt_conn *conn = get_current_connection();
     if (!conn || !bt_gatt_is_subscribed(conn, LIVE_ATTR, BT_GATT_CCC_NOTIFY)) {
         return;
     }
-    conn = bt_conn_ref(conn);
-    uint16_t room = MIN(bt_gatt_get_mtu(conn) - 3 - 8, sizeof(p) - 8);
-    for (uint32_t i = 0; i < len; i += room) {
-        uint16_t m = MIN(room, len - i);
-        sys_put_le32(cur_file(), p);
-        sys_put_le32(offset + i, p + 4);
-        memcpy(p + 8, b + i, m);
-        if (bt_gatt_notify(conn, LIVE_ATTR, p, 8 + m)) {
-            break;
-        }
+    if (ring_buf_space_get(&live_rb) < sizeof(struct live_rec) + len) {
+        live_lost++;
+        live_lost_bytes += len;
+        return;
     }
-    bt_conn_unref(conn);
+    struct live_rec h = {cur_file(), offset, len};
+    live_claim(&h, sizeof(h));
+    live_claim(b, len);
+    ring_buf_put_finish(&live_rb, sizeof(h) + len);
+    k_sem_give(&live_sem);
+    if (live_lost) {
+        lr_log(LR_LIVE_LOST, 0, live_lost, live_lost_bytes);
+        live_lost = live_lost_bytes = 0;
+    }
 }
+
+/* The queued records to the phone that follows, split to the MTU. A record for a link that went is dropped, and a
+ * notify that fails (the link going) drops the rest of its record: a gap the phone fills with READ. */
+static void live_send(void)
+{
+    static uint8_t p[8 + 512];
+    struct live_rec h;
+    while (ring_buf_get(&live_rb, (uint8_t *) &h, sizeof(h)) == sizeof(h)) {
+        struct bt_conn *conn = get_current_connection();
+        if (!conn || !bt_gatt_is_subscribed(conn, LIVE_ATTR, BT_GATT_CCC_NOTIFY)) {
+            ring_buf_get(&live_rb, NULL, h.len);
+            continue;
+        }
+        conn = bt_conn_ref(conn);
+        uint16_t room = MIN(bt_gatt_get_mtu(conn) - 3 - 8, sizeof(p) - 8);
+        bool ok = true;
+        for (uint32_t i = 0; i < h.len; i += room) {
+            uint16_t m = MIN(room, h.len - i);
+            ring_buf_get(&live_rb, p + 8, m);  // taken either way: the queue goes on with the next record
+            sys_put_le32(h.file, p);
+            sys_put_le32(h.offset + i, p + 4);
+            ok = ok && !bt_gatt_notify(conn, LIVE_ATTR, p, 8 + m);
+        }
+        bt_conn_unref(conn);
+    }
+}
+
+static void live_thread(void)
+{
+    for (;;) {
+        k_sem_take(&live_sem, K_FOREVER);
+        live_send();
+    }
+}
+K_THREAD_DEFINE(live_tid, 2048, live_thread, NULL, NULL, NULL, K_PRIO_PREEMPT(8), 0, 0);  // between the pusher (7) and the store (9): LIVE before READ's DATA
 
 /* Notify until it fits in the TX buffers; false once the link is gone. */
 static bool notify(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *data, uint16_t len)

@@ -173,6 +173,7 @@ const EVENTS: Record<number, [string, string, (r: Rec) => string]> = {
     "电源",
     (r) => (r.a ? "掉电预警：VDDH 低于 3.3 V 或 VDD 低于 2.8 V" : `电池供电，VDDH ${r.x * 20} mV`),
   ],
+  30: ["LIVE_LOST", "实时漏发", (r) => `${r.a} 条记录（${r.b} B）没能实时发出（蓝牙卡住），卡上照存，手机从卡里补`],
 };
 // every few minutes or every connection: hidden unless asked for
 const ROUTINE = new Set([9, 11, 12, 13, 14, 15, 20, 22, 23, 25]);
@@ -202,7 +203,7 @@ export function describe(r: Rec): Said {
     (code === 24 && r.b !== 1) ||
     (code === 29 && r.a !== 0) || // the power-fail warning
     (code === BOOT && (r.a & 0b1010) !== 0); // the last boot ended by the watchdog or a lockup
-  const warn = [BOOT, DISCONNECT, DFU, 5, 8, 18].includes(code);
+  const warn = [BOOT, DISCONNECT, DFU, 5, 8, 18, 30].includes(code);
   return {
     name,
     label,
