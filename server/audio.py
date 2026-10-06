@@ -169,8 +169,10 @@ def cut(a: dt.datetime, b: dt.datetime, fmt: str, device: str | None = None) -> 
     x = np.concatenate(xs)[i:i + int(((b - a).total_seconds() + 0.4) * SR)]
     if not len(x):
         return None
-    if fmt == "s16le":
-        return x.tobytes()
+    return x.tobytes() if fmt == "s16le" else wav(x)
+
+
+def wav(x: np.ndarray) -> bytes:
     out = io.BytesIO()
     with wave.open(out, "wb") as w:
         w.setnchannels(1)
@@ -178,6 +180,23 @@ def cut(a: dt.datetime, b: dt.datetime, fmt: str, device: str | None = None) -> 
         w.setframerate(SR)
         w.writeframes(x.tobytes())
     return out.getvalue()
+
+
+LISTEN_BACK_S = 30  # a listener asking from further back than this before a device's newest audio skips ahead
+
+
+def newer(device: str, after: int | None) -> tuple[int, int, np.ndarray] | None:
+    """For listening in on a device: its pieces starting after `after` (unix ms; None: its newest piece only), within
+    LISTEN_BACK_S of its newest audio (a page back from the background, a backlog arriving), back to back; with the
+    first one's start and the last one's (the next `after`). None when there is none."""
+    last = db.conn().execute("SELECT start_ms, seconds FROM pieces WHERE device = ? ORDER BY start_ms DESC LIMIT 1", (device,)).fetchone()
+    if last is None:
+        return None
+    lo = last["start_ms"] + last["seconds"] * 1000 - LISTEN_BACK_S * 1000
+    ps = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms > ? AND start_ms + seconds * 1000 > ? ORDER BY start_ms",
+                           (device, last["start_ms"] - 1 if after is None else after, lo)).fetchall()
+    xs = [x for x in map(samples, ps) if x is not None]
+    return (ps[0]["start_ms"], ps[-1]["start_ms"], np.concatenate(xs)) if xs else None
 
 
 if __name__ == "__main__":  # the stream's order, resume point and late pieces, on synthetic tones

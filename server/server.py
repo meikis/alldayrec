@@ -1749,6 +1749,19 @@ async def audio_wav(start: str, end: str, device: str | None = None):
     return Response(wav, media_type="audio/wav")
 
 
+@app.get("/api/listen")
+async def listen(device: str, after: int | None = None):
+    """Listening in on a device (the live page polls it): its audio after `after` (unix ms, the X-After of the answer
+    before; none: its newest piece) as WAV, X-Start the first piece's start; 204 when there is nothing newer. Decoded
+    here, as /api/audio is: pieces are Ogg Opus (Safari before 18.4 cannot decode it) or the iPhone's AAC (each with
+    its encoder's delay, trimmed only by decode()); WAV plays in every browser."""
+    got = await asyncio.to_thread(audio.newer, device, after)
+    if got is None:
+        return Response(status_code=204)
+    start, last, x = got
+    return Response(audio.wav(x), media_type="audio/wav", headers={"X-Start": str(start), "X-After": str(last), **NO_CACHE})
+
+
 async def cut(start: str, end: str, fmt: str, device: str | None = None) -> bytes:
     a, b = dt.datetime.fromisoformat(start), dt.datetime.fromisoformat(end)
     out = await asyncio.to_thread(audio.cut, a, b, fmt, device) if 0 < (b - a).total_seconds() <= 120 else None

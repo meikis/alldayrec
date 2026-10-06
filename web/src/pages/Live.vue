@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import AppHeader from "../components/AppHeader.vue";
 import DayPicker from "../components/DayPicker.vue";
+import Listen from "../components/Listen.vue";
 import MediaFold from "../components/MediaFold.vue";
 import Timeline from "../components/Timeline.vue";
 import TranscriptRow from "../components/TranscriptRow.vue";
@@ -339,6 +340,7 @@ const convLink = (c: Conversation) =>
         </template>
         <template v-else>连接中…</template>
       </RouterLink>
+      <Listen v-if="live && status?.devices?.length" :devices="status.devices" />
     </div>
     <div v-if="current" class="pane">
       <div ref="paneBox" class="pane-body" :style="{ height: paneH + 'px' }">
