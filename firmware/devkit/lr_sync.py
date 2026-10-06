@@ -137,16 +137,22 @@ def upload(server: str, token: str, device: str, start: int, frames) -> None:
         urllib.request.urlopen(req, timeout=60).read()
 
 
-def decode(frames) -> bytes:
+def decoder():
+    """One Opus decoder: frame -> 16 kHz 16-bit PCM; a run's frames go through the same one, in order."""
     lib = ctypes.CDLL("/opt/homebrew/lib/libopus.dylib")
     lib.opus_decoder_create.restype = ctypes.c_void_p
     err = ctypes.c_int()
     dec = ctypes.c_void_p(lib.opus_decoder_create(16000, 1, ctypes.byref(err)))
-    buf, out = (ctypes.c_int16 * 960)(), bytearray()
-    for f in frames:
+    buf = (ctypes.c_int16 * 960)()
+
+    def frame(f: bytes) -> bytes:
         n = lib.opus_decode(dec, f, len(f), buf, 960, 0)
-        out += bytes(buf)[: 2 * max(n, 0)]
-    return bytes(out)
+        return bytes(buf)[: 2 * max(n, 0)]
+    return frame
+
+
+def decode(frames) -> bytes:
+    return b"".join(map(decoder(), frames))
 
 
 async def main(out: Path, delete: bool, name: str, follow: float, server: str | None, token: str):
