@@ -118,6 +118,7 @@ export interface DeviceStatus {
   left_s: number;
   rate: number | null;
   eta_s: number | null;
+  hold?: string | null; // finals wait here for older audio the phone is still sending (#130)
   queued: number;
   latency_s: number | null;
   refine?: { at: string; ms: number; error?: string; backlog_s?: number } | null;
@@ -133,6 +134,8 @@ export interface RecorderStatus {
   store?: number; // 0 recording to the card; -19 no card; -28 card full
   free_kb?: number;
   total_kb?: number;
+  backlog_kb?: number; // left on the card for the phone to read in the background (#130)
+  backlog_eta_s?: number; // at the phone's own reading rate
 }
 
 // GET /api/device-log: a device's events and the status reports its phones sent, in a time range

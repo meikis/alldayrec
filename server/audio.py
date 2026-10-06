@@ -27,6 +27,7 @@ log = logging.getLogger("live")
 SR = 16000
 DIR: Path | None = None  # the recordings dir
 read_to: dict[str, int] = {}  # per device: start of the last piece its reader has finished with; later ones are queued
+HOLD_MAX_S = 12 * 3600  # a hold not said again for this long is let go: a phone that never comes back must not stop finals for good
 _append = threading.Lock()  # uploads are saved in threads: one append (and its index row) at a time
 
 
@@ -128,9 +129,24 @@ def pending(after: dict[str, dt.datetime | None]) -> list[str]:
             if r[1] > (int(after[r[0]].timestamp() * 1000) if after.get(r[0]) else 0)]
 
 
+def hold(device: str, at_ms: int | None):
+    """A phone still has audio of `device` older than at_ms to send (a backlog it reads off the recorder's card while it
+    sends what is said now, #130): the device's queue (stream without edge_s) hands out nothing from at_ms on until
+    that audio is in, so none of it arrives behind the reader. None: nothing older is coming. Every upload says it
+    again; kept across a restart."""
+    db.put_kv(f"hold:{device}", None if at_ms is None else {"at": at_ms, "seen": time.time()})
+
+
+def held(device: str) -> int | None:
+    """Where the device's queue waits (unix ms); None when it does not (no hold, or one not said for HOLD_MAX_S)."""
+    h = db.kv(f"hold:{device}")
+    return h["at"] if h and time.time() - h["seen"] < HOLD_MAX_S else None
+
+
 async def stream(device: str, after: dt.datetime | None, edge_s: float | None = None):
     """(start time, samples) of one device in time order, from the piece holding `after` (its first piece when None),
-    forever. A piece arriving older than one already handed out is kept for playback but not streamed. edge_s: only
+    forever. A piece arriving older than one already handed out is kept for playback but not streamed: a phone that
+    sends what is said now ahead of older audio holds the queue (hold()) until the older audio is in. edge_s: only
     the device's newest edge_s seconds (before its newest piece's end or the clock, whichever is later), for a reader
     of what is said now: older pieces, a backlog arriving, are skipped; such a reader is not the device's queue
     (read_to, queued)."""
@@ -145,6 +161,8 @@ async def stream(device: str, after: dt.datetime | None, edge_s: float | None = 
             lo = max(last[0] if last else 0, time.time() * 1000) - edge_s * 1000
         p = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms > ? AND start_ms + seconds * 1000 > ? ORDER BY start_ms LIMIT 1",
                               (device, at, lo)).fetchone()
+        if p is not None and edge_s is None and (h := held(device)) is not None and p["start_ms"] >= h:
+            p = None  # older audio is still on its way: it goes first
         if p is None:
             await asyncio.sleep(1)
             continue
@@ -245,4 +263,29 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     assert len(cut(dt.datetime(2026, 10, 2, 10, 0, 59), dt.datetime(2026, 10, 2, 10, 1, 1), "s16le")) > 2 * SR * 2
     with wave.open(io.BytesIO(cut(dt.datetime(2026, 10, 2, 10, 0, 59), dt.datetime(2026, 10, 2, 10, 1, 1), "wav", "phone"))) as w:
         assert w.getframerate() == SR and abs(w.getnframes() - 2.4 * SR) < 2, w.getnframes()
+
+    async def held_back():  # 10:05 came first, the phone still has older audio: 10:03 is to go before it
+        out, s = [], stream("phone", None)
+        go = asyncio.create_task(anext(s))
+        hold("phone", T(5))
+        for _ in range(2):
+            out.append((await go)[0].minute)
+            go = asyncio.create_task(anext(s))
+        await asyncio.sleep(2.5)
+        assert out == [0, 1] and not go.done(), "10:05 waits"
+        assert save("phone", T(3), tone(60), "audio/ogg") > 59
+        out.append((await asyncio.wait_for(go, 5))[0].minute)
+        go = asyncio.create_task(anext(s))
+        await asyncio.sleep(2.5)
+        assert out == [0, 1, 3] and not go.done(), "still held"
+        hold("phone", None)
+        out.append((await asyncio.wait_for(go, 5))[0].minute)
+        assert out == [0, 1, 3, 5], out
+        await s.aclose()
+    asyncio.run(held_back())
+    hold("phone", T(5))
+    assert held("phone") == T(5) and asyncio.run(take(dt.datetime(2026, 10, 2, 10, 4), 1, "iphone")) == [20], "a hold is the device's own"
+    db.put_kv("hold:phone", {"at": T(5), "seen": time.time() - HOLD_MAX_S - 1})
+    assert held("phone") is None, "a hold not said again for HOLD_MAX_S is let go"
+    assert asyncio.run(take(dt.datetime(2026, 10, 2, 10, 4), 1)) == [5]
     print("ok")

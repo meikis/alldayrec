@@ -1028,12 +1028,15 @@ def device_status(device: str, st: dict) -> dict:
     end, done, pr = st["audio_end"], st["done_to"], st["progress"]
     lat = st["latency"] if st["drafting"] else st["final_latency"]  # what the page shows first: drafts while it watches
     left, received_to = audio.backlog(device, done)
+    hold = audio.held(device)
     # seconds of audio finalized per second, over the commits of the last 10 min (silence goes fast, speech ~8x)
     rate = (pr[-1][1] - pr[0][1]).total_seconds() / (pr[-1][0] - pr[0][0]) if len(pr) > 1 and pr[-1][0] > pr[0][0] else None
     return {"device": device, "audio_end": end.isoformat(timespec="seconds") if end else None,
             "behind_s": round((dt.datetime.now() - end).total_seconds(), 1) if end else None,
             "queued": audio.queued(device), "done_to": done.isoformat(timespec="seconds") if done else None,
             "received_to": received_to.isoformat(timespec="seconds") if received_to else None, "left_s": left,
+            # finalization waits here for older audio the phone is still sending (its hw: backlog_kb, backlog_eta_s)
+            "hold": dt.datetime.fromtimestamp(hold / 1000).isoformat(timespec="seconds") if hold else None,
             "rate": round(rate, 1) if rate else None, "eta_s": round(left / rate) if rate and rate > 0.1 and left > 30 else None,
             "last_speech": st["last_speech"].isoformat(timespec="seconds") if st["last_speech"] else None,
             "refine": st["refine"], "conversation": st["conversation"], "drafting": st["drafting"], "draft": st["draft"],
@@ -1120,11 +1123,15 @@ async def apk():
 
 
 @app.post("/api/chunks")
-async def chunk(request: Request, device: str, start: int, n: int | None = None):
+async def chunk(request: Request, device: str, start: int, n: int | None = None, hold: int | None = None):
     """One self-contained audio file (the apps' Opus or AAC pieces), `start` its device time in unix ms, `n` the 16 kHz
     samples the client wrote into it (the iPhone's AAC: the decoder adds some at both ends). Kept on disk (also
     for playback) and queued; the device's pipeline takes its pieces in time order at the pace finalization keeps up
-    with, so a client back from an outage sends its whole backlog at once, whatever other devices are doing."""
+    with, so a client back from an outage sends its whole backlog at once, whatever other devices are doing. `hold`
+    (unix ms): the client still has older audio of this device than that to send (it sends what is said now while it
+    reads a backlog off the recorder's card): finalization waits there for it, drafts go on (audio.hold); an upload
+    without it lets go."""
+    audio.hold(device, hold)  # before the piece is in: the queue must not hand it out ahead of the older audio
     seconds = await asyncio.to_thread(audio.save, device, start, await request.body(), request.headers.get("content-type", ""), n)
     if seconds is None:
         raise HTTPException(400, "could not decode")

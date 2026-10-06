@@ -45,7 +45,7 @@ type Item =
   | { k: "fold"; key: string; rows: Row[] }
   | { k: "conv"; key: string; c: Conversation }
   | { k: "gap"; key: string; at: string }
-  | { k: "catchup"; key: string; device: string; from: string; to: string; eta: number | null };
+  | { k: "catchup"; key: string; device: string; from: string; to: string; tail: string };
 // a device's finalized time: the status's, or its last final message's (it comes before the next status, every 2 s)
 function doneTo(device: string) {
   const s = status.value?.devices?.find((d) => d.device === device)?.done_to ?? "",
@@ -53,7 +53,8 @@ function doneTo(device: string) {
   return s > f ? s : f;
 }
 // Per device, the time between its final rows and its drafts (or, with none, its newest audio): the drafts follow
-// what is said now while a backlog (a phone back after hours offline) is finalized in order, so this time is not lost
+// what is said now while a backlog (a phone back after hours offline) is finalized in order, so this time is not lost.
+// Held (#130): the phone still reads older audio off the recorder's card in the background; finals wait for it
 const catchups = computed(() =>
   (live.value ? (status.value?.devices ?? []) : []).flatMap((d) => {
     const from = doneTo(d.device);
@@ -62,14 +63,19 @@ const catchups = computed(() =>
       rows.value
         .filter((r) => r.state === "draft" && r.source === d.device && r.start >= from)
         .reduce<string | null>((a, r) => (a && a < r.start ? a : r.start), null) ?? d.received_to;
-    if (!to || +new Date(to) - +new Date(from) <= CATCHUP_MS) return [];
+    if (!to || (!d.hold && +new Date(to) - +new Date(from) <= CATCHUP_MS)) return [];
+    const kb = d.hw?.backlog_kb,
+      eta = d.hold ? d.hw?.backlog_eta_s : d.eta_s,
+      mins = eta ? `，约 ${Math.ceil(eta / 60)} 分钟` : "";
     const it: Item = {
       k: "catchup",
       key: "u" + d.device,
       device: d.device,
       from,
       to,
-      eta: d.eta_s,
+      tail: d.hold
+        ? `；${kb ? `录音设备卡里还有 ${(kb / 1024).toFixed(kb >= 10240 ? 0 : 1)} MB 录音` : "手机还"}在后台补传${mins}，补完后定稿接上，实时初稿和分析照常`
+        : mins,
     };
     return [{ s: from, it }];
   }),
@@ -374,9 +380,7 @@ const convLink = (c: Conversation) =>
         <RouterLink :to="'/c/' + it.c.id">{{ convLink(it.c) }}</RouterLink>
       </div>
       <div v-else-if="it.k === 'catchup'" class="gap">
-        正在补齐 {{ it.device }} {{ hhmm(it.from) }}–{{ hhmm(it.to) }} 的录音{{
-          it.eta ? `，约 ${Math.ceil(it.eta / 60)} 分钟` : ""
-        }}
+        正在补齐 {{ it.device }} {{ hhmm(it.from) }}–{{ hhmm(it.to) }} 的录音{{ it.tail }}
       </div>
       <div v-else class="gap">— {{ hhmm(it.at) }} —</div>
     </template>
