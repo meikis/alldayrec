@@ -112,6 +112,7 @@ class _FirmwareTileState extends State<FirmwareTile> {
     final m = latest, wait = busy || widget.dfuBusy;
     // LR-P1's bootloader (nice!nano 0.6.0) erases the firmware when the transfer starts, and a reset midway leaves it
     // in USB-only update mode: a failed Bluetooth update always ends on USB (10-05), so it is updated over USB only
+    // (LR-P2, the same board kept for tests with bootloader 0.10.0, keeps the button: its updates are the test, #110)
     final usbOnly = widget.model == 'LR-P1';
     final lines = [
       widget.fw ?? '—',

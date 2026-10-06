@@ -9,6 +9,7 @@ XIAO nRF52840 Sense 上的录音固件：PDM 麦克风 → Opus 16 kHz → 记�
 |---|---|---|---|
 | `LR-X1` | XIAO nRF52840 Sense（板载麦克风，焊 SD 模块和电池） | `sdmod` | 板载分压 AIN7 |
 | `LR-P1` | ProMicro nRF52840（nice!nano 兼容，外接 PDM 麦克风和 SD 模块） | `promicro` | 芯片内部 VDDH/5（电池接 VDDH，不用外接电阻） |
+| `LR-P2` | 同 LR-P1 的板子，专做测试的那一块（bootloader 0.10.0，SWD 线常接，#110） | `promicro-p2` | 同 LR-P1 |
 
 每台的蓝牙名是型号加身份地址末两字节，如 `LR-P1-BDAE`：地址跟着芯片走，刷固件不变。广播包放型号（`LR-P1`），扫描响应放完整名字；
 设备信息服务里 Model 是型号，Hardware Revision 是板子。客户端都按记录流服务 UUID `7c3e0000-…`（广播里有）找设备。
