@@ -12,6 +12,7 @@
 #include "speaker.h"
 #include "lr_log.h"
 #include "lr_store.h"
+#include "lr_switch.h"
 #include "transport.h"
 #include "usb.h"
 #include "utils.h"
@@ -191,6 +192,14 @@ int main(void)
 #endif
 
     lr_log_init();  // after the battery (its voltage goes in the boot record), before the SD card (its mount tries)
+
+#ifdef CONFIG_LR_SWITCH
+    // switched off: System OFF from here, or on USB up for the USB port only (a firmware can still come that way)
+    if (!lr_switch_boot()) {
+        init_usb();
+        lr_switch_park();
+    }
+#endif
 
     // Enable button
 #ifdef CONFIG_OMI_ENABLE_BUTTON

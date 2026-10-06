@@ -59,6 +59,13 @@ config LR_BATTERY_VDDH
     bool "Battery on VDDH (nice!nano): read VDDH/5 inside the chip, no divider or charger pins"
     default n
 
+config LR_SWITCH
+    bool "LR-P3's slide switch on P1.15 (closed to GND = on): off stops recording and goes to System OFF (lr_switch.c)"
+    depends on OMI_ENABLE_USB
+    default n
+    help
+        "Only on a board with the switch wired: elsewhere P1.15 is open and reads off, and the board would never record."
+
 config OMI_ENABLE_USB
     bool "Enable the usb"
     help

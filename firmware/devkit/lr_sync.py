@@ -316,6 +316,8 @@ EVENTS = {
     25: ("SD_WRITES", sd_writes),
     26: ("READ", read_done),
     27: ("READ_TIME", lambda x, a, b: f"card {a} ms, notify {b} ms"),
+    28: ("SWITCH", lambda x, a, b: f"{'on' if x else 'off'}: " + (
+        ["recording", "System OFF", "up on USB, not recording", "restart"][a] if a < 4 else str(a))),
 }
 
 
@@ -405,6 +407,7 @@ def selftest():
         (5006, when(1_700_000_011_000), 8, "0x63", "x 1 a 2 b 3")], got
     assert EVENTS[25][1](1, 601 | 250 << 20, 4 | 2 << 10 | 2 << 20) == \
         "9 appends, 601 ms in all, slowest 250 ms; under 20 ms 4, 20-49 ms 2, 50-200 ms 2, over 200 ms 1"
+    assert EVENTS[28][1](0, 1, 0) == "off: System OFF" and EVENTS[28][1](1, 9, 0) == "on: 9"
     assert EVENTS[26][1](12, 409600, 10000 | 491 << 22) == \
         "400.0 KB in 10.0 s (40.0 KB/s), 491 B a packet, interval 15 ms"
     assert EVENTS[27][1](0, 3000, 6500) == "card 3000 ms, notify 6500 ms"

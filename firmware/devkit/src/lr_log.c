@@ -101,6 +101,11 @@ void lr_log(uint8_t code, uint8_t x, uint32_t a, uint32_t b)
     }
 }
 
+void lr_log_sync(void)
+{
+    flush();
+}
+
 void lr_log_reset(uint8_t gpregret)
 {
     lr_log(LR_DFU, gpregret, 0, 0);

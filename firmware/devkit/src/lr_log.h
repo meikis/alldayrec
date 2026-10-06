@@ -44,6 +44,9 @@
  *                   a bytes sent, b ms it took (bits 0-21) | bytes a DATA notification carries << 22
  *    27 READ_TIME   that READ's ms on the card (a: open, seek, fs_read) and in notify (b: sending, waiting for a TX
  *                   buffer); the rest of READ's ms is the SD mutex (recording's appends) and the open file's write-out
+ *    28 SWITCH      LR-P3's slide switch (lr_switch.c): x 1 on / 0 off, a what follows: 0 recording, 1 System OFF,
+ *                   2 up on USB, not recording, 3 a restart (switched while running or up on USB); the wake from
+ *                   System OFF is the next BOOT's RESETREAS (OFF: the switch, VBUS: USB)
  *
  * Each record has a sequence number, one more than the last, across boots: a reader asks for those from the last
  * it has. Records gather in RAM (__noinit: a crash or watchdog reset keeps them for the next boot) and go to flash
@@ -55,7 +58,7 @@
 enum {
     LR_BOOT = 1, LR_FAULT, LR_MOUNT, LR_STORE, LR_SLOW, LR_APPEND_ERR, LR_CARD_FULL, LR_USB_DISK, LR_CONNECT,
     LR_DISCONNECT, LR_PARAM, LR_MTU, LR_PHY, LR_TIME, LR_SECURITY, LR_PAIRED, LR_PAIR_FAIL, LR_FORGET, LR_DROPPED,
-    LR_SEGMENT, LR_DFU, LR_HEARTBEAT, LR_STACKS, LR_SD_RESET, LR_SD_WRITES, LR_READ, LR_READ_TIME,
+    LR_SEGMENT, LR_DFU, LR_HEARTBEAT, LR_STACKS, LR_SD_RESET, LR_SD_WRITES, LR_READ, LR_READ_TIME, LR_SWITCH,
     LR_UPTIME = 0x80,
 };
 
@@ -65,6 +68,8 @@ int lr_log_init(void);
 void lr_log(uint8_t code, uint8_t x, uint32_t a, uint32_t b);
 /* Into the bootloader (GPREGRET 0x57 UF2, 0xA8 OTA), the log written first. */
 void lr_log_reset(uint8_t gpregret);
+/* The RAM batch to flash now, on this thread: before a reset or System OFF. */
+void lr_log_sync(void);
 /* Everything from seq `from` on, to send() at most max records at a time (consecutive seqs, read into buf); stops
  * when send() returns false. Returns the seq the next record will get. */
 uint32_t lr_log_read(uint32_t from, uint8_t *buf, uint16_t max,

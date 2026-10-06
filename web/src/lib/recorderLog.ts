@@ -162,6 +162,12 @@ const EVENTS: Record<number, [string, string, (r: Rec) => string]> = {
   25: ["SD_WRITES", "写卡统计（10 分钟）", sdWrites],
   26: ["READ", "补传一次", readDone],
   27: ["READ_TIME", "补传耗时", (r) => `读卡 ${r.a} ms，蓝牙发送 ${r.b} ms`],
+  28: [
+    "SWITCH",
+    "开关",
+    (r) =>
+      `${r.x ? "开" : "关"}：${["录音", "关机（System OFF，拨开或插 USB 唤醒）", "插着 USB，不录音", "重启"][r.a] ?? r.a}`,
+  ],
 };
 // every few minutes or every connection: hidden unless asked for
 const ROUTINE = new Set([9, 11, 12, 13, 14, 15, 20, 22, 23, 25]);
