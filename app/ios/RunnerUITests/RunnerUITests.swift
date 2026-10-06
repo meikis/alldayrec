@@ -125,7 +125,8 @@ final class Flow: XCTestCase {
   func testAutoLock() {
     settings.terminate()
     settings.launch()
-    tap(reveal(settings.staticTexts.matching(NSPredicate(format: "label IN %@", ["显示与亮度", "Display & Brightness"])).firstMatch, in: settings))
+    tap(reveal(settings.descendants(matching: .any).matching(NSPredicate(
+      format: "identifier BEGINSWITH 'com.apple.settings.display' OR label IN %@", ["显示与亮度", "Display & Brightness"])).firstMatch, in: settings))
     tap(settings.staticTexts.matching(NSPredicate(format: "label IN %@", ["自动锁定", "Auto-Lock"])).firstMatch)
     let was = settings.cells.matching(NSPredicate(format: "isSelected == true")).firstMatch
     XCTAssert(was.waitForExistence(timeout: 10), "no Auto-Lock option selected (Low Power Mode holds it at 30 s?)")
@@ -167,7 +168,8 @@ final class Flow: XCTestCase {
   /// `e`, the list it is in swiped up until it is on the screen (long lists build only what is near it).
   func reveal(_ e: XCUIElement, in a: XCUIApplication) -> XCUIElement {
     sleep(1)
-    for _ in 0..<6 where !(e.exists && e.isHittable) { a.swipeUp() }
+    let list = a.collectionViews.firstMatch  // Settings' list (swiping the whole app did not scroll it, 10-06)
+    for _ in 0..<6 where !(e.exists && e.isHittable) { (a == settings && list.exists ? list : a).swipeUp() }
     return e
   }
 
@@ -180,7 +182,8 @@ final class Flow: XCTestCase {
   func page(_ title: String) {
     app.activate()
     tap(button(["Open navigation menu", "打开导航菜单"]))
-    tap(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS 'Tab '", title)).firstMatch)  // "录音设备\nTab 5 of 6"
+    // "录音设备\nTab 5 of 6": a StaticText, or Other while it is the page shown (10-06)
+    tap(app.descendants(matching: .any).matching(NSPredicate(format: "label BEGINSWITH %@ AND label CONTAINS 'Tab '", title)).firstMatch)
     sleep(1)
   }
 
@@ -217,7 +220,8 @@ final class Flow: XCTestCase {
 
   /// Settings › Bluetooth › the recorder ⓘ › 忽略此设备 (nothing to do when it is not listed).
   func forget() {
-    XCTAssert(recorder != "LR-X1-567E", "never the owner's daily recorder")  // bound to the real app
+    // only the Mac's fake, unless uitest.sh runs with a real board (LR_REAL=1); never the owner's daily recorder
+    XCTAssert(recorder.hasPrefix("LR-MAC-") || (env["LR_REAL"] == "1" && recorder != "LR-X1-567E"), "not forgetting \(recorder)")
     bluetooth()
     let cell = row(recorder)
     guard cell.waitForExistence(timeout: 10) else { return say("forget: \(recorder) not listed") }

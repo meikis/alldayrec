@@ -47,7 +47,8 @@ unlocked() {
 }
 N=0
 ui() {  # one test of RunnerUITests (testLaunch: ui Launch), VAR=value for it; its LRUI lines into run.log
-  local t=$1; shift; local vars=(TEST_RUNNER_LR_NAME="$NAME"); for v in "$@"; do vars+=("TEST_RUNNER_$v"); done
+  local t=$1; shift; local vars=(TEST_RUNNER_LR_NAME="$NAME" TEST_RUNNER_LR_REAL="$([ -z "$FAKE" ] && echo 1)")
+  for v in "$@"; do vars+=("TEST_RUNNER_$v"); done
   local try rc
   for try in 1 2 3; do
     unlocked; runner_gone; N=$((N + 1))
@@ -110,7 +111,7 @@ step_setup() {  # build/install if asked, server + tunnel, adverts watched (or t
   fi
   ls "$W"/dd/Build/Products/*iphoneos*.xctestrun >/dev/null 2>&1 || { verdict setup FAIL "no UI test build: --build"; exit 1; }
   local port; port=$((40000 + RANDOM % 20000)); openssl rand -hex 16 > "$W/token"
-  rm -rf "$W/up"
+  rm -rf "${W:?}/up"
   nohup python3 "$E/server.py" serve 127.0.0.1 "$port" "$(cat "$W/token")" "$W/up" > "$W/server.log" 2>&1 & echo $! > "$W/server.pid"
   nohup cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$port" > "$W/tunnel.log" 2>&1 & echo $! > "$W/tunnel.pid"
   local url=
@@ -124,7 +125,7 @@ step_setup() {  # build/install if asked, server + tunnel, adverts watched (or t
     swiftc -O -o "$W/fake" fake.swift || { verdict setup FAIL "fake.swift"; exit 1; }
     [ -f "$W/tone.ogg" ] || ffmpeg -v error -f lavfi -i "aevalsrc='0.3*sin(2*PI*(300+100*mod(floor(t)\,10))*t)':s=16000:d=120" \
       -ac 1 -c:a libopus -frame_duration 10 -b:a 24k "$W/tone.ogg"
-    rm -rf "$W/card"; (cd "$W" && exec ./fake $NAME > fake.log 2>&1) & echo $! > "$W/fake.pid"
+    rm -rf "${W:?}/card"; (cd "$W" && exec ./fake $NAME > fake.log 2>&1) & echo $! > "$W/fake.pid"
   else
     : > "$W/adv.jsonl"
     nohup uv run -q --no-project --with bleak python "$E/ble.py" watch $NAME 7200 "$W/adv.jsonl" > "$W/watch.log" 2>&1 &
@@ -153,6 +154,8 @@ step_add() {  # the add list, force-binding, iOS's pairing dialog, following liv
 }
 
 fake_bind() {  # the fake by its identifier, as run.sh: the app logs what it sees while scanning for a name it never gets
+  # first through XCUITest: a new test app asks for Bluetooth on its first scan, and only a test can say Allow (10-06)
+  ui Launch LR_E2E="$(settings "${LINK%\}}, \"bleName\": \"$NAME\", \"bleId\": null}")" || return 1
   local n; n=$(wc -l < "$W/console.log" 2>/dev/null || echo 0)
   xcrun devicectl device process launch --device "$DEV" --terminate-existing --console --environment-variables \
     "$(python3 -c 'import json,sys; print(json.dumps({"LR_E2E": sys.argv[1]}))' "$(settings "${LINK%\}}, \"bleName\": \"$NAME\", \"bleId\": null}")")" \
@@ -233,7 +236,7 @@ step_kill() {  # the nearest to iOS ending it: the process kills itself (SIGKILL
   log "the app (pid $p) kills itself 2 min after its launch, in the background"
   k=$SECONDS
   while [ $((SECONDS - k)) -lt 300 ]; do sleep 5; q=$(pid); [ -n "$q" ] && [ "$q" != "$p" ] && break; q=; done
-  log "after the kill: ${q:+relaunched by iOS (pid $q)}${q:-not relaunched within 5 min}"
+  if [ -n "$q" ]; then log "after the kill: relaunched by iOS (pid $q)"; else log "after the kill: not relaunched within 5 min"; fi
   sleep 60
   if [ -n "$q" ] && ev wait-audio "$NAME" "$a" "$(( $(ms) - 20000 ))" 300; then verdict kill PASS "relaunched in the background (pid $q), gap-free"
   else verdict kill FAIL "relaunch ${q:-none}; audio above"; ui Open LR_WAIT_S=120 >/dev/null; fi
