@@ -27,7 +27,7 @@ def usb_devices(serial):
     """(product, BSD disk name or None) of each USB device with this serial number, from the IORegistry"""
     out = subprocess.run(["ioreg", "-r", "-c", "IOUSBHostDevice", "-l", "-w0"], capture_output=True, text=True).stdout
     found = []
-    for block in re.split(r"\n(?=\+-o )", out):
+    for block in re.split(r"\n(?=[ |]*\+-o [^\n]*<class IOUSBHostDevice,)", out):  # devices behind a hub nest in it
         if f'"USB Serial Number" = "{serial}"' in block:
             product = re.search(r'"USB Product Name" = "([^"]*)"', block)
             disk = re.search(r'"BSD Name" = "(disk\d+)"', block)
