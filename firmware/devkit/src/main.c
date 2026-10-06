@@ -7,6 +7,7 @@
 #include "codec.h"
 #include "config.h"
 #include "led.h"
+#include "led_code.h"
 #include "mic.h"
 #include "sdcard.h"
 #include "speaker.h"
@@ -100,10 +101,20 @@ static void boot_led_sequence(void)
 void set_led_state()
 {
     // Called every 500 ms. Blue: a phone connected; red: recording to the card; blue blinking: no phone bound yet, not
-    // recording; yellow blinking: paused; green blinking: charging; green twice: just paired. The ProMicro has only
-    // the blue LED.
+    // recording; yellow blinking: paused; green blinking: charging; green twice: just paired. The ProMicro has one LED:
+    // short flashes instead (led_code.h).
     static bool tick;
     tick = !tick;
+#ifdef CONFIG_LR_ONE_LED
+    static unsigned n;
+    int k = led_flashes(n++, lr_bond_count(), is_off || lr_paused(), is_connected);
+    for (int i = 0; i < k; i++, k_msleep(150)) {  // 30 ms flashes, 150 ms apart
+        set_led_blue(true);  // led2: P0.15, red on these boards
+        k_msleep(30);
+        set_led_blue(false);
+    }
+    return;
+#endif
     bool green = usb_charge && tick;
     if (lr_led_paired) {
         green = lr_led_paired-- & 1;

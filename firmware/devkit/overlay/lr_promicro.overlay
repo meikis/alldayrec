@@ -16,8 +16,9 @@
 	};
 };
 
-/* One LED, blue, on P0.15 (active high): lit while a phone is connected. Red and green go to the unrouted
- * bottom pads P1.02 / P1.07. */
+/* One LED on P0.15 (active high), red on these clones (USB-C up, chip side: the right one), driven as led2 (the XIAO's
+ * blue): short status flashes, CONFIG_LR_ONE_LED (led_code.h). The blue one beside it is the charger's, not ours.
+ * led0/led1 go to the unrouted bottom pads P1.02 / P1.07. */
 &led0 { gpios = <&gpio1 2 GPIO_ACTIVE_HIGH>; };
 &led1 { gpios = <&gpio1 7 GPIO_ACTIVE_HIGH>; };
 &led2 { gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>; };
