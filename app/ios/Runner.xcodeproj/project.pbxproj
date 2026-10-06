@@ -18,6 +18,9 @@
 		A1B2C3D42F0000000000A005 /* Store.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D42F0000000000A006 /* Store.swift */; };
 		A1B2C3D42F0000000000A007 /* Ble.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D42F0000000000A008 /* Ble.swift */; };
 		A1B2C3D42F0000000000A009 /* DeviceLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D42F0000000000A00A /* DeviceLog.swift */; };
+		D0F0D0F02F0000000000D001 /* Dfu.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0F0D0F02F0000000000D002 /* Dfu.swift */; };
+		D0F0D0F02F0000000000D003 /* DfuRun.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0F0D0F02F0000000000D004 /* DfuRun.swift */; };
+		D0F0D0F02F0000000000D005 /* NordicDFU in Frameworks */ = {isa = PBXBuildFile; productRef = D0F0D0F02F0000000000D006 /* NordicDFU */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
@@ -63,6 +66,8 @@
 		A1B2C3D42F0000000000A006 /* Store.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Store.swift; sourceTree = "<group>"; };
 		A1B2C3D42F0000000000A008 /* Ble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ble.swift; sourceTree = "<group>"; };
 		A1B2C3D42F0000000000A00A /* DeviceLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceLog.swift; sourceTree = "<group>"; };
+		D0F0D0F02F0000000000D002 /* Dfu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Dfu.swift; sourceTree = "<group>"; };
+		D0F0D0F02F0000000000D004 /* DfuRun.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DfuRun.swift; sourceTree = "<group>"; };
 		78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FlutterGeneratedPluginSwiftPackage; path = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage; sourceTree = "<group>"; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Debug.xcconfig; path = Flutter/Debug.xcconfig; sourceTree = "<group>"; };
@@ -80,6 +85,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */,
+				D0F0D0F02F0000000000D005 /* NordicDFU in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -151,6 +157,8 @@
 				A1B2C3D42F0000000000A006 /* Store.swift */,
 				A1B2C3D42F0000000000A008 /* Ble.swift */,
 				A1B2C3D42F0000000000A00A /* DeviceLog.swift */,
+				D0F0D0F02F0000000000D002 /* Dfu.swift */,
+				D0F0D0F02F0000000000D004 /* DfuRun.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
 			path = Runner;
@@ -209,6 +217,7 @@
 			name = Runner;
 			packageProductDependencies = (
 				78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */,
+				D0F0D0F02F0000000000D006 /* NordicDFU */,
 			);
 			productName = Runner;
 			productReference = 97C146EE1CF9000F007C117D /* Runner.app */;
@@ -248,6 +257,7 @@
 			mainGroup = 97C146E51CF9000F007C117D;
 			packageReferences = (
 				781AD8BC2B33823900A9FFBB /* XCLocalSwiftPackageReference "Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage" */,
+				D0F0D0F02F0000000000D007 /* XCRemoteSwiftPackageReference "IOS-DFU-Library" */,
 			);
 			productRefGroup = 97C146EF1CF9000F007C117D /* Products */;
 			projectDirPath = "";
@@ -344,6 +354,8 @@
 				A1B2C3D42F0000000000A005 /* Store.swift in Sources */,
 				A1B2C3D42F0000000000A007 /* Ble.swift in Sources */,
 				A1B2C3D42F0000000000A009 /* DeviceLog.swift in Sources */,
+				D0F0D0F02F0000000000D001 /* Dfu.swift in Sources */,
+				D0F0D0F02F0000000000D003 /* DfuRun.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -748,10 +760,26 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		D0F0D0F02F0000000000D007 /* XCRemoteSwiftPackageReference "IOS-DFU-Library" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/NordicSemiconductor/IOS-DFU-Library";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 4.17.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = FlutterGeneratedPluginSwiftPackage;
+		};
+		D0F0D0F02F0000000000D006 /* NordicDFU */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D0F0D0F02F0000000000D007 /* XCRemoteSwiftPackageReference "IOS-DFU-Library" */;
+			productName = NordicDFU;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

@@ -41,9 +41,9 @@ enum Recorder {
       case "status": result(status())
       case "deviceName": result(UIDevice.current.name)  // "iPhone" since iOS 16 without the user-assigned-device-name entitlement
       case "upload": if Uploader.pending(dir) > 0 { upload() }; result(nil)
-      case "recorder":  // the bound BLE recorder and what it last said; firmware updates are Android's (Dfu.kt)
+      case "recorder":  // the bound BLE recorder, what it last said, and how a firmware update goes
         result(["name": defaults.string(forKey: "bleName") ?? NSNull(), "model": defaults.string(forKey: "bleModel") ?? NSNull(),
-                "fw": defaults.string(forKey: "bleFw") ?? NSNull(), "dfu": NSNull(), "kicked": defaults.bool(forKey: "bleKicked")])
+                "fw": defaults.string(forKey: "bleFw") ?? NSNull(), "dfu": Dfu.state ?? NSNull(), "kicked": defaults.bool(forKey: "bleKicked")] as [String: Any])
       case "permissions":  // what adding a recorder asks for: on iOS only Bluetooth (no notification, no battery setting)
         let ok = CBManager.authorization == .allowedAlways
         if ok && probe == nil { probe = CBCentralManager(delegate: nil, queue: nil, options: [CBCentralManagerOptionShowPowerAlertKey: false]) }
@@ -85,6 +85,14 @@ enum Recorder {
           try l.pause(a["s"] as? Int ?? 0)
           result(nil)
         } catch { result(FlutterError(code: "none", message: "录音设备没连上", details: nil)) }
+      case "dfu":  // a package from the server for `model`: only onto a recorder that said it is that model (DfuRun.swift)
+        let zip = (a["zip"] as? FlutterStandardTypedData)?.data ?? Data(), id = defaults.string(forKey: "bleId")
+        if let no = Dfu.refusal(want: a["model"] as? String, model: defaults.string(forKey: "bleModel"), id: id,
+                                linked: slicer != nil || link != nil, sha256: Dfu.sha256(zip), expected: a["sha256"] as? String) {
+          return result(FlutterError(code: no.0, message: no.1, details: nil))
+        }
+        do { try Dfu.start(UUID(uuidString: id!)!, zip); result(nil) }  // refusal() checked the identifier
+        catch { result(FlutterError(code: "zip", message: "固件包打不开：\(error)", details: nil)) }
       default: result(FlutterMethodNotImplemented)
       }
     }
@@ -100,7 +108,8 @@ enum Recorder {
             "note": uploader?.note ?? NSNull(), "interruptedAt": interruptedAt ?? NSNull(),
             "source": (slicer != nil ? "mic" : l != nil ? "ble" : nil) ?? NSNull(), "link": l?.state ?? NSNull(), "tag": l?.tag ?? NSNull(),
             "hw": l?.hw ?? NSNull(), "usbNote": l?.usbNote ?? NSNull(), "lastSync": l?.syncNote ?? NSNull(),
-            "syncDone": l?.syncDoneKb ?? NSNull(), "syncTotal": l?.syncTotalKb ?? NSNull(), "pausedUntil": l?.pausedUntil ?? NSNull()]
+            "syncDone": l?.syncDoneKb ?? NSNull(), "syncTotal": l?.syncTotalKb ?? NSNull(), "pausedUntil": l?.pausedUntil ?? NSNull(),
+            "dfu": Dfu.state ?? NSNull(), "dfuBusy": Dfu.busy]
   }
 
   /// The piece length the BLE link cuts the live file into (the microphone's Slicer has its own).

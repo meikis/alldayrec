@@ -1,8 +1,9 @@
 // The record stream as the phone takes it (Runner/Store.swift), the cases of the Android app's StoreTest.kt and the data
 // of firmware/devkit/lr_sync.py's selftest: mirror (LIVE with holes READ again), pieces dated by the nearest 'T', frames
-// held for a boot without one, closed files finished and deletable once their pieces are uploaded; and the recorder's
-// event log (Runner/DeviceLog.swift, DeviceLogTest.kt's case). Foundation only, so CI runs it on Linux:
-//   cd app/ios && swiftc -o /tmp/storecheck Runner/Store.swift Runner/DeviceLog.swift StoreCheck/main.swift && /tmp/storecheck
+// held for a boot without one, closed files finished and deletable once their pieces are uploaded; the recorder's
+// event log (Runner/DeviceLog.swift, DeviceLogTest.kt's case); and what a firmware update checks first (Runner/Dfu.swift).
+// Foundation only, so CI runs it on Linux:
+//   cd app/ios && swiftc -o /tmp/storecheck Runner/Store.swift Runner/DeviceLog.swift Runner/Dfu.swift StoreCheck/main.swift && /tmp/storecheck
 import Foundation
 
 func check<T: Equatable>(_ got: T, _ want: T, _ what: String, line: Int = #line) {
@@ -232,5 +233,24 @@ do {
   check(without > 5 * max(with, 2), true, "without one it grows (else this check proves nothing)")
 }
 #endif
+
+// a firmware update: only the recorder's own model, only the bytes the server listed, only with the link down
+do {
+  let id = UUID().uuidString, sha = String(repeating: "ab", count: 32)
+  func no(want: String? = "LR-P3", model: String? = "LR-P3", id: String? = id, linked: Bool = false, sha256: String = sha) -> String? {
+    Dfu.refusal(want: want, model: model, id: id, linked: linked, sha256: sha256, expected: sha)?.0
+  }
+  check(no(), nil, "the recorder's model, the listed bytes: go")
+  check(no(want: "LR-X1"), "model", "another model's package")
+  check(no(want: nil), "model", "a package without a model")
+  check(no(sha256: String(repeating: "ab", count: 31) + "ac"), "sha256", "bytes other than the listed ones")
+  check(no(model: nil), "none", "a recorder never read")
+  check(no(id: nil), "none", "no recorder bound")
+  check(no(id: "LR-P3-116C"), "none", "a name where the identifier goes")
+  check(no(linked: true), "busy", "the link still up")
+  Dfu.busy = true
+  check(no(), "busy", "an update under way")
+  Dfu.busy = false
+}
 
 print("storecheck ok")

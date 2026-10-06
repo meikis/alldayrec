@@ -1,7 +1,6 @@
 // The BLE recorder's firmware from the server (server/firmware.py): the newest package of the recorder's model, looked
-// up and sent over Bluetooth (Dfu.kt) only when the person asks. Android only: on iOS the tile shows the revision.
+// up and sent over Bluetooth (Dfu.kt on Android, DfuRun.swift on iOS) only when the person asks.
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -60,7 +59,7 @@ class _FirmwareTileState extends State<FirmwareTile> {
       final res = await _get('/api/firmware/${m['model']}/${m['version']}.zip');
       if (res.statusCode != 200) throw 'HTTP ${res.statusCode}';
       note = null;
-      // Dfu.kt checks again: the model the recorder said it is, and the package's sha256
+      // the native side checks again: the model the recorder said it is, and the package's sha256
       await Recorder.withoutLink(() => _ch.invokeMethod('dfu', {'model': m['model'], 'zip': res.bodyBytes, 'sha256': m['sha256']}));
     } on PlatformException catch (e) {
       note = e.message;
@@ -120,8 +119,7 @@ class _FirmwareTileState extends State<FirmwareTile> {
       if (m != null && newer && '${m['notes'] ?? ''}'.isNotEmpty) '${m['notes']}',
       ?note,
       ?widget.dfu,
-      if (Platform.isIOS) 'iPhone 上不能升级固件：用 Android 手机的 App，或插 USB 用 lr.sh flash'
-      else if (usbOnly) 'LR-P1 只能插 USB 升级：lr.sh flash promicro（蓝牙升级中途一断，只能插 USB 救回）',
+      if (usbOnly) 'LR-P1 只能插 USB 升级：lr.sh flash promicro（蓝牙升级中途一断，只能插 USB 救回）',
     ];
     return ListTile(
       contentPadding: EdgeInsets.zero,
@@ -130,7 +128,7 @@ class _FirmwareTileState extends State<FirmwareTile> {
       subtitle: Text(lines.join('\n')),
       trailing: wait
           ? const SizedBox.square(dimension: 24, child: CircularProgressIndicator(strokeWidth: 2.5))
-          : widget.model == null || Platform.isIOS
+          : widget.model == null
               ? null
               : newer && !usbOnly
                   ? FilledButton.tonalIcon(onPressed: _update, icon: const Icon(Icons.system_update_alt_rounded, size: 18), label: const Text('升级'))
