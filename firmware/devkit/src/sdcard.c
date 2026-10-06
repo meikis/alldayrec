@@ -10,12 +10,25 @@
 #include <zephyr/fs/fs_sys.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sd/sdmmc.h>
 #include <zephyr/storage/disk_access.h>
 #include <zephyr/sys/check.h>
 
 LOG_MODULE_REGISTER(sdcard, CONFIG_LOG_DEFAULT_LEVEL);
 
 static FATFS fat_fs;
+
+/* NCS 2.7's SD stack waits for the card on DISK_IOCTL_CTRL_SYNC, then answers -ENOTSUP: card_ioctl() (zephyr/subsys/sd/
+ * sd_ops.c) lacks a break there. FatFs ends a close, an unlink, a mkdir with a sync, so each reported a disk error
+ * after the work was done; on a card without LR/ the first boot's mkdir failed and nothing went to the card for a
+ * minute (#137). The linker sends the SD disk's calls here (CMakeLists.txt, --wrap); drop it with an NCS that has
+ * the break. */
+int __real_sdmmc_ioctl(struct sd_card *card, uint8_t cmd, void *buf);
+int __wrap_sdmmc_ioctl(struct sd_card *card, uint8_t cmd, void *buf)
+{
+    int err = __real_sdmmc_ioctl(card, cmd, buf);
+    return cmd == DISK_IOCTL_CTRL_SYNC && err == -ENOTSUP ? 0 : err;
+}
 
 static struct fs_mount_t mount_point = {
     .type = FS_FATFS,

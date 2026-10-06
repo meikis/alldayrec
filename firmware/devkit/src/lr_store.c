@@ -141,7 +141,7 @@ static int append(const void *data, uint32_t len)
     }
     if (!err) {
         int n = fs_write(&seg_file, data, len);
-        fs_sync(&seg_file);  // on the card now (power can go any time); NCS 2.7 reports -EIO for a sync that worked
+        fs_sync(&seg_file);  // on the card now: power can go any time
         uint32_t ms = k_uptime_get() - t0;
         append_max = MAX(append_max, (uint16_t) MIN(ms, UINT16_MAX));
         if (ms > 1000) {  // SD_WRITES counts those over 200 ms: one event each filled LR-P1's log in 80 min (#99)
@@ -770,13 +770,7 @@ static void store_thread(void)
             int err = -EBUSY;
             if (c.file != cur_file()) {
                 k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
-                struct fs_dirent e;
                 err = fs_unlink(file_path(p, c.file));
-                // NCS 2.7's card_ioctl() lacks a break after DISK_IOCTL_CTRL_SYNC, so every FatFs sync reports
-                // a disk error (-EIO) after the work is done: gone is what counts
-                if (err == -EIO && fs_stat(p, &e) == -ENOENT) {
-                    err = 0;
-                }
                 count_free();
                 k_mutex_unlock(&write_sdcard_mutex);
             }

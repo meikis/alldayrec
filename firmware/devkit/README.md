@@ -76,7 +76,7 @@ uv run --no-project --with bleak python lr_listen.py --selftest
 ## 已知问题
 
 - SD 用 legacy SPI（`nordic,nrf-spi`）8 MHz：SPIM（EasyDMA）在焊好的模块上初始化挂死，原因未查
-- NCS 2.7 `card_ioctl()` 在 `DISK_IOCTL_CTRL_SYNC` 后缺 `break`，FatFs 每次 sync 都报 -EIO（数据已写进去，写卡时忽略）；DELETE 以 `fs_stat` 确认文件已删
+- NCS 2.7 `card_ioctl()` 在 `DISK_IOCTL_CTRL_SYNC` 后缺 `break`，FatFs 每次 sync 都报 -EIO（数据其实写进去了）：新卡第一次开机 `mkdir LR` 因此报错、一分钟不写卡（#137）。`sdcard.c` 用链接器 `--wrap=sdmmc_ioctl` 把这个假错改成 0，升级到修好的 NCS 后删掉
 - 卡写失败或开机时没卡：流照常推（TIME 的 store 显示错误），每分钟重新挂载一次卡，成功后从新段继续写（开机时没卡的这次才计开机次数）
 - `'T'` 的帧号取的是对时那一刻正在编码的帧，这一帧的声音比它早约 0–100 ms（麦克风按 100 ms 一块交数据），时间系统性偏晚约 50 ms
 - 热复位时 SD 卡可能卡在命令中间只能断电恢复；1200 bps 复位前会先卸载，看门狗复位仍有风险

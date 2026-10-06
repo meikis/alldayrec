@@ -204,7 +204,7 @@ static ssize_t fs_read(struct fs_file_t *f, void *d, size_t n)
     return n;
 }
 static int fs_seek(struct fs_file_t *f, long o, int w) { f->pos = o; return 0; }
-static int fs_sync(struct fs_file_t *f) { return -EIO; }  // as NCS 2.7 does
+static int fs_sync(struct fs_file_t *f) { return 0; }
 static void fs_file_t_init(struct fs_file_t *f) {}
 static void fs_dir_t_init(struct fs_dir_t *d) {}
 static int fs_opendir(struct fs_dir_t *d, const char *p) { return -ENOENT; }
@@ -212,7 +212,6 @@ static int fs_readdir(struct fs_dir_t *d, struct fs_dirent *e) { return -ENOENT;
 static int fs_closedir(struct fs_dir_t *d) { return 0; }
 static int fs_mkdir(const char *p) { return 0; }
 static int fs_unlink(const char *p) { return 0; }
-static int fs_stat(const char *p, struct fs_dirent *e) { return -ENOENT; }
 static int fs_statvfs(const char *p, struct fs_statvfs *v) { v->f_bfree = v->f_blocks = 1 << 20; v->f_frsize = 4096; return 0; }
 
 struct k_mutex write_sdcard_mutex;
