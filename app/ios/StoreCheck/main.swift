@@ -159,4 +159,45 @@ do {
   check(DeviceLog.why(own, server: ""), "x（\"\" NSURLErrorDomain -1000）", "no address")
 }
 
+#if canImport(ObjectiveC)
+// #109: the BLE session's loop (Ble.swift) on a thread that lives for hours: LIVE bytes into the mirror, then pieces().
+// Foundation autoreleases what Mirror reads (FileHandle.readToEnd), so without a pool per pass the thread keeps all of
+// it: 3.4 GB on the iPhone 10-06. Only on a Mac: Linux has no autorelease pools (CI runs the rest there).
+do {
+  func footprintMB() -> Double {
+    var info = task_vm_info_data_t()
+    var n = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+    _ = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(n)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &n) } }
+    return Double(info.phys_footprint) / 1_048_576
+  }
+  func growth(pool: Bool) -> Double {
+    let dir = tmp(), out = tmp(), m = Mirror(dir)
+    let f: Int64 = 1 << 16 | 1
+    var off = Int64(t(0, 1_000_000).count), frame = 0, mb = 0.0
+    _ = try! m.put(f, 0, t(0, 1_000_000))
+    let done = DispatchSemaphore(value: 0)
+    Thread.detachNewThread {
+      let before = footprintMB()
+      for i in 0..<3000 {  // 5 min of audio in 100 ms records of 40-byte frames, 20 s pieces (the background slice)
+        let pass = {
+          let rec = Data([0x41, 10] + Store.le(UInt32(frame)) + (0..<10).flatMap { _ in [40] + [UInt8](repeating: 0x55, count: 40) })
+          _ = try! m.put(f, off, rec); off += Int64(rec.count); frame += 10
+          _ = try! m.pieces(out, out, tag: "LR-P1-BDAE", liveFrames: 2000, boot: 1)
+          if i % 200 == 0 { clear(out) }  // uploaded
+        }
+        if pool { autoreleasepool(invoking: pass) } else { pass() }
+      }
+      mb = footprintMB() - before
+      done.signal()
+    }
+    done.wait()
+    return mb
+  }
+  let with = growth(pool: true), without = growth(pool: false)  // this order: a finished thread drains its pool
+  print(String(format: "session loop, 5 min of audio: %.0f MB kept without a pool per pass, %.1f MB with", without, with))
+  check(with < 10, true, "a pool per pass keeps the session's memory flat")
+  check(without > 5 * max(with, 2), true, "without one it grows (else this check proves nothing)")
+}
+#endif
+
 print("storecheck ok")

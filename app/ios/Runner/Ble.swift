@@ -444,28 +444,32 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       var lastStatus = Date()
       var open: Int64 = -1  // the file LIVE goes on in
       while alive(p) {
-        let pk = live.poll(1)
-        if !alive(p) { break }
-        if let pk, pk.count > 8 {
-          let f = Ble.u32(pk, 0)
-          if f != open { let moved = open >= 0; open = f; if moved { try catchUp(p, m) } }  // a new file: LIST says how the last ended
-          if let hole = try m.put(f, Ble.u32(pk, 4), Data(pk[8...])) {
-            Ble.log("LIVE hole in \(String(f, radix: 16)) at \(hole): READ")
-            try catchUp(p, m)
+        // a pool per pass: this thread lives as long as the link, and what Foundation autoreleases here (each pieces()'s
+        // read of the live file) would stay until it ends: 3.4 GB and killed by iOS within hours on 10-06 (#109)
+        try autoreleasepool {
+          let pk = live.poll(1)
+          guard alive(p) else { return }
+          if let pk, pk.count > 8 {
+            let f = Ble.u32(pk, 0)
+            if f != open { let moved = open >= 0; open = f; if moved { try catchUp(p, m) } }  // a new file: LIST says how the last ended
+            if let hole = try m.put(f, Ble.u32(pk, 4), Data(pk[8...])) {
+              Ble.log("LIVE hole in \(String(f, radix: 16)) at \(hole): READ")
+              try catchUp(p, m)
+            }
+            if !live.isEmpty { return }  // a burst: take it all before the rest
           }
-          if !live.isEmpty { continue }  // a burst: take it all before the rest
-        }
-        try pieces(m)
-        if Recorder.now() - synced > Ble.timeEveryMs { synced = try sync(p) }
-        if -lastStatus.timeIntervalSinceNow > 60 {
-          try jobs.poll()?(p)
-          _ = try status(p, name)
-          readLog(p)
-          try clean(p, m)
-          lastStatus = Date()
-          Ble.log("status: battery \(hw["battery"] ?? "-")% card \(hw["store"] ?? "-") free \(hw["free_kb"] ?? "-") KB")
-        } else {
-          try jobs.poll()?(p)
+          try pieces(m)
+          if Recorder.now() - synced > Ble.timeEveryMs { synced = try sync(p) }
+          if -lastStatus.timeIntervalSinceNow > 60 {
+            try jobs.poll()?(p)
+            _ = try status(p, name)
+            readLog(p)
+            try clean(p, m)
+            lastStatus = Date()
+            Ble.log("status: battery \(hw["battery"] ?? "-")% card \(hw["store"] ?? "-") free \(hw["free_kb"] ?? "-") KB")
+          } else {
+            try jobs.poll()?(p)
+          }
         }
       }
     } catch is Gone {
@@ -494,7 +498,8 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     let s = Status(boot: Int(Store.le(t, 0, 2)), frame: Ble.u32(t, 2), store: Int(Int16(truncatingIfNeeded: Store.le(t, 6, 2))))
     var h: [String: Any] = ["name": name, "store": s.store, "free_kb": Ble.u32(t, 8), "total_kb": Ble.u32(t, 12),
                             // optional: macOS cannot publish 180F, so the Mac's fake recorder (app/ios/e2e) has none
-                            "battery": (try? read(p, Ble.bas, Ble.battery))?.first.map { Int($0) } ?? NSNull()]
+                            "battery": (try? read(p, Ble.bas, Ble.battery))?.first.map { Int($0) } ?? NSNull(),
+                            "app_mb": Recorder.footprintMB()]  // this app's own memory, to see it grow from the server (#109)
     if t.count >= 47 {
       let left = Int64(Int32(truncatingIfNeeded: Store.le(t, 43, 4)))
       pausedUntil = left > 0 ? Recorder.now() + left * 1000 : 0
@@ -588,8 +593,10 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       while f == open || m.have(f) < m.files[f]!.size {
         guard alive(p) else { throw Gone() }  // stopped: a new link may have this mirror now
         let before = m.have(f)
-        try take(p, m, f) { self.syncDoneKb = (done + $0 - from) / 1024 }
-        try pieces(m)
+        try autoreleasepool {  // a catch-up runs for minutes: a pool per READ (see the session's loop)
+          try take(p, m, f) { self.syncDoneKb = (done + $0 - from) / 1024 }
+          try pieces(m)
+        }
         // the open file: one READ, up to the stream's end as it began; LIVE (subscribed first) has every record
         // from there. Reading on never ended while recording: each READ found what the last one took time for (#56)
         if f == open { break }
@@ -620,7 +627,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       }
       last = Date()
       guard d.count > 4 else { continue }
-      if try m.put(f, Ble.u32(d, 0), Data(d[4...])) != nil {
+      if try autoreleasepool(invoking: { try m.put(f, Ble.u32(d, 0), Data(d[4...])) }) != nil {  // one READ: up to 16 MB of notifies
         // a hole: STOP, and the rest of this READ (up to its 0x82) is not taken for the next one, maybe of another file
         try write(p, Ble.ctrl, [3])
         let until = Date(timeIntervalSinceNow: 3)

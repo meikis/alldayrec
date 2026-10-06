@@ -4,6 +4,11 @@
 // 10 ms per frame. Foundation only: app/ios/StoreCheck runs it on a Mac and in CI (Linux).
 import Foundation
 
+#if !canImport(ObjectiveC)
+/// Linux (StoreCheck in CI) has no autorelease pools: the body as is.
+func autoreleasepool<Result>(invoking body: () throws -> Result) rethrows -> Result { try body() }
+#endif
+
 enum Store {
   static let frameMs: Int64 = 10
   static let oldPieceFrames = 6000  // a file the board has closed goes up in 60 s pieces

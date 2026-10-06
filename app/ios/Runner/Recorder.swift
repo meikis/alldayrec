@@ -161,7 +161,9 @@ enum Recorder {
   /// or resumed meanwhile (which removes it).
   private static func endAfterQueue(_ done: @escaping () -> Void = {}) {
     Thread.detachNewThread {
-      while Uploader.pending(dir) > 0 && defaults.object(forKey: "endAt") != nil { Thread.sleep(forTimeInterval: 0.5) }
+      while autoreleasepool(invoking: { Uploader.pending(dir) > 0 && defaults.object(forKey: "endAt") != nil }) {  // see Uploader.main
+        Thread.sleep(forTimeInterval: 0.5)
+      }
       if let at = defaults.object(forKey: "endAt") as? Int64 {  // the server may close the conversation now
         uploader?.end(at, device: defaults.string(forKey: "endDevice"))
         defaults.removeObject(forKey: "endAt")
@@ -240,6 +242,16 @@ enum Recorder {
   }
 
   static func now() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+
+  /// This process's memory as iOS counts it against the app's limit (phys_footprint), in MB.
+  static func footprintMB() -> Int {
+    var info = task_vm_info_data_t()
+    var n = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+    let kr = withUnsafeMutablePointer(to: &info) {
+      $0.withMemoryRebound(to: integer_t.self, capacity: Int(n)) { task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &n) }
+    }
+    return kr == KERN_SUCCESS ? Int(info.phys_footprint >> 20) : -1
+  }
 
   static func clock(_ ms: Int64) -> String {
     let f = DateFormatter()
@@ -431,28 +443,30 @@ final class Uploader: Thread {
 
   static func pending(_ dir: URL) -> Int { files(dir).count }
 
-  override func main() {
-    while true {
-      let q = Uploader.files(dir)
-      guard let f = q.first, let p = Uploader.piece(f) else { Thread.sleep(forTimeInterval: 1); continue }
-      let b = batch(q)
-      do {
-        let code = try post("\(server)/api/chunks?device=\(enc(p.device ?? device))&start=\(p.start)" + (p.n.map { "&n=\($0)" } ?? ""),
-                            try b.reduce(Data()) { $0 + (try Data(contentsOf: $1)) }, f.pathExtension == "ogg" ? "audio/ogg" : "audio/aac")
-        switch code {
-        case 200:
-          b.forEach(keep); sent += b.count; note = nil
-          if fails > 0 { DeviceLog.app(p.device ?? device, "upload_ok", "上传恢复（之前连续失败 \(fails) 次）") }
-          fails = 0
-        case 400: b.forEach { try? FileManager.default.removeItem(at: $0) }; note = "服务端无法解码一块，已丢弃"
-        default: throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "HTTP \(code)"])
-        }
-      } catch {
-        fails += 1
-        if fails == 1 { DeviceLog.app(p.device ?? device, "upload_fail", "上传失败：\(DeviceLog.why(error, server: server))", level: "error") }
-        note = "上传失败 \(error.localizedDescription)"
-        Thread.sleep(forTimeInterval: 5 * Double(min(fails, 6)))
+  /// A pool per pass: this thread never ends, and what Foundation autoreleases on it (the directory listed every second,
+  /// each batch read) would otherwise stay for good (#109).
+  override func main() { while true { autoreleasepool(invoking: pass) } }
+
+  private func pass() {
+    let q = Uploader.files(dir)
+    guard let f = q.first, let p = Uploader.piece(f) else { Thread.sleep(forTimeInterval: 1); return }
+    let b = batch(q)
+    do {
+      let code = try post("\(server)/api/chunks?device=\(enc(p.device ?? device))&start=\(p.start)" + (p.n.map { "&n=\($0)" } ?? ""),
+                          try b.reduce(Data()) { $0 + (try Data(contentsOf: $1)) }, f.pathExtension == "ogg" ? "audio/ogg" : "audio/aac")
+      switch code {
+      case 200:
+        b.forEach(keep); sent += b.count; note = nil
+        if fails > 0 { DeviceLog.app(p.device ?? device, "upload_ok", "上传恢复（之前连续失败 \(fails) 次）") }
+        fails = 0
+      case 400: b.forEach { try? FileManager.default.removeItem(at: $0) }; note = "服务端无法解码一块，已丢弃"
+      default: throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "HTTP \(code)"])
       }
+    } catch {
+      fails += 1
+      if fails == 1 { DeviceLog.app(p.device ?? device, "upload_fail", "上传失败：\(DeviceLog.why(error, server: server))", level: "error") }
+      note = "上传失败 \(error.localizedDescription)"
+      Thread.sleep(forTimeInterval: 5 * Double(min(fails, 6)))
     }
   }
 

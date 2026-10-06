@@ -33,7 +33,7 @@ enum DeviceLog {
     p.set(src, forKey: "logSrc")
     lastSeq = Int64(p.integer(forKey: "logSeq"))
     Thread.detachNewThread {
-      while true { send(); Thread.sleep(forTimeInterval: 30) }
+      while true { autoreleasepool(invoking: send); Thread.sleep(forTimeInterval: 30) }  // a pool per round (#109)
     }
   }
 
