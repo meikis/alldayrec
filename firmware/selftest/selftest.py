@@ -175,9 +175,9 @@ def run(serial, clk_secs, json_out):
     res["hfxo_ppm"] = ppm
     row("32 MHz crystal accuracy", abs(ppm) <= 40,
         f"{ppm:+.1f} ppm against the Mac's clock over {clk_secs} s (limit ±40; fit residual {jitter:.2f} ms)")
-    row("32.768 kHz accuracy", abs(info["lfxo_ppb_vs_hfxo"] / 1000 + ppm) <= 50 if lf_ok else False,
-        f"{info['lfxo_ppb_vs_hfxo'] / 1000 + ppm:+.1f} ppm absolute (limit ±50: our firmware tells BLE peers its "
-        "sleep clock is within 50 ppm, Zephyr's default)" if lf_ok else "no crystal")
+    row("32.768 kHz accuracy", abs(info["lfxo_ppb_vs_hfxo"] / 1000 + ppm) <= 100 if lf_ok else False,
+        f"{info['lfxo_ppb_vs_hfxo'] / 1000 + ppm:+.1f} ppm absolute (limit ±100: our ProMicro firmware widens its BLE "
+        "receive windows for a sleep clock within 100 ppm, lr.sh K32SRC_100PPM)" if lf_ok else "no crystal")
 
     try:
         stage = None
