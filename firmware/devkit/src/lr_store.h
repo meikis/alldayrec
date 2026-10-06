@@ -47,8 +47,8 @@
  *   ...03 DATA  notify offset:u32 bytes...                 (READ)
  *   ...04 LIVE  notify file:u32 offset:u32 bytes...        each record as it enters the stream, while subscribed;
  *               a gap in the offsets (not subscribed, the link busy or gone) is the phone's to READ. Subscribing
- *               while the card does not take the stream (TIME's store != 0) starts a new file: the phone gets it
- *               from offset 0, as nothing before could be READ
+ *               starts a new file (when the open one has anything): the phone gets it from offset 0, and all before
+ *               it is in closed files to READ alongside (#130)
  * All but battery and device info need an encrypted (bonded) link; see pairing in transport.c. Nothing is recorded
  * while no phone is bonded or while paused (transport.c): no records, the frame numbers skip that time. The scan
  * response's manufacturer data (0xFFFF) carries the state byte.

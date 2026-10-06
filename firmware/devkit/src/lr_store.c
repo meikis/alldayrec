@@ -264,8 +264,9 @@ struct cmd {
 };
 K_MSGQ_DEFINE(cmds, sizeof(struct cmd), 8, 4);
 
-/* A phone starts following the stream. While the card does not take it, nothing before this could be READ: the
- * stream starts a new file, so the phone has it from offset 0. */
+/* A phone starts following the stream: it goes on in a new file, so the phone has that one from offset 0 by LIVE and
+ * all before it in closed files it READs in the background; a backlog of days does not hold back what is said now
+ * (#130). While the card does not take the stream, nothing before this could be READ anyway. */
 static void live_ccc(const struct bt_gatt_attr *attr, uint16_t value)
 {
     if (value == BT_GATT_CCC_NOTIFY) {
@@ -726,9 +727,7 @@ static void store_thread(void)
         struct bt_conn *conn = get_current_connection();
         if (c.op == FOLLOW) {
             k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
-            if (store_err) {
-                next_segment();
-            }
+            next_segment();  // nothing new if the segment is empty
             k_mutex_unlock(&write_sdcard_mutex);
             continue;
         }
