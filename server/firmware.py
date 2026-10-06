@@ -1,5 +1,5 @@
-"""Firmware packages for the BLE recorders, one shelf per model (LR-X1 = XIAO, LR-P1 and LR-P2 = ProMicro): lr_release.py uploads
-a build, the app asks for the newest one of its recorder's model and sends it over Bluetooth. Kept as
+"""Firmware packages for the BLE recorders, one shelf per model (LR-X1 = XIAO, LR-P1, LR-P2 and LR-P3 = ProMicro):
+lr_release.py uploads a build, the app asks for the newest one of its recorder's model and sends it over Bluetooth. Kept as
 DATA/firmware/<model>/<version>.zip, the .json beside it published last. A version is lr.sh's firmware revision,
 YYYYMMDD.HHMMSS-<commit> (the commit's time): a later one sorts later as text."""
 import datetime as dt

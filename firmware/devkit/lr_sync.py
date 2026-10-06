@@ -199,7 +199,7 @@ async def main(out: Path, delete: bool, name: str, follow: float, server: str | 
         for f, size in files:
             t = time.time()
             b, hole = assemble(await read(f, 0))
-            ok = hole is None and len(b) == size
+            ok = hole is None and len(b) >= size  # the open file grows while it is read
             t = time.time() - t
             print(f"{f:08X}: {len(b)} B of {size} in {t:.1f} s, {len(b) / 1024 / t:.1f} KB/s{'' if ok else '  INCOMPLETE'}")
             if ok:

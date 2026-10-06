@@ -17,8 +17,9 @@ import urllib.request
 from pathlib import Path
 
 D = Path(__file__).resolve().parent
-MODELS = {"sdmod": "LR-X1", "promicro": "LR-P1", "promicro-p2": "LR-P2"}  # the boards people have (expansion is a test
-# base for the XIAO); LR-P2 is a ProMicro too, kept for tests, with packages of its own
+MODELS = {"sdmod": "LR-X1", "promicro": "LR-P1", "promicro-p2": "LR-P2", "promicro-p3": "LR-P3"}  # the boards people
+# have (expansion is a test base for the XIAO); LR-P2 (kept for tests) and LR-P3 (the boxed recorder, #122) are ProMicros
+# too, with packages of their own
 
 
 def git(*a: str) -> str:

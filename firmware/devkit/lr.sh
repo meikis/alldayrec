@@ -4,8 +4,9 @@
 #                                     Expansion Board Base for XIAO, SD CS on D2 (tests only)
 #   ./lr.sh build promicro            ProMicro nRF52840 (nice!nano clone) + external PDM mic and SD module
 #   ./lr.sh build promicro-p2         the same board as LR-P2: the spare ProMicro kept for tests (bootloader 0.10.0, #110)
-#   ./lr.sh flash [sdmod|expansion|promicro|promicro-p2]   a running firmware is sent to the UF2 bootloader by a 1200 bps touch
-#   ./lr.sh pkg [sdmod|promicro|promicro-p2]    the build as a DFU package (build/lr-V/lr-V.zip) for lr_dfu.py; lr_release.py
+#   ./lr.sh build promicro-p3         the same board as LR-P3: the ProMicro wired into the boxed recorder (#122)
+#   ./lr.sh flash [sdmod|expansion|promicro|promicro-p2|promicro-p3]   a running firmware is sent to the UF2 bootloader by a 1200 bps touch
+#   ./lr.sh pkg [sdmod|promicro|promicro-p2|promicro-p3]    the build as a DFU package (build/lr-V/lr-V.zip) for lr_dfu.py; lr_release.py
 #                                     builds, packs and uploads it to the server, where the app finds it
 set -euo pipefail
 D="$(cd "$(dirname "$0")" && pwd)"
@@ -17,7 +18,7 @@ EXTRA=(-DCONFIG_OMI_ENABLE_SPEAKER=n -DCONFIG_OMI_ENABLE_HAPTIC=n -DCONFIG_OMI_E
 case $V in
   sdmod) OVL="$OVL;$D/overlay/lr_sdmod.overlay" ;;
   expansion) OVL="$OVL;$D/overlay/xiao_expansion_base.overlay" ;;
-  promicro|promicro-p2) M=LR-P1; [ "$V" = promicro ] || M=LR-P2  # LR-P2: the same board, its own model and name
+  promicro|promicro-p2|promicro-p3) M=LR-P1; [ "$V" = promicro ] || M=LR-P${V#promicro-p}  # LR-P2/P3: the same board, their own model and name
             OVL="$OVL;$D/overlay/lr_promicro.overlay"  # battery on VDDH, P0.13/P0.17 are not charger pins here
             EXTRA+=(-DCONFIG_LR_BATTERY_VDDH=y "-DCONFIG_LR_NAME_PREFIX=\"$M\"" "-DCONFIG_BT_DEVICE_NAME=\"$M\""
                     "-DCONFIG_BT_DIS_MODEL=\"$M\"" '-DCONFIG_BT_DIS_HW_REV_STR="ProMicro nRF52840"'

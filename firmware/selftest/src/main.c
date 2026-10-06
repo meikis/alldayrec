@@ -1,11 +1,13 @@
 /* Board self-test for nRF52840 Pro Micro boards (nice!nano and its clones): flash it onto every new board before our
  * firmware. Commands come over the USB serial port, one per line; each answers with one result line "R {json}" whose
- * "ok" is the board's verdict: info gpio adc rx led clk N dcdc all dfu. selftest.py drives it and adds the checks that
- * need the host (the 32 MHz crystal against the Mac's clock, the board's advertising as the Mac hears it). README.md
- * says what each check proves and its pass mark. */
+ * "ok" is the board's verdict: info gpio adc rx led clk N dcdc all dfu, and for an LR-P3 (the board wired into a
+ * recorder) gpio p3, sd, mic N, sw. selftest.py drives it and adds the checks that need the host (the 32 MHz crystal
+ * against the Mac's clock, the board's advertising as the Mac hears it). README.md says what each check proves and its
+ * pass mark. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
 #include <zephyr/device.h>
@@ -14,6 +16,7 @@
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/sys/crc.h>
 #include <hal/nrf_gpio.h>
 #include <hal/nrf_saadc.h>
 
@@ -102,23 +105,48 @@ static const uint8_t pins[] = {
 };
 #define LED_PIN P(0, 15)
 
+/* LR-P3 (#122): the recorder's parts wired to the Pro Micro, pins as firmware/devkit's lr_promicro.overlay. Only the
+ * sd, mic and sw commands use them; "gpio p3" leaves them out, since the parts drive some of them */
+#define SD_PWR P(0, 13)  /* the VCC pin's switch (high: on), the SD module's supply */
+#define SD_CS P(0, 20)
+#define SD_MOSI P(0, 22)
+#define SD_SCK P(0, 24)
+#define SD_MISO P(1, 0)
+#define MIC_DAT P(0, 6)
+#define MIC_CLK P(0, 8)
+#define MIC_PWR P(0, 17)
+#define SWITCH P(1, 15)  /* to GND when on */
+static const uint8_t p3_pins[] = {SD_CS, SD_MOSI, SD_SCK, SD_MISO, MIC_DAT, MIC_CLK, MIC_PWR, SWITCH};
+static bool p3;  /* gpio skips p3_pins */
+
 static char *pin_name(uint8_t p, char *buf)
 {
 	sprintf(buf, "P%u.%02u", p >> 5, p & 31);
 	return buf;
 }
 
+/* Left out of the gpio test: P0.09/P0.10 while they are NFC antenna pins (unless UICR NFCPINS says GPIO), and with
+ * "gpio p3" the pins wired to LR-P3's parts */
+static bool skip(uint8_t p)
+{
+	if ((p == P(0, 9) || p == P(0, 10)) && (NRF_UICR->NFCPINS & UICR_NFCPINS_PROTECT_Msk)) {
+		return true;
+	}
+	ARRAY_FOR_EACH(p3_pins, i) {
+		if (p3 && p == p3_pins[i]) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void pins_input(nrf_gpio_pin_pull_t pull)
 {
 	ARRAY_FOR_EACH(pins, i) {
-		nrf_gpio_cfg_input(pins[i], pull);
+		if (!skip(pins[i])) {
+			nrf_gpio_cfg_input(pins[i], pull);
+		}
 	}
-}
-
-static bool nfc_pin(uint8_t p)
-{
-	/* P0.09/P0.10 are NFC antenna pins unless UICR NFCPINS says GPIO */
-	return (p == P(0, 9) || p == P(0, 10)) && (NRF_UICR->NFCPINS & UICR_NFCPINS_PROTECT_Msk);
 }
 
 /* Each pin alone: pulled up it must read 1, pulled down 0 (else it is tied to GND or VDD). Then each pin driven low
@@ -128,15 +156,16 @@ static void cmd_gpio(void)
 {
 	static char out[700];
 	char a[8], b[8];
-	int n = 0, bad = 0;
+	int n = 0, bad = 0, tested = 0;
 
 	n += snprintf(out + n, sizeof(out) - n, "\"stuck\":[");
 	ARRAY_FOR_EACH(pins, i) {
 		uint8_t p = pins[i];
 
-		if (nfc_pin(p)) {
+		if (skip(p)) {
 			continue;
 		}
+		tested++;
 		nrf_gpio_cfg_input(p, NRF_GPIO_PIN_PULLUP);
 		k_busy_wait(100);
 		bool up = nrf_gpio_pin_read(p);
@@ -153,7 +182,7 @@ static void cmd_gpio(void)
 	n += snprintf(out + n, sizeof(out) - n, "],\"shorts\":[");
 	for (int level = 0; level < 2; level++) {
 		ARRAY_FOR_EACH(pins, i) {
-			if (nfc_pin(pins[i])) {
+			if (skip(pins[i])) {
 				continue;
 			}
 			pins_input(level ? NRF_GPIO_PIN_PULLDOWN : NRF_GPIO_PIN_PULLUP);
@@ -161,7 +190,7 @@ static void cmd_gpio(void)
 			nrf_gpio_pin_write(pins[i], level);
 			k_busy_wait(100);
 			ARRAY_FOR_EACH(pins, j) {
-				if (j > i && !nfc_pin(pins[j]) && nrf_gpio_pin_read(pins[j]) == (uint32_t)level &&
+				if (j > i && !skip(pins[j]) && nrf_gpio_pin_read(pins[j]) == (uint32_t)level &&
 				    n < (int)sizeof(out) - 40) {
 					n += snprintf(out + n, sizeof(out) - n, "%s\"%s-%s\"", shorts++ ? "," : "",
 						      pin_name(pins[i], a), pin_name(pins[j], b));
@@ -173,8 +202,8 @@ static void cmd_gpio(void)
 	ARRAY_FOR_EACH(pins, i) {
 		nrf_gpio_cfg_default(pins[i]);
 	}
-	printk("R {\"test\":\"gpio\",\"ok\":%d,\"pins\":%u,\"nfc_as_gpio\":%d,%s]}\n", !bad && !shorts,
-	       (unsigned)ARRAY_SIZE(pins), !nfc_pin(P(0, 9)), out);
+	printk("R {\"test\":\"gpio\",\"ok\":%d,\"pins\":%d,\"nfc_as_gpio\":%d,\"p3\":%d,%s]}\n", !bad && !shorts,
+	       tested, !(NRF_UICR->NFCPINS & UICR_NFCPINS_PROTECT_Msk), p3, out);
 }
 
 static const struct device *const adc = DEVICE_DT_GET(DT_NODELABEL(adc));
@@ -277,18 +306,28 @@ static void cmd_led(void)
 	printk("R {\"test\":\"led\",\"blinks\":5}\n");
 }
 
-/* The 32 MHz crystal's own count (TIMER4 at 16 MHz) for secs seconds, 20 lines "T i ticks" a second; the host fits
- * it against its clock */
-static void cmd_clk(int secs)
+/* Hold the 32 MHz crystal through the kernel's HF clock request (the kernel otherwise runs on the RC), or let it go */
+static void hfxo(bool on)
 {
 	struct onoff_manager *hf = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
-	struct onoff_client cli;
+	static struct onoff_client cli;
 	int res = -1;
 
+	if (!on) {
+		onoff_release(hf);
+		return;
+	}
 	sys_notify_init_spinwait(&cli.notify);
 	onoff_request(hf, &cli);
 	while (sys_notify_fetch_result(&cli.notify, &res) == -EAGAIN) {
 	}
+}
+
+/* The 32 MHz crystal's own count (TIMER4 at 16 MHz) for secs seconds, 20 lines "T i ticks" a second; the host fits
+ * it against its clock */
+static void cmd_clk(int secs)
+{
+	hfxo(true);
 	NRF_TIMER4->MODE = TIMER_MODE_MODE_Timer;
 	NRF_TIMER4->BITMODE = TIMER_BITMODE_BITMODE_32Bit;
 	NRF_TIMER4->PRESCALER = 0;
@@ -308,8 +347,390 @@ static void cmd_clk(int secs)
 		k_msleep(50);
 	}
 	NRF_TIMER4->TASKS_STOP = 1;
-	onoff_release(hf);
+	hfxo(false);
 	printk("R {\"test\":\"clk\",\"hz\":16000000,\"lines\":%d}\n", secs * 20);
+}
+
+/* LR-P3's SD card on the legacy SPI peripheral, as our firmware runs it (lr_sd.overlay), one byte at a time */
+static bool sd_hc;  /* block addressing (SDHC/SDXC), else byte addresses */
+static int sd_crc_errs;  /* blocks read whose CRC did not match: bits lost on the wires */
+static uint8_t sd_resp;  /* the last write's data response: 0x05 accepted, 0x0B CRC error, 0x0D write error */
+static uint32_t sd_busy_ms;  /* the longest a write kept the card busy */
+static int sd_first_bad = -1;  /* the first failed read's R1 << 8 | token: R1 0xFF, the card not answering (reset by a
+				* supply dip, or CS/SCK/MISO open); garbled values, bits lost on the wires */
+
+static uint8_t spi(uint8_t tx)
+{
+	NRF_SPI2->EVENTS_READY = 0;
+	NRF_SPI2->TXD = tx;
+	while (!NRF_SPI2->EVENTS_READY) {
+	}
+	return NRF_SPI2->RXD;
+}
+
+/* A command and its R1 (bit 7 clear when it comes; 0xFF: no answer). SPI mode checks the CRC of CMD0 and CMD8 only */
+static uint8_t sd_cmd(uint8_t cmd, uint32_t arg)
+{
+	spi(0xFF);
+	spi(0x40 | cmd);
+	for (int i = 24; i >= 0; i -= 8) {
+		spi(arg >> i);
+	}
+	spi(cmd == 0 ? 0x95 : cmd == 8 ? 0x87 : 0x01);
+	uint8_t r1 = 0xFF;
+
+	for (int i = 0; i < 10 && r1 & 0x80; i++) {
+		r1 = spi(0xFF);
+	}
+	return r1;
+}
+
+/* After a read command's R1 0: the data token within 200 ms, n bytes, their CRC */
+static uint8_t sd_tok;  /* the last data token (0xFE; 0x0X: an error token) */
+
+static bool sd_data(uint8_t *buf, int n)
+{
+	uint8_t t = 0xFF;
+
+	for (int64_t end = k_uptime_get() + 200; t == 0xFF && k_uptime_get() < end;) {
+		t = spi(0xFF);
+	}
+	sd_tok = t;
+	if (t != 0xFE) {
+		return false;
+	}
+	for (int i = 0; i < n; i++) {
+		buf[i] = spi(0xFF);
+	}
+	uint16_t crc = spi(0xFF) << 8;
+
+	crc |= spi(0xFF);
+	if (crc != crc16_itu_t(0, buf, n)) {
+		sd_crc_errs++;
+		return false;
+	}
+	return true;
+}
+
+static bool sd_read(uint32_t sector, uint8_t *buf)
+{
+	uint8_t r1 = sd_cmd(17, sd_hc ? sector : sector * 512);
+
+	if (!r1 && sd_data(buf, 512)) {
+		return true;
+	}
+	if (sd_first_bad < 0) {
+		sd_first_bad = r1 << 8 | sd_tok;
+	}
+	return false;
+}
+
+/* The data token, the sector, its CRC; then the card's data response and busy (MISO low) until programmed, up to 1 s
+ * (the spec allows 500 ms, Zephyr's driver waits longer) */
+static bool sd_write(uint32_t sector, const uint8_t *buf)
+{
+	if (sd_cmd(24, sd_hc ? sector : sector * 512)) {
+		return false;
+	}
+	uint16_t crc = crc16_itu_t(0, buf, 512);
+
+	spi(0xFF);
+	spi(0xFE);
+	for (int i = 0; i < 512; i++) {
+		spi(buf[i]);
+	}
+	spi(crc >> 8);
+	spi(crc);
+	sd_resp = spi(0xFF) & 0x1F;
+	if (sd_resp != 0x05) {
+		return false;
+	}
+	uint8_t r = 0;
+	int64_t t = k_uptime_get();
+
+	while (r != 0xFF && k_uptime_get() < t + 1000) {
+		r = spi(0xFF);
+	}
+	sd_busy_ms = MAX(sd_busy_ms, k_uptime_get() - t);
+	return r == 0xFF;
+}
+
+/* The card's size from its CSD register, in 512-byte sectors */
+static uint32_t csd_sectors(const uint8_t *csd)
+{
+	if (csd[0] >> 6 == 1) {  /* CSD 2.0: SDHC/SDXC, (C_SIZE + 1) x 512 KB */
+		return (((uint32_t)(csd[7] & 0x3F) << 16 | csd[8] << 8 | csd[9]) + 1) * 1024;
+	}
+	uint32_t c_size = (csd[6] & 3) << 10 | csd[7] << 2 | csd[8] >> 6;
+	uint32_t mult = (csd[9] & 3) << 1 | csd[10] >> 7;
+
+	return (c_size + 1) << (mult + 2 + (csd[5] & 0xF) - 9);
+}
+
+/* LR-P3's SD card (the SD module on the VCC pin): power it up from off, start it in SPI mode (CMD0, CMD8, ACMD41,
+ * CMD58) at 250 kHz, read its size (CMD9); then at khz, on its last sector write a pattern, read it back and write the
+ * old contents back (files stay as they were; "restored" 0 if that failed), and read the first 1 MB to count blocks
+ * that fail (CRC errors: bits lost on the wires), stopping after 10 s or 20 failures. "fail" names the first step that
+ * went wrong */
+#define SD_READS 2048
+static void pdm_start(bool rising);
+static void pdm_stop(void);
+
+/* with_mic: the mic powered and clocked meanwhile, as when recording (its 1.28 MHz clock runs beside the SD wires) */
+static void cmd_sd(int khz, bool with_mic)
+{
+	static uint8_t old[512], pat[512], back[512];
+	const char *fail = "";
+	int restored = -1, reads = 0, read_errs = 0;
+	uint32_t read_ms = 0;
+	uint8_t idle = 0xFF, r0 = 0xFF, r8 = 0xFF, r41 = 0xFF, r9 = 0xFF, csd[16];
+
+	sd_crc_errs = sd_resp = sd_busy_ms = 0;
+	sd_first_bad = -1;
+	sd_tok = 0xFF;
+	uint32_t ocr = 0, r7 = 0, sectors = 0, init_ms = 0, w_us = 0, r_us = 0;
+	int part = -1;
+	bool mbr = false, saved = false;
+
+	/* VCC off long enough to drain, with every SD pin disconnected (a pin held high would feed the card through its
+	 * protection diodes), then on */
+	nrf_gpio_cfg_output(SD_PWR);
+	nrf_gpio_pin_clear(SD_PWR);
+	k_msleep(300);
+	nrf_gpio_pin_set(SD_PWR);
+	k_msleep(50);
+	if (with_mic) {
+		pdm_start(false);
+	}
+	nrf_gpio_pin_set(SD_CS);
+	nrf_gpio_cfg_output(SD_CS);
+	nrf_gpio_pin_clear(SD_SCK);
+	nrf_gpio_cfg_output(SD_SCK);
+	nrf_gpio_pin_set(SD_MOSI);
+	nrf_gpio_cfg_output(SD_MOSI);
+	nrf_gpio_cfg_input(SD_MISO, NRF_GPIO_PIN_PULLUP);  /* nobody answering reads 0xFF */
+	NRF_SPI2->PSEL.SCK = SD_SCK;
+	NRF_SPI2->PSEL.MOSI = SD_MOSI;
+	NRF_SPI2->PSEL.MISO = SD_MISO;
+	NRF_SPI2->CONFIG = 0;  /* mode 0, MSB first */
+	NRF_SPI2->FREQUENCY = SPI_FREQUENCY_FREQUENCY_K250;  /* start-up wants 100-400 kHz */
+	NRF_SPI2->ENABLE = SPI_ENABLE_ENABLE_Enabled;
+
+	int64_t t0 = k_uptime_get();
+
+	for (int i = 0; i < 10; i++) {  /* 80 clocks with CS high */
+		idle &= spi(0xFF);
+	}
+	nrf_gpio_pin_clear(SD_CS);
+	for (int i = 0; i < 10 && r0 != 0x01; i++) {
+		r0 = sd_cmd(0, 0);  /* GO_IDLE_STATE, into SPI mode */
+	}
+	if (r0 != 0x01) {
+		fail = "cmd0";
+		goto out;
+	}
+	r8 = sd_cmd(8, 0x1AA);  /* SEND_IF_COND 2.7-3.6 V, echo AA; an SD 1.x card calls it illegal (0x05) */
+	for (int i = 0; i < 4 && r8 == 0x01; i++) {
+		r7 = r7 << 8 | spi(0xFF);
+	}
+	if (r8 == 0x01 && (r7 & 0xFFF) != 0x1AA) {
+		fail = "cmd8";
+		goto out;
+	}
+	for (int64_t end = k_uptime_get() + 1000; r41 && k_uptime_get() < end;) {
+		sd_cmd(55, 0);
+		r41 = sd_cmd(41, r8 == 0x01 ? BIT(30) : 0);  /* SD_SEND_OP_COND (HCS on a 2.0 card) until out of idle */
+	}
+	if (r41) {
+		fail = "acmd41";
+		goto out;
+	}
+	init_ms = k_uptime_get() - t0;
+	if (sd_cmd(58, 0)) {  /* READ_OCR: CCS says block addressing */
+		fail = "cmd58";
+		goto out;
+	}
+	for (int i = 0; i < 4; i++) {
+		ocr = ocr << 8 | spi(0xFF);
+	}
+	sd_hc = ocr & BIT(30);
+	r9 = sd_cmd(9, 0);
+	if (r9 || !sd_data(csd, 16)) {
+		fail = "csd";
+		goto out;
+	}
+	sectors = csd_sectors(csd);
+	NRF_SPI2->FREQUENCY = khz >= 8000 ? SPI_FREQUENCY_FREQUENCY_M8 : khz >= 4000 ? SPI_FREQUENCY_FREQUENCY_M4 :
+			      khz >= 2000 ? SPI_FREQUENCY_FREQUENCY_M2 : khz >= 1000 ? SPI_FREQUENCY_FREQUENCY_M1 :
+			      SPI_FREQUENCY_FREQUENCY_K250;
+	if (!sd_read(0, back)) {
+		fail = "read";
+		goto out;
+	}
+	mbr = back[510] == 0x55 && back[511] == 0xAA;
+	part = back[0x1C2];  /* with an MBR, the first partition's type: 0x0B/0x0C FAT32, 0x07 exFAT */
+	if (!sd_read(sectors - 1, old)) {
+		fail = "read";
+		goto out;
+	}
+	saved = true;
+	for (int i = 0; i < 512; i++) {
+		pat[i] = old[i] ^ (uint8_t)(0x5A + i);  /* differs from the old contents in every byte */
+	}
+	uint32_t c = cyc();
+
+	if (!sd_write(sectors - 1, pat)) {
+		fail = "write";
+		goto out;
+	}
+	w_us = (cyc() - c) / CYC_PER_US;
+	c = cyc();
+	if (!sd_read(sectors - 1, back)) {
+		fail = "readback";
+		goto out;
+	}
+	r_us = (cyc() - c) / CYC_PER_US;
+	if (memcmp(back, pat, 512)) {
+		fail = "verify";
+	}
+out:
+	if (saved) {
+		restored = 0;
+		for (int i = 0; i < 3 && !restored; i++) {
+			restored = sd_write(sectors - 1, old) && sd_read(sectors - 1, back) && !memcmp(back, old, 512);
+		}
+	}
+	if (!*fail) {
+		int64_t t = k_uptime_get();
+
+		for (int i = 0; i < SD_READS && read_errs < 20 && k_uptime_get() < t + 10000; i++, reads++) {
+			read_errs += !sd_read(i, back);
+		}
+		read_ms = k_uptime_get() - t;
+	}
+	nrf_gpio_pin_set(SD_CS);
+	spi(0xFF);
+	NRF_SPI2->ENABLE = 0;
+	NRF_SPI2->PSEL.SCK = NRF_SPI2->PSEL.MOSI = NRF_SPI2->PSEL.MISO = 0xFFFFFFFF;
+	nrf_gpio_cfg_default(SD_CS);
+	nrf_gpio_cfg_default(SD_SCK);
+	nrf_gpio_cfg_default(SD_MOSI);
+	nrf_gpio_cfg_default(SD_MISO);
+	nrf_gpio_cfg_default(SD_PWR);
+	if (with_mic) {
+		pdm_stop();
+	}
+	printk("R {\"test\":\"sd\",\"mic\":%d,\"ok\":%d,\"fail\":\"%s\",\"idle\":\"0x%02X\",\"cmd0\":\"0x%02X\",\"cmd8\":\"0x%02X\","
+	       "\"acmd41\":\"0x%02X\",\"ocr\":\"0x%08X\",\"cmd9\":\"0x%02X\",\"init_ms\":%u,\"sectors\":%u,\"mbr\":%d,\"part\":\"0x%02X\","
+	       "\"write_us\":%u,\"read_us\":%u,\"resp\":\"0x%02X\",\"busy_ms\":%u,\"restored\":%d,\"reads\":%d,"
+	       "\"read_errs\":%d,\"crc_errs\":%d,\"read_ms\":%u,\"first_bad\":\"0x%04X\"}\n", with_mic, !*fail && restored == 1 && !read_errs, fail, idle, r0, r8,
+	       r41, ocr, r9, init_ms, sectors, mbr, part, w_us, r_us, sd_resp, sd_busy_ms, restored, reads,
+	       read_errs, sd_crc_errs, read_ms, sd_first_bad & 0xFFFF);
+}
+
+/* An EasyDMA event within 1 s */
+static bool event(volatile uint32_t *ev)
+{
+	for (int i = 0; i < 1000 && !*ev; i++) {
+		k_msleep(1);
+	}
+	return *ev;
+}
+
+/* LR-P3's PDM mic as our firmware runs it (mic.c): powered from P0.17, 1.28 MHz clock, mono on the falling edge (its
+ * SEL is tied to 3V; "mic N r": the rising edge, to tell which half of the clock the mic drives), ratio 80 (16 kHz),
+ * gain 0x28. secs seconds after 200 ms of start-up; each 100 ms block's level
+ * on an "A i rms" line, then the whole: DC (mean), AC RMS, the loudest block, min and max. A stuck DAT (no clock or no
+ * power reaching the mic, DAT open or shorted) gives a flat line at full scale or zero */
+static int16_t __aligned(4) pdm_buf[2][1600];
+
+/* The mic powered and clocked into pdm_buf[0]; pdm_stop() undoes it */
+static void pdm_start(bool rising)
+{
+	hfxo(true);  /* the PDM clock is divided from HFCLK */
+	nrf_gpio_pin_set(MIC_PWR);
+	nrf_gpio_cfg_output(MIC_PWR);
+	nrf_gpio_pin_clear(MIC_CLK);
+	nrf_gpio_cfg_output(MIC_CLK);
+	nrf_gpio_cfg_input(MIC_DAT, NRF_GPIO_PIN_NOPULL);
+	NRF_PDM->PSEL.CLK = MIC_CLK;
+	NRF_PDM->PSEL.DIN = MIC_DAT;
+	NRF_PDM->PDMCLKCTRL = PDM_PDMCLKCTRL_FREQ_1280K;
+	NRF_PDM->RATIO = PDM_RATIO_RATIO_Ratio80;
+	NRF_PDM->MODE = PDM_MODE_OPERATION_Mono << PDM_MODE_OPERATION_Pos |
+			(rising ? PDM_MODE_EDGE_LeftRising : PDM_MODE_EDGE_LeftFalling) << PDM_MODE_EDGE_Pos;
+	NRF_PDM->GAINL = NRF_PDM->GAINR = 0x28;
+	NRF_PDM->SAMPLE.MAXCNT = ARRAY_SIZE(pdm_buf[0]);
+	NRF_PDM->SAMPLE.PTR = (uint32_t)pdm_buf[0];
+	NRF_PDM->EVENTS_STARTED = NRF_PDM->EVENTS_END = NRF_PDM->EVENTS_STOPPED = 0;
+	NRF_PDM->ENABLE = 1;
+	NRF_PDM->TASKS_START = 1;
+}
+
+static void pdm_stop(void)
+{
+	NRF_PDM->TASKS_STOP = 1;
+	event(&NRF_PDM->EVENTS_STOPPED);
+	NRF_PDM->ENABLE = 0;
+	NRF_PDM->PSEL.CLK = NRF_PDM->PSEL.DIN = 0xFFFFFFFF;
+	nrf_gpio_cfg_default(MIC_CLK);
+	nrf_gpio_cfg_default(MIC_DAT);
+	nrf_gpio_cfg_default(MIC_PWR);
+	hfxo(false);
+}
+
+static void cmd_mic(int secs, bool rising)
+{
+	int64_t sum = 0, sq = 0;
+	int lo = INT16_MAX, hi = INT16_MIN, loudest = 0, count = 0;
+	bool ok = true;
+
+	pdm_start(rising);
+	for (int b = 0; ok && b < secs * 10 + 2; b++) {
+		/* once a buffer has started, point at the other one for the block after; it fills while this one is read */
+		ok = event(&NRF_PDM->EVENTS_STARTED);
+		NRF_PDM->EVENTS_STARTED = 0;
+		NRF_PDM->SAMPLE.PTR = (uint32_t)pdm_buf[(b + 1) & 1];
+		ok = ok && event(&NRF_PDM->EVENTS_END);
+		NRF_PDM->EVENTS_END = 0;
+		if (!ok || b < 2) {
+			continue;
+		}
+		const int16_t *s = pdm_buf[b & 1];
+		int64_t bs = 0, bq = 0;
+
+		for (int i = 0; i < (int)ARRAY_SIZE(pdm_buf[0]); i++) {
+			bs += s[i];
+			bq += s[i] * s[i];
+			lo = MIN(lo, s[i]);
+			hi = MAX(hi, s[i]);
+		}
+		sum += bs;
+		sq += bq;
+		count += ARRAY_SIZE(pdm_buf[0]);
+		double m = (double)bs / ARRAY_SIZE(pdm_buf[0]);
+		int rms = (int)sqrt((double)bq / ARRAY_SIZE(pdm_buf[0]) - m * m);
+
+		loudest = MAX(loudest, rms);
+		printk("A %d %d\n", b - 2, rms);
+	}
+	pdm_stop();
+	double mean = count ? (double)sum / count : 0;
+
+	printk("R {\"test\":\"mic\",\"ok\":%d,\"samples\":%d,\"mean\":%d,\"rms\":%d,\"loudest\":%d,\"min\":%d,\"max\":%d}\n",
+	       ok && hi - lo > 2, count, (int)mean, count ? (int)sqrt((double)sq / count - mean * mean) : 0, loudest,
+	       lo, hi);
+}
+
+/* LR-P3's switch: P1.15 on its pull-up, closed to GND = on; read only, never driven */
+static void cmd_sw(void)
+{
+	nrf_gpio_cfg_input(SWITCH, NRF_GPIO_PIN_PULLUP);
+	k_busy_wait(100);
+	int on = !nrf_gpio_pin_read(SWITCH);
+
+	nrf_gpio_cfg_default(SWITCH);
+	printk("R {\"test\":\"sw\",\"on\":%d}\n", on);
 }
 
 /* The DCDC converters (each needs its inductor; without one the chip browns out and resets, which the host sees as
@@ -356,7 +777,8 @@ static void run(char *line)
 {
 	if (!strcmp(line, "info")) {
 		cmd_info();
-	} else if (!strcmp(line, "gpio")) {
+	} else if (!strcmp(line, "gpio") || !strcmp(line, "gpio p3")) {
+		p3 = line[4] != 0;
 		cmd_gpio();
 	} else if (!strcmp(line, "adc")) {
 		cmd_adc();
@@ -368,6 +790,12 @@ static void run(char *line)
 		cmd_clk(CLAMP(atoi(line + 3), 1, 600));
 	} else if (!strcmp(line, "dcdc")) {
 		cmd_dcdc();
+	} else if (!strncmp(line, "sd", 2)) {
+		cmd_sd(line[2] ? atoi(line + 2) : 8000, strchr(line, 'm') != NULL);
+	} else if (!strncmp(line, "mic", 3)) {
+		cmd_mic(CLAMP(atoi(line + 3), 1, 10), strchr(line, 'r') != NULL);
+	} else if (!strcmp(line, "sw")) {
+		cmd_sw();
 	} else if (!strcmp(line, "all")) {  /* everything the board judges alone, for a plain serial terminal */
 		cmd_info();
 		cmd_gpio();
@@ -380,7 +808,7 @@ static void run(char *line)
 		NRF_POWER->GPREGRET = 0x57;
 		NVIC_SystemReset();
 	} else {
-		printk("R {\"test\":\"?\",\"commands\":\"info gpio adc rx led clk N dcdc all dfu\"}\n");
+		printk("R {\"test\":\"?\",\"commands\":\"info gpio [p3] adc rx led clk N dcdc sd mic N sw all dfu\"}\n");
 	}
 }
 

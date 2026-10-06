@@ -7,8 +7,9 @@
   python3 selftest.py build              the firmware (NCS v2.7.0, as lr.sh)
   uv run selftest.py flash SERIAL        UF2 onto that board only: its bootloader drive, or this firmware's dfu command
   uv run selftest.py run SERIAL [--clk S] [--json FILE]   every check, a PASS/FAIL report; exit 1 on any FAIL
+  uv run selftest.py run SERIAL --p3 [--flip S]           a board wired into an LR-P3: also its SD card, mic and switch
 """
-import argparse, json, os, plistlib, re, shutil, statistics, subprocess, sys, time
+import argparse, json, math, os, plistlib, re, shutil, statistics, subprocess, sys, time
 
 D = os.path.dirname(os.path.abspath(__file__))
 UF2 = f"{D}/build/zephyr/zephyr.uf2"
@@ -134,7 +135,18 @@ def hfxo_ppm(points):
     return (slope - 1) * 1e6, resid * 1e3
 
 
-def run(serial, clk_secs, json_out):
+def dbfs(v):
+    return f"{20 * math.log10(max(v, 1) / 32768):.0f} dBFS"
+
+
+SD_HINTS = {  # where the card start-up stops, and what to look at
+    "cmd0": "the card never answered", "cmd8": "the card garbled its echo (SCK/MOSI/MISO noise?)",
+    "acmd41": "the card never left idle (supply too weak?)", "cmd58": "no OCR", "csd": "no CSD",
+    "read": "a block read at 8 MHz failed", "write": "a block write at 8 MHz failed", "readback": "reading it back failed",
+    "verify": "it read back different"}
+
+
+def run(serial, clk_secs, json_out, p3=False, flip=20):
     b = Board(serial)
     rows, res = [], {}
 
@@ -157,15 +169,65 @@ def run(serial, clk_secs, json_out):
     rx = res["rx"] = b.cmd("rx")
     row("radio RX (board hears others)", bool(rx["ok"]), f"{rx['devices']} devices, best RSSI {rx['best_rssi']} dBm")
 
-    g = res["gpio"] = b.cmd("gpio")
+    g = res["gpio"] = b.cmd("gpio p3" if p3 else "gpio")  # p3: never drives a pin with a part on it
     row("GPIO pads", bool(g["ok"]), f"{g['pins']} pins; stuck {g['stuck'] or 'none'}; shorts {g['shorts'] or 'none'}"
-        + ("" if g["nfc_as_gpio"] else "; P0.09/P0.10 skipped (NFC mode)"))
+        + ("" if g["nfc_as_gpio"] else "; P0.09/P0.10 skipped (NFC mode)")
+        + ("; the 8 LR-P3 pins left out (checked by the SD, mic and switch rows)" if p3 else ""))
     a = res["adc"] = b.cmd("adc")
     row("VDD (regulator)", abs(a["vdd_mv"] - a["vdd_expected_mv"]) < a["vdd_expected_mv"] * 0.05,
         f"{a['vdd_mv']} mV, expected {a['vdd_expected_mv']} ±5%")
     row("VDDH (USB/battery input)", 4300 < a["vddh_mv"] < 5500,
         f"{a['vddh_mv']} mV on USB (4300-5500); P0.04 (nice!nano v2 battery divider) {a['p0_04_mv']} mV")
     row("charge status pin", "INFO", "none on this footprint (the charge LED is wired to the charger only)")
+
+    if p3:
+        sd = res["sd"] = b.cmd("sd", 60)
+        reads = (f"{sd['reads']} blocks read at 8 MHz, {sd['read_errs']} failed ({sd['crc_errs']} CRC errors: bits "
+                 f"lost on the wires) in {sd['read_ms']} ms; last sector write {sd['write_us'] / 1000:.1f} ms (busy "
+                 f"{sd['busy_ms']} ms), restored {sd['restored']}")
+        if not sd["fail"]:
+            row("SD card (VCC P0.13, SPI)", bool(sd["ok"]), f"{sd['sectors'] * 512 / 1e9:.2f} GB, OCR {sd['ocr']}, "
+                f"{'MBR, first partition type ' + sd['part'] if sd['mbr'] else 'no MBR'} (0x0B/0x0C FAT32, 0x07 "
+                f"exFAT: our firmware needs one of them); start-up {sd['init_ms']} ms; {reads}")
+        else:
+            row("SD card (VCC P0.13, SPI)", False, f"failed at {sd['fail']}: {SD_HINTS.get(sd['fail'], '')}; MISO idle "
+                f"{sd['idle']}, CMD0 {sd['cmd0']} (0x01 expected; 0xFF: nobody on MISO P1.00, 0x00: MISO held low), "
+                f"CMD8 {sd['cmd8']}, ACMD41 {sd['acmd41']}, write response {sd['resp']}; {reads}. Check the module's "
+                "3V3 (VCC) and GND, CS P0.20, MOSI P0.22, SCK P0.24, MISO P1.00, and that a card is in")
+        def mic(secs):  # the mic's result, and each 100 ms block's AC RMS
+            blocks = []
+            for _, line in b.lines(f"mic {secs}", 15):
+                if line.startswith("A "):
+                    blocks.append(int(line.split()[2]))
+                elif line.startswith("R "):
+                    return json.loads(line[2:]), blocks
+        quiet, qb = res["mic_quiet"] = mic(2)
+        floor = statistics.median(qb)
+        row("mic (PDM, 2 s quiet)", bool(quiet["ok"]) and floor < 300, f"noise floor {floor:.0f} ({dbfs(floor)}, median "
+            f"100 ms RMS; pass under 300: a quiet room gives tens); DC {quiet['mean']}, min {quiet['min']} max "
+            f"{quiet['max']}" + ("" if quiet["ok"] else ": flat, DAT stuck. Check the mic's 3V (P0.17), GND, CLK "
+                                 "(P0.08), DAT (P0.06)") + ("" if floor < 300 else ": noise, not sound. Check SEL is on "
+                                                            "3V (mic N r tells which clock half the mic drives), CLK"))
+        say = subprocess.Popen(["say", "one two three four five six seven eight nine ten"])  # the Mac's speaker
+        loud, lb = res["mic_speech"] = mic(3)
+        say.wait()
+        rise = 20 * math.log10(max(max(lb), 1) / max(floor, 1))
+        row("mic hears speech", "PASS" if loud["ok"] and rise >= 10 else "LOOK",
+            f"loudest 100 ms {dbfs(max(lb))} against the floor {dbfs(floor)}: {rise:+.1f} dB (pass: +10 dB; the Mac "
+            "speaks numbers meanwhile; if it is far or muted, talk to the board and run again)")
+        if flip:
+            print(f"flip the switch both ways within {flip} s")
+        seen, end = [], time.time() + flip
+        while True:
+            on = b.cmd("sw")["on"]
+            seen += [on] if on not in seen else []
+            if len(seen) == 2 or time.time() >= end:
+                break
+            time.sleep(0.2)
+        res["switch"] = seen
+        row("switch (P1.15)", "PASS" if len(seen) == 2 else "LOOK", "read ON (closed to GND) and OFF (open)"
+            if len(seen) == 2 else f"reads {'ON (closed to GND)' if seen[0] else 'OFF (open)'}; not flipped within "
+            f"{flip} s: run again with someone flipping it (an open wire also reads OFF)")
 
     b.cmd("led")
     row("blue LED (P0.15)", "LOOK", "blinked 5 times: check by eye")
@@ -193,7 +255,7 @@ def run(serial, clk_secs, json_out):
             "is missing or broken (our firmware must stay on the LDO)")
 
     width = max(len(r[0]) for r in rows)
-    print(f"\nself-test {serial} {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"\nself-test {serial}{' LR-P3' if p3 else ''} {time.strftime('%Y-%m-%d %H:%M:%S')}")
     for item, verdict, detail in rows:
         print(f"{verdict:4}  {item:{width}}  {detail}")
     failed = [r[0] for r in rows if r[1] == "FAIL"]
@@ -209,7 +271,10 @@ if __name__ == "__main__":
     ap.add_argument("serial", nargs="?", help="the board's USB serial number (16 hex digits)")
     ap.add_argument("--clk", type=int, default=60, help="seconds of 32 MHz crystal timing (default 60)")
     ap.add_argument("--json", help="also write the report here")
+    ap.add_argument("--p3", action="store_true", help="the board is wired into an LR-P3: also test its SD card, mic and "
+                    "switch, and never drive their pins")
+    ap.add_argument("--flip", type=int, default=20, help="--p3: seconds to wait for the switch to be flipped (default 20)")
     a = ap.parse_args()
     if a.action != "build" and not re.fullmatch(r"[0-9A-F]{16}", a.serial or ""):
         ap.error("SERIAL: 16 hex digits, as ioreg shows it")
-    build() if a.action == "build" else flash(a.serial) if a.action == "flash" else run(a.serial, a.clk, a.json)
+    build() if a.action == "build" else flash(a.serial) if a.action == "flash" else run(a.serial, a.clk, a.json, a.p3, a.flip)
