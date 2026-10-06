@@ -683,10 +683,14 @@ static void pdm_stop(void)
 	hfxo(false);
 }
 
+/* Dropouts too (08B2 in its box: >10 ms of zeros and full-scale pops in the recordings): a run of 160 identical
+ * samples (10 ms; the mic's own noise never repeats that long, a DAT that stops toggling does) and samples at full
+ * scale, per block on the "A i rms flat_ms full" line and in all */
 static void cmd_mic(int secs, bool rising)
 {
 	int64_t sum = 0, sq = 0;
-	int lo = INT16_MAX, hi = INT16_MIN, loudest = 0, count = 0;
+	int lo = INT16_MAX, hi = INT16_MIN, loudest = 0, count = 0, run = 0, flats = 0, flat = 0, full = 0;
+	int16_t prev = 0;
 	bool ok = true;
 
 	pdm_start(rising);
@@ -702,13 +706,21 @@ static void cmd_mic(int secs, bool rising)
 		}
 		const int16_t *s = pdm_buf[b & 1];
 		int64_t bs = 0, bq = 0;
+		int bflat = 0, bfull = 0;
 
 		for (int i = 0; i < (int)ARRAY_SIZE(pdm_buf[0]); i++) {
 			bs += s[i];
 			bq += s[i] * s[i];
 			lo = MIN(lo, s[i]);
 			hi = MAX(hi, s[i]);
+			run = s[i] == prev ? run + 1 : 0;
+			prev = s[i];
+			flats += run == 160;
+			bflat += run >= 160;
+			bfull += s[i] == INT16_MAX || s[i] == INT16_MIN;
 		}
+		flat += bflat;
+		full += bfull;
 		sum += bs;
 		sq += bq;
 		count += ARRAY_SIZE(pdm_buf[0]);
@@ -716,14 +728,14 @@ static void cmd_mic(int secs, bool rising)
 		int rms = (int)sqrt((double)bq / ARRAY_SIZE(pdm_buf[0]) - m * m);
 
 		loudest = MAX(loudest, rms);
-		printk("A %d %d\n", b - 2, rms);
+		printk("A %d %d %d %d\n", b - 2, rms, bflat / 16, bfull);
 	}
 	pdm_stop();
 	double mean = count ? (double)sum / count : 0;
 
-	printk("R {\"test\":\"mic\",\"ok\":%d,\"samples\":%d,\"mean\":%d,\"rms\":%d,\"loudest\":%d,\"min\":%d,\"max\":%d}\n",
-	       ok && hi - lo > 2, count, (int)mean, count ? (int)sqrt((double)sq / count - mean * mean) : 0, loudest,
-	       lo, hi);
+	printk("R {\"test\":\"mic\",\"ok\":%d,\"samples\":%d,\"mean\":%d,\"rms\":%d,\"loudest\":%d,\"min\":%d,\"max\":%d,"
+	       "\"flats\":%d,\"flat_ms\":%d,\"full\":%d}\n", ok && hi - lo > 2, count, (int)mean,
+	       count ? (int)sqrt((double)sq / count - mean * mean) : 0, loudest, lo, hi, flats, flat / 16, full);
 }
 
 /* LR-P3's switch: P1.15 on its pull-up, closed to GND = on; read only, never driven */
@@ -803,7 +815,7 @@ static void run(char *line)
 		nrf_gpio_cfg_default(SD_PWR);
 		printk("R {\"test\":\"vcc\"}\n");
 	} else if (!strncmp(line, "mic", 3)) {
-		cmd_mic(CLAMP(atoi(line + 3), 1, 10), strchr(line, 'r') != NULL);
+		cmd_mic(CLAMP(atoi(line + 3), 1, 120), strchr(line, 'r') != NULL);
 	} else if (!strcmp(line, "sw")) {
 		cmd_sw();
 	} else if (!strcmp(line, "all")) {  /* everything the board judges alone, for a plain serial terminal */

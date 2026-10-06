@@ -196,16 +196,18 @@ def run(serial, clk_secs, json_out, p3=False, flip=20):
                 "3V3 (VCC) and GND, CS P0.20, MOSI P0.22, SCK P0.24, MISO P1.00, and that a card is in")
         def mic(secs):  # the mic's result, and each 100 ms block's AC RMS
             blocks = []
-            for _, line in b.lines(f"mic {secs}", 15):
+            for _, line in b.lines(f"mic {secs}", secs + 15):
                 if line.startswith("A "):
                     blocks.append(int(line.split()[2]))
                 elif line.startswith("R "):
                     return json.loads(line[2:]), blocks
         quiet, qb = res["mic_quiet"] = mic(2)
         floor = statistics.median(qb)
-        row("mic (PDM, 2 s quiet)", bool(quiet["ok"]) and floor < 300, f"noise floor {floor:.0f} ({dbfs(floor)}, median "
-            f"100 ms RMS; pass under 300: a quiet room gives tens); DC {quiet['mean']}, min {quiet['min']} max "
-            f"{quiet['max']}" + ("" if quiet["ok"] else ": flat, DAT stuck. Check the mic's 3V (P0.17), GND, CLK "
+        drop = quiet["flats"] or quiet["full"]
+        row("mic (PDM, 2 s quiet)", bool(quiet["ok"]) and floor < 300 and not drop, f"noise floor {floor:.0f} "
+            f"({dbfs(floor)}, median 100 ms RMS; pass under 300: a quiet room gives tens); DC {quiet['mean']}, min "
+            f"{quiet['min']} max {quiet['max']}; dropouts: {quiet['flats']} runs of >=10 ms identical samples "
+            f"({quiet['flat_ms']} ms), {quiet['full']} full-scale samples" + ("" if quiet["ok"] else ": flat, DAT stuck. Check the mic's 3V (P0.17), GND, CLK "
                                  "(P0.08), DAT (P0.06)") + ("" if floor < 300 else ": noise, not sound. Check SEL is on "
                                                             "3V (mic N r tells which clock half the mic drives), CLK"))
         say = subprocess.Popen(["say", "one two three four five six seven eight nine ten"])  # the Mac's speaker
