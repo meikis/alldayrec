@@ -143,4 +143,20 @@ do {
   check(DeviceLog.cursor([], next: 5007), 5007, "nothing new")
 }
 
+// why an upload failed (DeviceLog.why): the iPhone's "bad URL" of 10-06 as CFNetwork reports one, and a server address
+// that is no URL; the host and the codes, never the token or the query
+do {
+  let path = "satisfied (Path is satisfied), interface: en0[802.11], ipv4, dns, proxy, uses wifi"
+  let under = NSError(domain: "kCFErrorDomainCFNetwork", code: -1000, userInfo: ["_NSURLErrorNWPathKey": path])
+  let bad = NSError(domain: "NSURLErrorDomain", code: -1000, userInfo: [
+    NSLocalizedDescriptionKey: "bad URL", NSUnderlyingErrorKey: under, "_kCFStreamErrorDomainKey": 1, "_kCFStreamErrorCodeKey": 22,
+    "NSErrorFailingURLStringKey": "https://lr.example.com/api/chunks?device=LR%2DP1%2DBDAE&start=1791246194000&token=secret"])
+  check(DeviceLog.why(bad, server: "https://lr.example.com"),
+        "bad URL（lr.example.com NSURLErrorDomain -1000，底层 kCFErrorDomainCFNetwork -1000，流 1/22，网络 \(path)）", "CFNetwork's bad URL")
+  let own = NSError(domain: "NSURLErrorDomain", code: -1000, userInfo: [NSLocalizedDescriptionKey: "x"])
+  check(DeviceLog.why(own, server: "https://lr.example.com \n"), "x（\"https://lr.example.com \\n\" NSURLErrorDomain -1000）",
+        "an address with a space and a newline, as typed")
+  check(DeviceLog.why(own, server: ""), "x（\"\" NSURLErrorDomain -1000）", "no address")
+}
+
 print("storecheck ok")

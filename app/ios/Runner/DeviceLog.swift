@@ -109,6 +109,18 @@ enum DeviceLog {
     add([event(device, src, seq, now, data)])
   }
 
+  /// Why a request to `server` failed, for an upload_fail event: the system's words, the host (the address as typed
+  /// when it is no URL), the error's code, the one under it, the socket's errno and the network path iOS saw (a VPN
+  /// or proxy shows there); never the token or the query.
+  static func why(_ error: Error, server: String) -> String {
+    let e = error as NSError, under = e.userInfo[NSUnderlyingErrorKey] as? NSError
+    var s = "\(e.localizedDescription)（\(URL(string: server)?.host ?? server.debugDescription) \(e.domain) \(e.code)"
+    if let under { s += "，底层 \(under.domain) \(under.code)" }
+    if let c = e.userInfo["_kCFStreamErrorCodeKey"] { s += "，流 \(e.userInfo["_kCFStreamErrorDomainKey"] ?? "?")/\(c)" }
+    if let p = under?.userInfo["_NSURLErrorNWPathKey"] ?? e.userInfo["_NSURLErrorNWPathKey"] { s += "，网络 \(p)" }
+    return s + "）"
+  }
+
   /// A step of connecting (BleLink.step), kept for the connect event.
   static func step(_ what: String, _ ms: Int) { lock.lock(); steps.append("\(what) \(ms) ms"); lock.unlock() }
 

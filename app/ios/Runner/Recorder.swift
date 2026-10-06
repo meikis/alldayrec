@@ -449,7 +449,7 @@ final class Uploader: Thread {
         }
       } catch {
         fails += 1
-        if fails == 1 { DeviceLog.app(p.device ?? device, "upload_fail", "上传失败：\(error.localizedDescription)", level: "error") }
+        if fails == 1 { DeviceLog.app(p.device ?? device, "upload_fail", "上传失败：\(DeviceLog.why(error, server: server))", level: "error") }
         note = "上传失败 \(error.localizedDescription)"
         Thread.sleep(forTimeInterval: 5 * Double(min(fails, 6)))
       }
