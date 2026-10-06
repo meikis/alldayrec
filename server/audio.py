@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 import wave
 from pathlib import Path
 
@@ -127,21 +128,30 @@ def pending(after: dict[str, dt.datetime | None]) -> list[str]:
             if r[1] > (int(after[r[0]].timestamp() * 1000) if after.get(r[0]) else 0)]
 
 
-async def stream(device: str, after: dt.datetime | None):
+async def stream(device: str, after: dt.datetime | None, edge_s: float | None = None):
     """(start time, samples) of one device in time order, from the piece holding `after` (its first piece when None),
-    forever. A piece arriving older than one already handed out is kept for playback but not streamed."""
+    forever. A piece arriving older than one already handed out is kept for playback but not streamed. edge_s: only
+    the device's newest edge_s seconds (before its newest piece's end or the clock, whichever is later), for a reader
+    of what is said now: older pieces, a backlog arriving, are skipped; such a reader is not the device's queue
+    (read_to, queued)."""
     ms = int(after.timestamp() * 1000) if after else 0
     p = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms + seconds * 1000 > ? ORDER BY start_ms LIMIT 1", (device, ms)).fetchone()
-    read_to[device] = p["start_ms"] - 1 if p else ms
+    at, lo = p["start_ms"] - 1 if p else ms, 0
     while True:
-        p = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms > ? ORDER BY start_ms LIMIT 1", (device, read_to[device])).fetchone()
+        if edge_s is None:
+            read_to[device] = at  # the reader came back for more, so the piece it had is done
+        else:
+            last = db.conn().execute("SELECT start_ms + seconds * 1000 FROM pieces WHERE device = ? ORDER BY start_ms DESC LIMIT 1", (device,)).fetchone()
+            lo = max(last[0] if last else 0, time.time() * 1000) - edge_s * 1000
+        p = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms > ? AND start_ms + seconds * 1000 > ? ORDER BY start_ms LIMIT 1",
+                              (device, at, lo)).fetchone()
         if p is None:
             await asyncio.sleep(1)
             continue
         x = await asyncio.to_thread(samples, p)
         if x is not None:
             yield dt.datetime.fromtimestamp(p["start_ms"] / 1000), x
-        read_to[device] = p["start_ms"]  # after the yield: the reader came back for more, so this one is done
+        at = p["start_ms"]
 
 
 def cut(a: dt.datetime, b: dt.datetime, fmt: str, device: str | None = None) -> bytes | None:

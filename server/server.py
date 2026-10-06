@@ -580,13 +580,14 @@ async def pipelines():
 async def pipeline(device: str):
     """Two layers over one audio stream. The final layer always runs: pieces of up to CHUNK_S cut in pauses go whole
     to the engine once, become the device's sentences, conversations and summaries. The draft layer runs only while
-    a page watches and the device is recording now: each pause the VAD sees sends the stretch before it at once;
-    its rows go to the drafts table and the page until the final layer covers their time (issue #9)."""
-    seg = Segmenter()
+    a page watches and the device is recording now, on its own stream of the device's newest audio (edge_feed): each
+    pause its VAD sees sends the stretch before it at once; its rows go to the drafts table and the page until the
+    final layer covers their time (issue #9)."""
+    seg, dseg = Segmenter(), Segmenter()  # the final layer's audio, the draft layer's
     resume = db.kv(f"finalized_to:{device}")
     done0 = dt.datetime.fromisoformat(resume) if resume else None
     draft0 = db.kv(f"draft_to:{device}")
-    st = state["devices"][device] = {"seg": seg, "done_to": done0, "audio_end": None, "last_speech": None, "refine": None,
+    st = state["devices"][device] = {"seg": seg, "done_to": done0, "audio_end": None, "edge_end": None, "last_speech": None, "refine": None,
                                      "conversation": None, "latency": [], "final_latency": [], "live": None,
                                      "progress": [],  # (wall time, finalized time) per commit, the last 10 min: the rate
                                      "utts": [],  # VAD utterances after the finalized time: where the final layer cuts
@@ -599,8 +600,8 @@ async def pipeline(device: str):
         log.info("%s resuming after the last finalized row at %s", device, resume)
 
     async def feed():
-        """The device's audio stream into the segmenter, taking the next stretch only while finalization is less than
-        BUFFER_S - 300 s of audio behind: the buffer must not drop audio before it is finalized."""
+        """The device's audio stream into the final layer's segmenter, taking the next stretch only while finalization
+        is less than BUFFER_S - 300 s of audio behind: the buffer must not drop audio before it is finalized."""
         async for t, x in audio.stream(device, st["done_to"]):
             while True:
                 done = st["done_to"]
@@ -610,15 +611,25 @@ async def pipeline(device: str):
                 await asyncio.sleep(1)
             st["audio_end"] = t + dt.timedelta(seconds=len(x) / SR)
             try:
-                utts = seg.push(t, x)
+                st["utts"] += [(u[0], u[1]) for u in seg.push(t, x)]
             except Exception:
                 log.exception("%s: segmenter failed on %.1f s at %s", device, len(x) / SR, t.time())
+
+    async def edge_feed():
+        """The draft layer's own stream: the device's newest DRAFT_BACK_S of audio, whatever the final layer is busy
+        with. A backlog (a phone back after hours offline sends them at once) is skipped here and finalized in order
+        by the final layer; fed through feed(), drafts waited until it was all final (10-06: hours)."""
+        async for t, x in audio.stream(device, None, edge_s=DRAFT_BACK_S):
+            st["edge_end"] = t + dt.timedelta(seconds=len(x) / SR)
+            try:
+                utts = dseg.push(t, x)
+            except Exception:
+                log.exception("%s: draft segmenter failed on %.1f s at %s", device, len(x) / SR, t.time())
                 continue
             for i, u in enumerate(utts):
                 st["last_speech"] = u[1]  # a piece with no VAD speech is not sent to the engine
-                st["utts"].append((u[0], u[1]))
                 st["draft_utts"].append((u[0], u[1]))
-                nxt = utts[i + 1][0] if i + 1 < len(utts) else seg.time_at(seg.pending[0]) if seg.pending else None
+                nxt = utts[i + 1][0] if i + 1 < len(utts) else dseg.time_at(dseg.pending[0]) if dseg.pending else None
                 if nxt is None or (nxt - u[1]).total_seconds() >= MERGE_GAP_S:  # a pause, not a split of a long utterance
                     st["vad_to"] = u[1] + dt.timedelta(seconds=VAD_CUT_S)
                     st["wake"].set()
@@ -870,9 +881,9 @@ async def pipeline(device: str):
             await asyncio.sleep(2)
 
     def drafting() -> bool:
-        """A page watches and this device is recording now (not catching up a backlog)."""
-        return (time.time() < state["watch_until"] and bool(seg.anchors) and st["audio_end"] is not None
-                and (dt.datetime.now() - st["audio_end"]).total_seconds() < LIVE_AUDIO_S)
+        """A page watches and this device is recording now (its newest audio is recent, backlog or not)."""
+        return (time.time() < state["watch_until"] and bool(dseg.anchors) and st["edge_end"] is not None
+                and (dt.datetime.now() - st["edge_end"]).total_seconds() < LIVE_AUDIO_S)
 
     async def draft_pass(end: dt.datetime | None = None) -> bool:
         """One draft pass; True when more remains. Timer (end None): [draft_to - margin, + window], rows near its end
@@ -880,24 +891,24 @@ async def pipeline(device: str):
         dto = st["draft_to"]
         t_run = time.perf_counter()
         if end is None:
-            t0, x = seg.window(REFINE_WINDOW_S, dto - dt.timedelta(seconds=REFINE_MARGIN_S))
+            t0, x = dseg.window(REFINE_WINDOW_S, dto - dt.timedelta(seconds=REFINE_MARGIN_S))
         else:
             us = st["draft_utts"] = [u for u in st["draft_utts"] if u[1] > dto]
             if not us:
                 return False
             start = max(us[0][0] - dt.timedelta(seconds=1), dto - dt.timedelta(seconds=REFINE_MARGIN_S))
-            t0, x = seg.window(min(REFINE_WINDOW_S, (seg.sample_at(end) - seg.sample_at(start)) / SR), start)
-        a0 = seg.sample_at(t0)
-        at = lambda s: seg.time_at(a0 + int(s * SR))
-        since = max(0.0, (seg.sample_at(dto) - a0) / SR)
+            t0, x = dseg.window(min(REFINE_WINDOW_S, (dseg.sample_at(end) - dseg.sample_at(start)) / SR), start)
+        a0 = dseg.sample_at(t0)
+        at = lambda s: dseg.time_at(a0 + int(s * SR))
+        since = max(0.0, (dseg.sample_at(dto) - a0) / SR)
         edge = 0.0 if end is not None and len(x) / SR < REFINE_WINDOW_S else EDGE_S  # a window cut short of its pause may end mid-sentence
         if len(x) / SR - since < (0.3 if end is not None else EDGE_S + 10):
             return False
         hi = at(len(x) / SR - EDGE_S)
-        if end is None and not seg.speaking() and (st["last_speech"] is None or st["last_speech"] <= dto):
+        if end is None and not dseg.speaking() and (st["last_speech"] is None or st["last_speech"] <= dto):
             st["draft_to"] = hi  # silence: nothing to send
             db.put_kv(f"draft_to:{device}", iso(hi))
-            return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
+            return (dseg.time_at(dseg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
         sent, n_rows = since, 0  # seconds into the window up to which rows went out while the call ran
 
         async def publish(rows: list[dict], upto: dt.datetime, engine: str):
@@ -932,7 +943,7 @@ async def pipeline(device: str):
             await publish(rows, at(sent), segs[0]["engine"])
 
         loop, answers = asyncio.get_running_loop(), asyncio.Queue()
-        call = asyncio.ensure_future(asyncio.to_thread(engine_segs, x, speech_in(seg, a0, len(x)),
+        call = asyncio.ensure_future(asyncio.to_thread(engine_segs, x, speech_in(dseg, a0, len(x)),
                                                        lambda segs: loop.call_soon_threadsafe(answers.put_nowait, segs), DRAFT_ENGINE))
         m0 = ddia.mark()
         try:
@@ -968,7 +979,7 @@ async def pipeline(device: str):
         log.info("draft %s: %s", device, st["draft"])
         if end is not None:  # pauses that came during the pass have set wake again
             return len(x) / SR >= REFINE_WINDOW_S
-        return (seg.time_at(seg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
+        return (dseg.time_at(dseg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
 
     async def draft_loop():
         while True:
@@ -983,8 +994,8 @@ async def pipeline(device: str):
                 continue
             # from where drafts or final rows stop, but no further back than DRAFT_BACK_S: a page that opens sees the
             # minutes not final yet, not a backlog
-            floor = seg.time_at(seg.samples) - dt.timedelta(seconds=DRAFT_BACK_S)
-            st["draft_to"] = max(t for t in (st["draft_to"], st["done_to"], floor, seg.time_at(seg.audio_base)) if t)
+            floor = dseg.time_at(dseg.samples) - dt.timedelta(seconds=DRAFT_BACK_S)
+            st["draft_to"] = max(t for t in (st["draft_to"], st["done_to"], floor, dseg.time_at(dseg.audio_base)) if t)
             if not st["drafting"]:
                 st["drafting"] = True
                 note(f"{device}：页面在看，开始出初稿（从 {st['draft_to'].strftime('%H:%M:%S')} 起）", "state")
@@ -1005,6 +1016,7 @@ async def pipeline(device: str):
         return t
 
     watched(feed(), f"feed:{device}")
+    watched(edge_feed(), f"edge:{device}")
     watched(draft_loop(), f"draft:{device}")
     await final_loop()
 

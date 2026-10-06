@@ -23,6 +23,7 @@ import { useSocket } from "../lib/socket";
 
 // One day at a time (?day=YYYY-MM-DD; none: today, which follows the live stream)
 const GAP_MS = 5 * 60 * 1000; // a quiet stretch this long gets a mark, so conversations separate
+const CATCHUP_MS = 2 * 60 * 1000; // final rows this far short of a device's drafts (or newest audio): a backlog being finalized
 const route = useRoute(),
   router = useRouter();
 const today = todayOf();
@@ -43,11 +44,36 @@ type Item =
   | { k: "row"; key: string; r: Row; media?: boolean }
   | { k: "fold"; key: string; rows: Row[] }
   | { k: "conv"; key: string; c: Conversation }
-  | { k: "gap"; key: string; at: string };
+  | { k: "gap"; key: string; at: string }
+  | { k: "catchup"; key: string; device: string; from: string; to: string; eta: number | null };
+// Per device, the time between its final rows and its drafts (or, with none, its newest audio): the drafts follow
+// what is said now while a backlog (a phone back after hours offline) is finalized in order, so this time is not lost
+const catchups = computed(() =>
+  (live.value ? (status.value?.devices ?? []) : []).flatMap((d) => {
+    const ft = finalTo[d.device] ?? ""; // a final message comes before the next status (every 2 s)
+    const from = d.done_to && d.done_to > ft ? d.done_to : ft;
+    if (!from) return [];
+    const to =
+      rows.value
+        .filter((r) => r.state === "draft" && r.source === d.device && r.start >= from)
+        .reduce<string | null>((a, r) => (a && a < r.start ? a : r.start), null) ?? d.received_to;
+    if (!to || +new Date(to) - +new Date(from) <= CATCHUP_MS) return [];
+    const it: Item = {
+      k: "catchup",
+      key: "u" + d.device,
+      device: d.device,
+      from,
+      to,
+      eta: d.eta_s,
+    };
+    return [{ s: from, it }];
+  }),
+);
 const timeline = computed(() => {
   const ev = [
     ...rows.value.map((r) => ({ s: r.start, it: { k: "row", key: "s" + r.id, r } as Item })),
     ...convs.value.map((c) => ({ s: c.end, it: { k: "conv", key: "c" + c.id, c } as Item })),
+    ...catchups.value,
   ].sort((a, b) => (a.s < b.s ? -1 : a.s > b.s ? 1 : 0)); // stable: a divider stays after rows starting at its end
   const out: Item[] = [];
   let lastEnd = 0;
@@ -340,6 +366,11 @@ const convLink = (c: Conversation) =>
         对话 {{ hhmmss(it.c.start) }}–{{ hhmmss(it.c.end) }} 结束 · 参与
         {{ it.c.participants.join("、") || "—" }} · {{ it.c.sentences }} 句 ·
         <RouterLink :to="'/c/' + it.c.id">{{ convLink(it.c) }}</RouterLink>
+      </div>
+      <div v-else-if="it.k === 'catchup'" class="gap">
+        正在补齐 {{ it.device }} {{ hhmm(it.from) }}–{{ hhmm(it.to) }} 的录音{{
+          it.eta ? `，约 ${Math.ceil(it.eta / 60)} 分钟` : ""
+        }}
       </div>
       <div v-else class="gap">— {{ hhmm(it.at) }} —</div>
     </template>
