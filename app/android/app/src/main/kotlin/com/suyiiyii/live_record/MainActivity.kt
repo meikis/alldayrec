@@ -127,6 +127,12 @@ class MainActivity : FlutterActivity() {
                         Ble.removeBond(getSystemService(BluetoothManager::class.java).adapter.getRemoteDevice(addr))
                     runOnUiThread { result.success(forgot) }
                 }.start()
+                "listen" -> {  // the recorder's sound played on this phone as it comes (Listen.kt), or not; off when the app leaves the front
+                    val on = call.argument<Boolean>("on")!!
+                    val link = RecorderService.link
+                    if (link == null) { if (on) result.error("none", "先开始录音，连上录音设备", null) else result.success(null) }
+                    else try { link.listen(on); result.success(null) } catch (e: Exception) { result.error("listen", "没法播放：${e.message}", null) }
+                }
                 "pause" -> {  // the connected recorder keeps nothing for s seconds (0: records again)
                     try { RecorderService.link!!.pause(call.argument<Int>("s")!!); result.success(null) }
                     catch (e: Exception) { result.error("none", "录音设备没连上", null) }

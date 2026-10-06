@@ -138,6 +138,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   @Shared var syncNote: String?        // the last catch-up, for the app's recorder page
   @Shared var syncDoneKb: Int64 = 0    // the catch-up under way: taken of total (0 of 0: none)
   @Shared var syncTotalKb: Int64 = 0
+  @Shared private(set) var listening: Listen?  // the recorder's sound played on this phone too (Listen.swift)
 
   private let prefs = Recorder.defaults
   private let chunks: URL, undated: URL, mirrors: URL
@@ -180,6 +181,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
   func stop() {
     on = false
+    try? listen(false)
     q.sync {
       conn = nil
       abort()
@@ -372,7 +374,10 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   func peripheral(_ p: CBPeripheral, didUpdateValueFor c: CBCharacteristic, error: Error?) {
     let v = c.value ?? Data()
     switch c.uuid {
-    case Ble.live: live.put([UInt8](v))
+    case Ble.live:
+      let b = [UInt8](v)
+      live.put(b)
+      listening?.feed(b)
     case Ble.ctrl: ctrl.put([UInt8](v))
     case Ble.data: data.put([UInt8](v))
     default: done(error, v)
@@ -523,6 +528,20 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       DeviceLog.app(tag ?? "", s > 0 ? "pause" : "resume", s > 0 ? "暂停录音 \(s % 60 == 0 ? "\(s / 60) 分钟" : "\(s) 秒")" : "恢复录音")
       Ble.log("pause \(s) s")
     }
+  }
+
+  /// Listening on this phone, or not. On, the session puts the phone's clock into the stream now: the lines go by the
+  /// stream's 'T' records, which come only on connect and every 10 minutes otherwise.
+  func listen(_ on: Bool) throws {
+    if !on {
+      let l = listening
+      listening = nil
+      l?.stop()
+      return
+    }
+    if listening != nil { return }
+    listening = try Listen()
+    jobs.put { [self] p in _ = try sync(p) }
   }
 
   /// Unbinding: the recorder forgets every phone, this one too (FORGET all), and the link goes. False: not connected.

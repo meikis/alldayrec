@@ -1,10 +1,13 @@
 // The record stream as the phone takes it (Runner/Store.swift), the cases of the Android app's StoreTest.kt and the data
 // of firmware/devkit/lr_sync.py's selftest: mirror (LIVE with holes READ again), pieces dated by the nearest 'T', frames
 // held for a boot without one, closed files finished and deletable once their pieces are uploaded; the recorder's
-// event log (Runner/DeviceLog.swift, DeviceLogTest.kt's case); and what a firmware update checks first (Runner/Dfu.swift).
-// Foundation only, so CI runs it on Linux:
-//   cd app/ios && swiftc -o /tmp/storecheck Runner/Store.swift Runner/DeviceLog.swift Runner/Dfu.swift StoreCheck/main.swift && /tmp/storecheck
+// event log (Runner/DeviceLog.swift, DeviceLogTest.kt's case); what a firmware update checks first (Runner/Dfu.swift);
+// and listening on the phone (Runner/Listen.swift). Foundation only, so CI runs it on Linux:
+//   cd app/ios && swiftc -o /tmp/storecheck Runner/Store.swift Runner/DeviceLog.swift Runner/Dfu.swift Runner/Listen.swift StoreCheck/main.swift && /tmp/storecheck
 import Foundation
+#if canImport(AVFoundation)
+import AVFoundation
+#endif
 
 func check<T: Equatable>(_ got: T, _ want: T, _ what: String, line: Int = #line) {
   if got != want { print("FAIL line \(line) \(what): got \(got), want \(want)"); exit(1) }
@@ -192,6 +195,120 @@ do {
         "an address with a space and a newline, as typed")
   check(DeviceLog.why(own, server: ""), "x（\"\" NSURLErrorDomain -1000）", "no address")
 }
+
+// listening on the phone (Listen.swift), lr_listen.py's selftest with a stand-in codec (a frame's "Opus" is its index:
+// the decoder gives back those 160 samples exactly). 3 s: hum (50 Hz at -12 dBFS + 150 Hz at -24 dBFS), from 1.2 s
+// 50 ms of nothing from the mic, from 2.3 s 20 ms clipped. Frames 1000.. in 'A' records of 10, a 'T' (frame 1030 was
+// 10:00:00.300) after the third, sent in 20 B pieces; listening begins inside the second record (the first bytes it
+// gets are mid-record); of frames 1240..1249 only the first piece goes (a notify that failed), from 1200 a new file.
+func lsample(_ i: Int) -> Int16 {
+  if 19200 <= i && i < 20000 { return 0 }
+  if 36800 <= i && i < 37120 { return i % 64 < 32 ? Int16.max : -Int16.max }
+  let w = 2 * Double.pi * Double(i) / 16000
+  return Int16((0.25 * 32767 * sin(50 * w) + 0.0625 * 32767 * sin(150 * w)).rounded())
+}
+let lpcm = (0..<(3 * Listener.rate)).map(lsample)
+func lframe(_ k: Int) -> [Int16] { Array(lpcm[(k * 160)..<((k + 1) * 160)]) }
+func lrec(_ first: Int, pad: Int? = nil) -> [UInt8] {  // frames of 2..8 B (as Opus's vary), or 2 + pad
+  var r: [UInt8] = [0x41, 10] + Store.le(UInt32(first))
+  for k in first..<(first + 10) { r += [UInt8(2 + (pad ?? k % 7))] + Store.le(UInt16(k - 1000)) + [UInt8](repeating: 0xAA, count: pad ?? k % 7) }
+  return r
+}
+func ldecode(_ d: Data) -> [Int16] { lframe(Int(Store.le([UInt8](d), 0, 2))) }
+let lepoch: Int64 = 1_791_000_000_000  // a whole second
+do {
+  var recs: [(first: Int, bytes: [UInt8])] = (0..<30).map { (1000 + $0 * 10, lrec(1000 + $0 * 10)) }
+  recs.insert((1030, [0x54] + Store.le(UInt32(1030)) + Store.le(UInt64(lepoch + 300))), at: 3)
+  var sent: [(p: [UInt8], now: Int64)] = [], f: UInt32 = 7, off = 0
+  for r in recs {
+    if r.first == 1200 && r.bytes[0] == 0x41 { f = 8; off = 0 }
+    let now: Int64 = lepoch + Int64(r.first - 1000 + 10) * 10 + 20  // as a record arrives: 20 ms after its last frame
+    for i in stride(from: 0, to: r.first == 1240 ? 1 : r.bytes.count, by: 20) {
+      let head: [UInt8] = Store.le(f) + Store.le(UInt32(off + i))
+      sent.append((head + r.bytes[i..<min(i + 20, r.bytes.count)], now))
+    }
+    off += r.bytes.count
+  }
+  let begin = sent.firstIndex { Store.le($0.p, 4, 4) > UInt64(lrec(1000).count) }! + 1  // a piece inside record 1010
+  var played: [Int16] = [], lines: [[String: Any]] = []
+  let l = Listener(decode: ldecode, play: { played += $0; return 0.1 }, say: { lines.append($0) })  // 0.1 s queued ahead of each frame
+  for s in sent[begin...] { l.feed(s.p, now: s.now) }
+  l.flush()
+  check(played, (23..<240).flatMap(lframe) + (250..<300).flatMap(lframe), "played from record 1020 on (its first 30 ms warm the decoder), but for the lost record")
+  check(lines.map { $0["t"] as! Int64 }, [lepoch, lepoch + 1000, lepoch + 2000], "a line a second on the wall clock")
+  let num = { (k: String) in lines.map { l in (l[k] as? Double) ?? (l[k] as? Int).map(Double.init) ?? Double(l[k] as! Int64) } }
+  check(abs(num("hum")[0] + 14.8) < 0.3 && abs(num("rms")[0] - num("hum")[0]) < 0.2, true, "hum: 50+150 Hz at -14.8 dBFS RMS, \(num("hum"))")
+  check(num("zero"), [0, 50, 0], "50 ms of nothing from the mic")
+  check(num("full"), [0, 0, 320], "20 ms clipped")
+  check(num("lost"), [0, 0, 100], "the record lost on the link")
+  // 130..220 ms over a record's frames; after the gap, record 1250 waits for 1260 (two in a row say where records
+  // begin): its frames 100 ms later
+  check(num("delay"), [175, 175, 186], "delay")
+  check(num("queued"), [100, 100, 100], "the queue's part")
+
+  // a record type this app does not know (in a firmware after it): its bytes are dropped, listening goes on after it
+  // (once more is waiting than a record can hold: 64 B frames here, 4 KB/s from a recorder)
+  var b: [UInt8] = lrec(1000) + lrec(1010) + [0x4D] + [UInt8](repeating: 1, count: 100)
+  for k in 2..<30 { b += lrec(1000 + k * 10, pad: 62) }
+  played = []
+  let u = Listener(decode: ldecode, play: { played += $0; return 0 }, say: { _ in })
+  var at = 0
+  while !b.isEmpty {
+    let n = min(200, b.count), head: [UInt8] = Store.le(UInt32(9)) + Store.le(UInt32(at))
+    u.feed(head + b.prefix(n), now: 0)
+    b.removeFirst(n)
+    at += n
+  }
+  check(played.prefix(17 * 160) == ArraySlice((3..<20).flatMap(lframe)), true, "before the unknown record")
+  check(played.suffix(150 * 160) == ArraySlice((150..<300).flatMap(lframe)), true, "after it, \(played.count / 160) frames played")
+
+  // the output's queue: silence until 0.15 s are in, the oldest go past 0.25 s, silence again once it ran dry
+  let j = Jitter(), out = UnsafeMutablePointer<Float>.allocate(capacity: 4000)
+  check(j.put(Array(repeating: 16384, count: 2000)), 0, "first in: heard at once (once playing)")
+  j.take(out, 100)
+  check(out[0], 0, "not 0.15 s in yet: silence")
+  check(j.put(Array(repeating: 8192, count: 400)), 0.125, "queued ahead of it")
+  j.take(out, 100)
+  check(out[0], 0.5, "0.15 s in: playing")
+  check(j.put(Array(repeating: 1, count: 2000)), Double(Jitter.max - 2000) / 16000, "past 0.25 s the oldest go")
+  j.take(out, 4000)
+  check([out[1599], out[1600], out[2000], out[3999]], [0.5, 0.25, Float(1) / 32768, Float(1) / 32768], "the oldest 300 went: 1600 + 400 + 2000 left")
+  _ = j.put([7])
+  j.take(out, 2)
+  check([out[0], out[1]], [Float(7) / 32768, 0], "the last sample, then it ran dry")
+  _ = j.put([7])
+  j.take(out, 1)
+  check(out[0], 0, "ran dry: waits for 0.15 s again")
+  out.deallocate()
+}
+
+#if canImport(AVFoundation)
+// the decoder (Listen.swift's OpusDecoder, iOS's AudioToolbox; on a Mac the same): 1 kHz at -15 dBFS RMS in 10 ms
+// Opus frames from AudioToolbox's encoder (SILK: it filters out the hum above), decoded a frame at a time, at the level
+// it went in. Frames from the recorder itself (libopus, CELT) were checked by hand against libopus (PR).
+do {
+  var d = AudioStreamBasicDescription(mSampleRate: 16000, mFormatID: kAudioFormatOpus, mFormatFlags: 0, mBytesPerPacket: 0, mFramesPerPacket: 160,
+                                      mBytesPerFrame: 0, mChannelsPerFrame: 1, mBitsPerChannel: 0, mReserved: 0)
+  let opus = AVAudioFormat(streamDescription: &d)!, f32 = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)!
+  let enc = AVAudioConverter(from: f32, to: opus)!
+  enc.bitRate = 32000
+  let b = AVAudioPCMBuffer(pcmFormat: f32, frameCapacity: 16000)!
+  b.frameLength = 16000
+  for i in 0..<16000 { b.floatChannelData![0][i] = 0.25 * sin(2 * .pi * 1000 * Float(i) / 16000) }
+  var given = false, frames: [Data] = []
+  while true {
+    let o = AVAudioCompressedBuffer(format: opus, packetCapacity: 16, maximumPacketSize: 1500)
+    let st = enc.convert(to: o, error: nil) { _, s in if given { s.pointee = .endOfStream; return nil }; given = true; s.pointee = .haveData; return b }
+    for i in 0..<Int(o.packetCount) { let p = o.packetDescriptions![i]; frames.append(Data(bytes: o.data + Int(p.mStartOffset), count: Int(p.mDataByteSize))) }
+    if st != .haveData { break }
+  }
+  let dec = try! OpusDecoder()
+  let pcm = frames.map(dec.decode)
+  check(pcm.dropFirst().allSatisfy { $0.count == 160 }, true, "160 samples a frame, \(Set(pcm.map(\.count)))")
+  let s = Listener.stats(pcm.flatMap { $0 }, z: 0)
+  check(abs(s.rms + 15) < 1, true, "decoded at the level it went in: \(s)")
+}
+#endif
 
 #if canImport(ObjectiveC)
 // #109: the BLE session's loop (Ble.swift) on a thread that lives for hours: LIVE bytes into the mirror, then pieces().

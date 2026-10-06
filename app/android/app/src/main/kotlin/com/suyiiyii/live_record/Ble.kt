@@ -165,6 +165,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
 
     fun stop() {
         on = false
+        listen(false)
         ctx.unregisterReceiver(adapterState)
         main.removeCallbacksAndMessages(null)
         try { adapter.bluetoothLeScanner?.stopScan(scanCb) } catch (_: Exception) {}
@@ -388,6 +389,18 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         }
     }
 
+    @Volatile var listening: Listen? = null  // the recorder's sound played on this phone too (Listen.kt)
+        private set
+
+    /** Listening on this phone, or not. On, the session puts the phone's clock into the stream now: the lines go by the
+     *  stream's 'T' records, which come only on connect and every 10 minutes otherwise. */
+    fun listen(on: Boolean) {
+        if (!on) { val l = listening; listening = null; l?.stop(); return }
+        if (listening != null) return
+        listening = Listen()
+        jobs.put { g -> sync(g) }
+    }
+
     /** Unbinding: the recorder forgets every phone, this one too (FORGET all), and the link goes. False: not connected. */
     fun forgetAll(): Boolean {
         if (gatt == null) return false
@@ -583,7 +596,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
 
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
             when (c.uuid) {
-                Ble.LIVE -> live.put(value)
+                Ble.LIVE -> { live.put(value); listening?.feed(value) }
                 Ble.CTRL -> ctrl.put(value)
                 Ble.DATA -> data.put(value)
             }

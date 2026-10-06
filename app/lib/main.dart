@@ -105,6 +105,7 @@ class Recorder {
       _ch.invokeMethod('bind', {'name': name, 'address': address, 'force': force});
   static Future<void> pause(int s) => _ch.invokeMethod('pause', {'s': s});  // 0: record again
   static Future<void> usbDisk(bool on) => _ch.invokeMethod('usbDisk', {'on': on});
+  static Future<void> listen(bool on) => _ch.invokeMethod('listen', {'on': on});  // the recorder's sound played on this phone
   static bool hold = false;  // the link is taken down on purpose (unbind, firmware update): do not bring it back meanwhile
 
   /// Takes the BLE link down, runs `f`, and lets it come back (the home page's ticker restarts it).
@@ -186,6 +187,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     Recorder.foreground(state == AppLifecycleState.resumed);
     if (state == AppLifecycleState.resumed) _slices();
+    if (state == AppLifecycleState.paused) Recorder.listen(false);  // listening is for the app in front only
   }
 
   /// Ask the server for piece lengths; a running recorder switches to them at its next piece.
@@ -833,7 +835,8 @@ class _RecorderPageState extends State<RecorderPage> {
   void initState() {
     super.initState();
     _load();
-    timer = Timer.periodic(const Duration(seconds: 2), (_) => widget.visible ? _load() : null);
+    // every 2 s; while listening every second, for its line a second
+    timer = Timer.periodic(const Duration(seconds: 1), (t) => widget.visible && (st['listen'] != null || t.tick.isEven) ? _load() : null);
   }
 
   @override
@@ -916,6 +919,7 @@ class _RecorderPageState extends State<RecorderPage> {
     final syncing = recording && syncTotal > 0;
     final lent = store == -16;
     final dfu = (st['dfu'] ?? r['dfu']) as String?;
+    final listen = st['listen'] as List?;  // listening on this phone: its lines
 
     // connection chip: what the link is doing, in one colour
     final (String chip, Color chipColor, IconData chipIcon) = !recording
@@ -986,6 +990,20 @@ class _RecorderPageState extends State<RecorderPage> {
           Expanded(child: Text(!linked ? '连上录音设备后可以暂停' : pausedMin > 0 ? '已暂停，还剩 $pausedMin 分钟，到时自动继续' : '正在录音')),
           if (linked) PauseButton(paused: pausedMin > 0, onDone: _pauseDone, labels: true),
         ])),
+        // listening on this phone (Listen.swift, Listen.kt)
+        section('实时监听', Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            secondary: Icon(Icons.headphones_rounded, color: listen != null ? cs.primary : cs.onSurfaceVariant),
+            title: const Text('在这台手机上听'),
+            subtitle: Text(!linked && listen == null
+                ? '连上录音设备后可以听'
+                : '录音设备的声音直接在手机上播放，不经服务器，慢约半秒，离开 App 自动关闭。建议戴耳机，外放会被麦克风收回去'),
+            value: listen != null,
+            onChanged: linked || listen != null ? (v) => _call(() => Recorder.listen(v)) : null,
+          ),
+          if (listen != null) ListenLines(lines: listen),
+        ])),
         // battery and card
         const SizedBox(height: 12),
         IntrinsicHeight(
@@ -1049,6 +1067,42 @@ class _RecorderPageState extends State<RecorderPage> {
         ])),
       ]),
     );
+  }
+}
+
+/// Listening's line a second, newest first: the second's level and hum, ms of exact zeros in runs of 10 ms or more (the
+/// mic sent nothing), clipped samples, ms lost on the link, and the delay from the recorder's mic to this phone's output.
+class ListenLines extends StatelessWidget {
+  final List lines;
+  const ListenLines({super.key, required this.lines});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context), cs = t.colorScheme;
+    final style = t.textTheme.bodySmall?.copyWith(fontFeatures: const [FontFeature.tabularFigures()]);
+    final dim = style?.copyWith(color: cs.onSurfaceVariant);
+    if (lines.isEmpty) return Text('等录音设备的声音和对时……', style: dim);
+    String hms(num ms) {
+      final d = DateTime.fromMillisecondsSinceEpoch(ms.toInt());
+      return [d.hour, d.minute, d.second].map((x) => '$x'.padLeft(2, '0')).join(':');
+    }
+    final rows = [
+      ['时间', '电平', '哼声', '全0', '满幅', '丢失', '延迟'],
+      for (final l in lines.reversed.take(8))
+        [hms(l['t']), (l['rms'] as num).toStringAsFixed(1), (l['hum'] as num).toStringAsFixed(1), '${l['zero']}', '${l['full']}', '${l['lost']}', '${l['delay']}'],
+    ];
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Table(defaultColumnWidth: const IntrinsicColumnWidth(), children: [
+        for (final (i, r) in rows.indexed)
+          TableRow(children: [
+            for (final c in r)
+              Padding(padding: const EdgeInsets.fromLTRB(0, 2, 12, 2), child: Text(c, style: i == 0 ? dim : style, textAlign: TextAlign.right)),
+          ]),
+      ]),
+      const SizedBox(height: 6),
+      Text('每秒一行。电平、哼声（50 Hz 及谐波）：dBFS；全0：连续 10 ms 以上全是 0 的毫秒数（麦克风没数据）；满幅：削顶的样本数；'
+          '丢失：蓝牙丢掉的毫秒数；延迟：从录音设备的麦克风到手机输出的毫秒数，其中 ${lines.last['queued']} 是手机上的缓冲', style: dim),
+    ]);
   }
 }
 

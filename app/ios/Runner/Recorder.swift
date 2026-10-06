@@ -79,6 +79,10 @@ enum Recorder {
           if let name { DeviceLog.app(Ble.tag(name), "unbind", forgot ? "解除绑定：录音设备忘掉了所有手机" : "解除绑定：录音设备没连上，只有这台手机忘掉了它") }
           DispatchQueue.main.async { result(forgot) }
         }
+      case "listen":  // the recorder's sound played on this phone as it comes (Listen.swift), or not; off when the app leaves the front
+        let on = a["on"] as? Bool ?? false
+        guard let l = link else { return result(on ? FlutterError(code: "none", message: "先开始录音，连上录音设备", details: nil) : nil) }
+        do { try l.listen(on); result(nil) } catch { result(FlutterError(code: "listen", message: "没法播放：\(error.localizedDescription)", details: nil)) }
       case "pause":  // the connected recorder keeps nothing for s seconds (0: records again)
         do {
           guard let l = link else { throw CocoaError(.featureUnsupported) }
@@ -109,7 +113,7 @@ enum Recorder {
             "source": (slicer != nil ? "mic" : l != nil ? "ble" : nil) ?? NSNull(), "link": l?.state ?? NSNull(), "tag": l?.tag ?? NSNull(),
             "hw": l?.hw ?? NSNull(), "usbNote": l?.usbNote ?? NSNull(), "lastSync": l?.syncNote ?? NSNull(),
             "syncDone": l?.syncDoneKb ?? NSNull(), "syncTotal": l?.syncTotalKb ?? NSNull(), "pausedUntil": l?.pausedUntil ?? NSNull(),
-            "dfu": Dfu.state ?? NSNull(), "dfuBusy": Dfu.busy]
+            "dfu": Dfu.state ?? NSNull(), "dfuBusy": Dfu.busy, "listen": l?.listening?.lines ?? NSNull()]
   }
 
   /// The piece length the BLE link cuts the live file into (the microphone's Slicer has its own).

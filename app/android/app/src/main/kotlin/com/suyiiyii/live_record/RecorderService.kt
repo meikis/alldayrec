@@ -43,7 +43,8 @@ class RecorderService : Service() {
                 "pending" to q.size, "pendingBytes" to q.sumOf { it.length() }, "oldest" to q.firstOrNull()?.let(Uploader::startMs),
                 "interruptedAt" to if (interruptedAt > 0) interruptedAt else null, "link" to link?.state, "tag" to slicer?.tag, "hw" to link?.hw,
                 "dfu" to Dfu.state, "dfuBusy" to Dfu.busy, "source" to (if (slicer == null) null else if (link != null) "ble" else "mic"), "usbNote" to link?.usbNote, "lastSync" to link?.syncNote,
-                "syncDone" to link?.syncDoneKb, "syncTotal" to link?.syncTotalKb, "pausedUntil" to link?.pausedUntil)
+                "syncDone" to link?.syncDoneKb, "syncTotal" to link?.syncTotalKb, "pausedUntil" to link?.pausedUntil,
+                "listen" to link?.listening?.lines)
         }
 
         const val BACKLOG_MS = 120_000L  // a piece waiting longer (the longest slice is 60 s, then its upload) is a backlog
