@@ -75,25 +75,26 @@ typedef struct {
     uint8_t percentage;
 } BatteryState;
 
-#define BATTERY_STATES_COUNT 16
-// 1S 250mAh LiPo battery discharge profile
+#define BATTERY_STATES_COUNT 14
+// The share of a full charge's recording time left, by the reading, measured on LR-X1-567E's 602030 recording to its
+// card (#95): its HEARTBEATs over three runs to empty, 10-05 and 10-06, agree within ~10 minutes below 3.75 V; a full
+// charge records ~10.5 h to 3.3 V (#95's 10-12 h to empty), the flat stretches (4.00-4.02 V, 3.83-3.85 V) hold hours.
+// 0% at 3.3 V: the low-battery cut-off (#148). The old table (Omi's, a straight line) said 50% with 2.5 h of 10.5 left.
 BatteryState battery_states[BATTERY_STATES_COUNT] = {
-    {4074, 100},
-    {4029, 95},
-    {3983, 90},
-    {3938, 85},
-    {3893, 80},
-    {3847, 70},
-    {3802, 60},
-    {3756, 50},
-    {3665, 40},
-    {3619, 30},
-    {3528, 20},
-    {3437, 10},
-    {3346, 5},
-    {3255, 2},
-    {3164, 1},
-    {3000, 0} // Below safe level
+    {4100, 100},
+    {4020, 94},
+    {4000, 85},
+    {3920, 73},
+    {3870, 65},
+    {3830, 48},
+    {3810, 38},
+    {3770, 27},
+    {3730, 22},
+    {3690, 19},
+    {3610, 14},
+    {3530, 8},
+    {3450, 3},
+    {3300, 0},
 };
 
 static uint8_t is_initialized = false;

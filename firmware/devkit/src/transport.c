@@ -413,10 +413,15 @@ K_WORK_DELAYABLE_DEFINE(battery_work, broadcast_battery_level);
 
 void broadcast_battery_level(struct k_work *work_item)
 {
+    static uint32_t avg4;  // 4 x the readings' running average (~1 minute): on a flat stretch 20 mV is ~10 points
     uint16_t battery_millivolt;
     uint8_t battery_percentage;
-    if (battery_get_millivolt(&battery_millivolt) == 0 &&
-        battery_get_percentage(&battery_percentage, battery_millivolt) == 0) {
+    int err = battery_get_millivolt(&battery_millivolt);
+    if (!err) {
+        avg4 = avg4 ? avg4 - avg4 / 4 + battery_millivolt : 4 * battery_millivolt;
+        err = battery_get_percentage(&battery_percentage, avg4 / 4);
+    }
+    if (!err) {
 
         LOG_PRINTK("Battery at %d mV (capacity %d%%)\n", battery_millivolt, battery_percentage);
 
