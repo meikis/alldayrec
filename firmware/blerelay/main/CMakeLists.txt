@@ -1,0 +1,21 @@
+# The relay's key (README.md): 64 hex digits in a file outside the repository, the one relay.py reads. Written into a
+# header in the build directory, so it shows up in no command line or log.
+if(NOT CMAKE_BUILD_EARLY_EXPANSION)
+    set(key_file "$ENV{RELAY_KEY_FILE}")
+    if(NOT key_file)
+        set(key_file "$ENV{HOME}/code/lr-swd/relay/relay.key")
+    endif()
+    file(READ "${key_file}" key)
+    string(STRIP "${key}" key)
+    if(NOT key MATCHES "^[0-9a-f]+$")
+        message(FATAL_ERROR "${key_file}: not 64 hex digits")
+    endif()
+    string(LENGTH "${key}" n)
+    if(NOT n EQUAL 64)
+        message(FATAL_ERROR "${key_file}: not 64 hex digits")
+    endif()
+    string(REGEX REPLACE "(..)" "0x\\1," bytes "${key}")
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/key/relay_key.h" "static const uint8_t relay_key[32] = {${bytes}};\n")
+endif()
+idf_component_register(SRCS "main.c" PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}/key"
+                       PRIV_REQUIRES bt nvs_flash mbedtls)
