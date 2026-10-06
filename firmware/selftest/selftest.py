@@ -54,12 +54,9 @@ def port(serial):
 
 def flash(serial):
     if not drive(serial):
-        p = port(serial)
-        if not p:
+        if not port(serial):
             sys.exit(f"{serial}: neither its UF2 drive nor {PRODUCT} on USB; double-tap RST to enter the bootloader")
-        import serial as pyserial
-        with pyserial.Serial(p, timeout=1) as s:
-            s.write(b"dfu\n")
+        Board(serial).cmd("dfu")  # wait for its reply: closing the port right after the write loses the command
         for _ in range(40):
             time.sleep(0.5)
             if drive(serial):
