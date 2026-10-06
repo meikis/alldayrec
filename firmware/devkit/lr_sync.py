@@ -324,7 +324,9 @@ EVENTS = {
     27: ("READ_TIME", lambda x, a, b: f"card {a} ms, notify {b} ms"),
     28: ("SWITCH", lambda x, a, b: f"{'on' if x else 'off'}: " + (
         ["recording", "System OFF", "up on USB, not recording", "restart"][a] if a < 4 else str(a))),
-    29: ("POWER", lambda x, a, b: "power-fail warning: VDDH under 3.3 V or VDD under 2.8 V" if a else f"on battery, VDDH {x * 20} mV"),
+    29: ("POWER", lambda x, a, b: {0: f"on battery, VDDH {x * 20} mV",
+                                   1: "power-fail warning: VDDH under 3.3 V or VDD under 2.8 V",
+                                   2: f"low battery ({x * 20} mV): recording ended, System OFF until USB or the switch"}.get(a, str(a))),
     30: ("LIVE_LOST", lambda x, a, b: f"{a} records ({b} B) left out of LIVE (link stalled), on the card all the same"),
 }
 
@@ -417,6 +419,7 @@ def selftest():
         "9 appends, 601 ms in all, slowest 250 ms; under 20 ms 4, 20-49 ms 2, 50-200 ms 2, over 200 ms 1"
     assert EVENTS[28][1](0, 1, 0) == "off: System OFF" and EVENTS[28][1](1, 9, 0) == "on: 9"
     assert EVENTS[29][1](204, 0, 0) == "on battery, VDDH 4080 mV"
+    assert EVENTS[29][1](165, 2, 0).startswith("low battery (3300 mV)")
     assert EVENTS[30][0] == "LIVE_LOST" and EVENTS[30][1](0, 12, 4800).startswith("12 records (4800 B)")
     assert EVENTS[26][1](12, 409600, 10000 | 491 << 22) == \
         "400.0 KB in 10.0 s (40.0 KB/s), 491 B a packet, interval 15 ms"

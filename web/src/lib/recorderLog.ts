@@ -171,7 +171,12 @@ const EVENTS: Record<number, [string, string, (r: Rec) => string]> = {
   29: [
     "POWER",
     "电源",
-    (r) => (r.a ? "掉电预警：VDDH 低于 3.3 V 或 VDD 低于 2.8 V" : `电池供电，VDDH ${r.x * 20} mV`),
+    (r) =>
+      [
+        `电池供电，VDDH ${r.x * 20} mV`,
+        "掉电预警：VDDH 低于 3.3 V 或 VDD 低于 2.8 V",
+        `电量过低（${r.x * 20} mV）：停止录音，关机（System OFF），插 USB 或拨一下开关唤醒`,
+      ][r.a] ?? `${r.a}`,
   ],
   30: ["LIVE_LOST", "实时漏发", (r) => `${r.a} 条记录（${r.b} B）没能实时发出（蓝牙卡住），卡上照存，手机从卡里补`],
 };
@@ -201,7 +206,7 @@ export function describe(r: Rec): Said {
     (code === 3 && r.a !== 0) ||
     (code === 7 && r.x !== 0) ||
     (code === 24 && r.b !== 1) ||
-    (code === 29 && r.a !== 0) || // the power-fail warning
+    (code === 29 && r.a !== 0) || // the power-fail warning, a low battery's System OFF
     (code === BOOT && (r.a & 0b1010) !== 0); // the last boot ended by the watchdog or a lockup
   const warn = [BOOT, DISCONNECT, DFU, 5, 8, 18, 30].includes(code);
   return {

@@ -47,8 +47,9 @@
  *    28 SWITCH      LR-P3's slide switch (lr_switch.c): x 1 on / 0 off, a what follows: 0 recording, 1 System OFF,
  *                   2 up on USB, not recording, 3 a restart (switched while running or up on USB); the wake from
  *                   System OFF is the next BOOT's RESETREAS (OFF: the switch, VBUS: USB)
- *    29 POWER       LR-P3's power trail (lr_power.c): x VDDH mV / 20, a 0: once a minute on battery, 1: the chip's
- *                   power-fail warning (VDDH under 3.3 V or VDD under 2.8 V; x 0, not measured in the interrupt)
+ *    29 POWER       power (lr_power.c): x battery mV / 20 (LR-P3: VDDH), a 0: once a minute on battery (LR-P3), 1: the
+ *                   chip's power-fail warning (LR-P3: VDDH under 3.3 V or VDD under 2.8 V; x 0, not measured in the
+ *                   interrupt), 2: low battery, recording ended, System OFF next until USB (or LR-P3's switch) wakes it
  *    30 LIVE_LOST   a records, b bytes left out of LIVE in a row (its queue full: the link stalled), by the next one
  *                   that goes; on the card all the same, the phone READs them (#133)
  *

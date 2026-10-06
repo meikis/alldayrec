@@ -7,14 +7,10 @@
 
 #include <hal/nrf_gpio.h>
 #include <hal/nrf_power.h>
-#include <zephyr/bluetooth/conn.h>
-#include <zephyr/bluetooth/hci.h>
 #include <zephyr/kernel.h>
 
-#include "config.h"
 #include "lr_log.h"
-#include "lr_store.h"
-#include "transport.h"
+#include "lr_power.h"
 #include "wdog_facade.h"
 
 #define SWITCH NRF_GPIO_PIN_MAP(1, 15)  // the other ProMicros leave it open: it would read off, hence the Kconfig
@@ -37,19 +33,17 @@ static void restart(bool now_on, uint32_t then)
     NVIC_SystemReset();
 }
 
-/* The card's and the mic's supplies off (outputs keep their level in System OFF), P1.15 armed to wake it */
 static void power_off(void)
 {
     lr_log(LR_SWITCH, 0, LR_SWITCH_SYSTEM_OFF, 0);
-    lr_log_sync();
-    nrf_gpio_pin_clear(LR_PIN(sd_pwr_gpios));
-    nrf_gpio_cfg_output(LR_PIN(sd_pwr_gpios));
-    nrf_gpio_pin_clear(PDM_PWR_PIN);
-    nrf_gpio_cfg_output(PDM_PWR_PIN);
-    nrf_gpio_cfg_sense_input(SWITCH, NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
-    NRF_POWER->SYSTEMOFF = 1;  // VBUS rising wakes it too
-    for (;;) {
-    }
+    lr_power_off();
+}
+
+void lr_switch_arm(void)
+{
+    nrf_gpio_cfg_input(SWITCH, NRF_GPIO_PIN_PULLUP);
+    k_msleep(1);
+    nrf_gpio_cfg_sense_input(SWITCH, NRF_GPIO_PIN_PULLUP, on() ? NRF_GPIO_PIN_SENSE_HIGH : NRF_GPIO_PIN_SENSE_LOW);
 }
 
 /* Running: switched off, the open file closed and the phone told before the restart that decides what comes next */
@@ -61,12 +55,7 @@ static void poll(struct k_work *w)
         k_work_reschedule(k_work_delayable_from_work(w), K_MSEC(100));
         return;
     }
-    lr_store_shutdown();
-    struct bt_conn *conn = get_current_connection();
-    if (conn) {
-        bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_POWER_OFF);
-        k_msleep(200);  // the disconnect goes out before the radio stops
-    }
+    lr_power_stop();
     restart(false, LR_SWITCH_RESTART);
 }
 static K_WORK_DELAYABLE_DEFINE(poll_work, poll);

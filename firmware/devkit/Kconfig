@@ -66,6 +66,10 @@ config LR_SWITCH
     help
         "Only on a board with the switch wired: elsewhere P1.15 is open and reads off, and the board would never record."
 
+config LR_LOW_BATTERY_MV
+    int "On battery, three readings a minute apart under this many mV end recording and go to System OFF until USB, or LR-P3's switch, wakes it (lr_power.c); 0: never"
+    default 3300
+
 config LR_POWER_TRACE
     bool "On battery a POWER log record with VDDH every minute, and the power-fail warning, written to flash at once (lr_power.c)"
     depends on LR_BATTERY_VDDH
