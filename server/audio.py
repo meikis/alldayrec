@@ -152,7 +152,9 @@ async def stream(device: str, after: dt.datetime | None, edge_s: float | None = 
     (read_to, queued)."""
     ms = int(after.timestamp() * 1000) if after else 0
     p = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms + seconds * 1000 > ? ORDER BY start_ms LIMIT 1", (device, ms)).fetchone()
-    at, lo = p["start_ms"] - 1 if p else ms, 0
+    # from `after` (or the piece holding it), not from the first piece there is now: that one may be held, older
+    # audio after `after` still on its way (#130: a pipeline started mid catch-up took 3 such pieces as late)
+    at, lo = min(p["start_ms"] - 1, ms) if p else ms, 0
     while True:
         if edge_s is None:
             read_to[device] = at  # the reader came back for more, so the piece it had is done
@@ -285,7 +287,18 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     asyncio.run(held_back())
     hold("phone", T(5))
     assert held("phone") == T(5) and asyncio.run(take(dt.datetime(2026, 10, 2, 10, 4), 1, "iphone")) == [20], "a hold is the device's own"
+
+    async def started_held():  # the reader starts while all there is after `after` is held: older audio still goes first
+        s = stream("phone", dt.datetime(2026, 10, 2, 10, 4))
+        go = asyncio.create_task(anext(s))
+        await asyncio.sleep(1.5)
+        assert not go.done(), "10:05 is held"
+        assert save("phone", T(4) + 30_000, tone(20), "audio/ogg") > 19  # 10:04:30, after `after`, before 10:05
+        t = (await asyncio.wait_for(go, 5))[0]
+        await s.aclose()
+        return t
+    assert asyncio.run(started_held()) == dt.datetime(2026, 10, 2, 10, 4, 30), "not passed over for the held piece"
     db.put_kv("hold:phone", {"at": T(5), "seen": time.time() - HOLD_MAX_S - 1})
     assert held("phone") is None, "a hold not said again for HOLD_MAX_S is let go"
-    assert asyncio.run(take(dt.datetime(2026, 10, 2, 10, 4), 1)) == [5]
+    assert asyncio.run(take(dt.datetime(2026, 10, 2, 10, 4), 2)) == [4, 5]
     print("ok")
