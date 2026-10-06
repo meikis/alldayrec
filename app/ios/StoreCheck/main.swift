@@ -108,6 +108,39 @@ do {
   check(names(out).last, "98900@LR-P1-BDAE.ogg", "boot 3 dated by the 'T' after it")
 }
 
+// #109: a piece appends one line to the state instead of writing all of it again (at 1 s pieces that grew with every
+// piece of the open file); a restart reads the lines back, finds the 'T' again and goes on where the last piece ended
+do {
+  let dir = tmp(), out = tmp(), undated = tmp()
+  let f: Int64 = 1 << 16 | 1, state = dir.appendingPathComponent("state.txt").path
+  func file() -> (ino: UInt64, size: UInt64) {
+    let a = try! FileManager.default.attributesOfItem(atPath: state)
+    return ((a[.systemFileNumber] as! NSNumber).uint64Value, (a[.size] as! NSNumber).uint64Value)
+  }
+  let m = Mirror(dir)
+  var off = Int64(t(0, 1_000_000).count)
+  _ = try m.put(f, 0, t(0, 1_000_000))
+  m.listed([f: off], open: f)  // as LIST leaves it
+  let before = file()
+  for s in 0..<60 {  // a minute in 1 s pieces (the foreground slice), one pieces() a second
+    for i in 0..<10 { let r = a(s * 100 + i * 10, 10); _ = try m.put(f, off, r); off += Int64(r.count) }
+    check(try m.pieces(out, undated, tag: "LR-P1-BDAE", liveFrames: 100, boot: 1), 1, "second \(s): one piece")
+  }
+  check(file().ino, before.ino, "the state file appended to, never replaced")
+  check((file().size - before.size) / 60 < 40, true, "a line a piece")
+  let m2 = Mirror(dir)
+  check(m2.files[f]!.cut, m.files[f]!.cut, "cut after a restart")
+  check(m2.files[f]!.pieces, m.files[f]!.pieces, "pieces after a restart")
+  check(try m2.pieces(out, undated, tag: "LR-P1-BDAE", liveFrames: 100, boot: 1), 0, "nothing made again")
+  for i in 0..<10 { let r = a(6000 + i * 10, 10); _ = try m2.put(f, off, r); off += Int64(r.count) }
+  check(try m2.pieces(out, undated, tag: "LR-P1-BDAE", liveFrames: 100, boot: 1), 1, "the next second")
+  check(names(out).count, 61, "61 pieces, none twice")
+  check(names(out).last, "1060000@LR-P1-BDAE.ogg", "dated by the 'T' scanned again")
+  m2.listed([f: off], open: f)  // the next whole save folds the lines in
+  check(try String(contentsOfFile: state, encoding: .utf8).contains("\nC "), false, "folded")
+  check(Mirror(dir).files[f]!.pieces.count, 61, "and read back")
+}
+
 // ogg
 do {
   let ogg = Store.oggOpus(Array(repeating: Data([0xF8, 0xFF, 0xFE]), count: 120))  // 120 silent 10 ms Opus frames

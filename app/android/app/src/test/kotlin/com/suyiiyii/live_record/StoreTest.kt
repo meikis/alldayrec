@@ -55,6 +55,36 @@ class StoreTest {
         assertEquals(0L, m2.have(f))
     }
 
+    /** #109: a piece appends one line to the state instead of writing all of it again (at 1 s pieces that grew with
+     *  every piece of the open file); a restart reads the lines back, finds the 'T' again and goes on where it was. */
+    @Test fun stateAppended() {
+        val dir = tmp(); val out = tmp(); val undated = tmp()
+        val f = 1L shl 16 or 1; val state = File(dir, "state.txt")
+        fun key() = Files.readAttributes(state.toPath(), java.nio.file.attribute.BasicFileAttributes::class.java).fileKey()
+        val m = Mirror(dir)
+        var off = t(0, 1_000_000).size.toLong()
+        m.put(f, 0, t(0, 1_000_000))
+        m.listed(mapOf(f to off), f)  // as LIST leaves it
+        val key = key(); val size = state.length()
+        for (s in 0 until 60) {  // a minute in 1 s pieces (the foreground slice), one pieces() a second
+            for (i in 0 until 10) { val r = a(s * 100 + i * 10, 10); m.put(f, off, r); off += r.size }
+            assertEquals(1, m.pieces(out, undated, "LR-P1-BDAE", 100, 1))
+        }
+        assertEquals(key, key())  // appended to, never replaced
+        assertEquals(true, (state.length() - size) / 60 < 40)  // a line a piece
+        val m2 = Mirror(dir)
+        assertEquals(m.files[f]!!.cut, m2.files[f]!!.cut)
+        assertEquals(m.files[f]!!.pieces, m2.files[f]!!.pieces)
+        assertEquals(0, m2.pieces(out, undated, "LR-P1-BDAE", 100, 1))  // nothing made again
+        for (i in 0 until 10) { val r = a(6000 + i * 10, 10); m2.put(f, off, r); off += r.size }
+        assertEquals(1, m2.pieces(out, undated, "LR-P1-BDAE", 100, 1))
+        assertEquals(61, names(out).size)
+        assertEquals("1060000@LR-P1-BDAE.ogg", names(out).last())  // dated by the 'T' scanned again
+        m2.listed(mapOf(f to off), f)  // the next whole save folds the lines in
+        assertEquals(false, state.readText().contains("\nC "))
+        assertEquals(61, Mirror(dir).files[f]!!.pieces.size)
+    }
+
     @Test fun undated() {
         val dir = tmp(); val out = tmp(); val undated = tmp()
         val m = Mirror(dir)

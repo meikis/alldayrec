@@ -98,7 +98,8 @@ object Store {
  *                                  size on the card (-1: unknown), bytes turned into pieces, bytes scanned for 'T',
  *                                  all of it in pieces, the pieces written
  *    T clock frame epochMs                         the 'T' records seen; clock: the boot, or the file for boot 0 (no
- *                                                  card to count boots: each such boot has its own files) */
+ *                                                  card to count boots: each such boot has its own files)
+ *    C file cut [piece]                            a piece made since (or frames passed over): appended, see cut() */
 class Mirror(private val dir: File) {
     companion object { const val LIST_MAX = 64 }
 
@@ -117,6 +118,7 @@ class Mirror(private val dir: File) {
                 "F" -> files[p[1].toLong(16)] = F(p[2] == "1", p[3].toLong(), p[4].toLong(), p[5].toLong(),
                     p.getOrElse(7) { "" }.split(',').filter { it.isNotEmpty() }.toMutableList(), p[6] == "1")
                 "T" -> syncs.getOrPut(p[1].toLong(16)) { mutableListOf() } += longArrayOf(p[2].toLong(), p[3].toLong())
+                "C" -> if (p.size >= 3) files.getOrPut(p[1].toLong(16)) { F() }.apply { cut = p[2].toLong(); if (p.size > 3) pieces += p[3] }
             }
         }
     }
@@ -128,6 +130,15 @@ class Mirror(private val dir: File) {
             for ((c, ts) in syncs) for (t in ts) append("T %08X %d %d\n".format(c, t[0], t[1]))
         })
         tmp.renameTo(state)
+    }
+
+    /** A piece made (`name`) or frames passed over: one line appended, not the whole state again. save() per piece wrote
+     *  every piece name of the open file each time: at 1 s pieces ~150 MB an hour, more the longer the file (#109). The
+     *  next save() folds these lines in; tscan is not in them: a restart scans again from the saved one, finding the
+     *  same 'T' records. */
+    private fun cut(f: Long, name: String?) {
+        if (!state.exists()) return save()
+        state.appendText("C %08X %d%s\n".format(f, files[f]!!.cut, name?.let { " $it" } ?: ""))
     }
 
     private fun bin(f: Long) = File(dir, "%08X.BIN".format(f))
@@ -197,6 +208,7 @@ class Mirror(private val dir: File) {
             val run = mutableListOf<ByteArray>()
             val lost = mutableListOf<ByteArray>()  // frames that will never have a time
             fun emit(end: Long) {
+                var piece: String? = null
                 if (run.isNotEmpty()) {
                     if (ts.isNullOrEmpty()) {
                         lost += run
@@ -207,12 +219,13 @@ class Mirror(private val dir: File) {
                         part.writeBytes(Store.oggOpus(run))
                         part.renameTo(File(out, "$name.ogg"))
                         s.pieces += name
+                        piece = name
                         n++
                     }
                 }
                 s.cut = end
                 run.clear()
-                save()
+                cut(f, piece)
             }
             var last = s.cut  // where the last whole record ends
             for ((r, end) in Store.scan(bytes(f, s.cut), s.cut)) {

@@ -100,6 +100,7 @@ enum Ogg {
 ///                                 all of it in pieces, the pieces written
 ///   T clock frame epochMs                        the 'T' records seen; clock: the boot, or the file for boot 0 (no
 ///                                                card to count boots: each such boot has its own files)
+///   C file cut [piece]                           a piece made since (or frames passed over): appended, see cut()
 final class Mirror {
   static let listMax = 64
 
@@ -125,6 +126,10 @@ final class Mirror {
         files[f] = s
       } else if p[0] == "T", p.count >= 4, let c = Int64(p[1], radix: 16), let fr = Int64(p[2]), let e = Int64(p[3]) {
         syncs[c, default: []].append((fr, e))
+      } else if p[0] == "C", p.count >= 3, let f = Int64(p[1], radix: 16), let c = Int64(p[2]) {
+        let s = file(f)
+        s.cut = c
+        if p.count > 3 { s.pieces.append(p[3]) }
       }
     }
   }
@@ -142,6 +147,17 @@ final class Mirror {
     }
     for (c, ts) in syncs { for x in ts { t += "T \(Mirror.hex(c)) \(x.frame) \(x.epochMs)\n" } }
     try? Data(t.utf8).write(to: state, options: .atomic)
+  }
+
+  /// A piece made (`name`) or frames passed over: one line appended, not the whole state again. save() per piece wrote
+  /// every piece name of the open file each time: at 1 s pieces ~150 MB an hour, more the longer the file (#109). The
+  /// next save() folds these lines in; tscan is not in them: a restart scans again from the saved one, finding the
+  /// same 'T' records.
+  private func cut(_ f: Int64, _ name: String?) {
+    guard let h = FileHandle(forWritingAtPath: state.path) else { return save() }  // no state yet
+    defer { try? h.close() }
+    _ = try? h.seekToEnd()
+    try? h.write(contentsOf: Data("C \(Mirror.hex(f)) \(files[f]!.cut)\(name.map { " \($0)" } ?? "")\n".utf8))
   }
 
   private func bin(_ f: Int64) -> URL { dir.appendingPathComponent("\(Mirror.hex(f)).BIN") }
@@ -237,6 +253,7 @@ final class Mirror {
       var run: [Data] = []
       var lost: [Data] = []  // frames that will never have a time
       func emit(_ end: Int64) throws {
+        var piece: String?
         if !run.isEmpty {
           if ts.isEmpty {
             lost += run
@@ -248,12 +265,13 @@ final class Mirror {
             try? fm.removeItem(at: ogg)  // the same piece again (a kill before the state was saved)
             try fm.moveItem(at: part, to: ogg)
             s.pieces.append(name)
+            piece = name
             n += 1
           }
         }
         s.cut = end
         run.removeAll()
-        save()
+        cut(f, piece)
       }
       var last = s.cut  // where the last whole record ends
       for (r, end) in Store.scan(bytes(f, s.cut), base: s.cut) {
