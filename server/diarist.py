@@ -1,7 +1,7 @@
 """Conversation-level speaker labels. Every new sentence re-clusters the open conversation's voiceprints
 (ReDimNet2, average-link cosine) and takes its cluster's label: 我 when that cluster's mean voiceprint is
 close to the owner bank (>= OWNER_MIN; a split owner stays 我 in every piece), else a person's name when that
-close to a voiceprint named by hand on the conversation page (>= PEOPLE_MIN), else the S<n> most of the cluster's earlier sentences
+close to a voiceprint named by hand on the conversation page (>= PEOPLE_MIN; closer than the bank wins when both pass), else the S<n> most of the cluster's earlier sentences
 carry, so ids follow membership as clusters grow and merge. Only the new sentence is labelled; earlier
 rows are never rewritten. Case replays 09-29: see artifacts/record/voiceprint.
 
@@ -38,6 +38,17 @@ def _unit(v):
     return v / np.linalg.norm(v)
 
 
+def _closest(m: np.ndarray, people: dict[str, np.ndarray]) -> tuple[float, str | None]:
+    return max(((float(m @ v), k) for k, v in people.items()), default=(0.0, None))
+
+
+def _me(owner: float, near: tuple[float, str | None]) -> bool:
+    """A cluster scoring `owner` against the bank and `near` (score, name) against the closest named voice is 我 only
+    when no named voice passes PEOPLE_MIN closer: a person who sounds like the owner on one recorder can pass both
+    (10-06, a friend's instance: the owner's cluster 0.69-0.73 against the friend's bank, 0.94 against the owner's own voiceprint)."""
+    return owner >= OWNER_MIN and not (near[0] >= PEOPLE_MIN and near[0] > owner)
+
+
 class Diarist:
     def __init__(self, bank: dict[str, np.ndarray], th: float = TH, people: dict[str, np.ndarray] | None = None):
         self.bank, self.th = [_unit(v) for v in bank.values()], th
@@ -68,18 +79,17 @@ class Diarist:
             return self._nearest(i, big)
         lab = AgglomerativeClustering(n_clusters=None, distance_threshold=self.th, metric="cosine",
                                       linkage="average").fit_predict(E[big]) if len(big) > 1 else np.zeros(1, int)
-        owner = {c: max(float(_unit(E[big][lab == c].mean(0)) @ o) for o in self.bank) for c in set(lab)}
-        me = {c for c in owner if (lab == c).sum() >= MIN_ME and owner[c] >= OWNER_MIN}
+        mean = {c: _unit(E[big][lab == c].mean(0)) for c in set(lab)}
+        owner = {c: max(float(m @ o) for o in self.bank) for c, m in mean.items()}
+        near = {c: _closest(m, self.people) for c, m in mean.items()}
+        me = {c for c in owner if (lab == c).sum() >= MIN_ME and _me(owner[c], near[c])}
         c = lab[big.index(i)]
         if c in me:
             self.ids[i] = "我"
             return "我", round(owner[c], 3)
-        if self.people and (lab == c).sum() >= MIN_ME:
-            m = _unit(E[big][lab == c].mean(0))
-            score, name = max((float(m @ v), k) for k, v in self.people.items())
-            if score >= PEOPLE_MIN:
-                self.ids[i] = name
-                return name, round(score, 3)
+        if (lab == c).sum() >= MIN_ME and near[c][0] >= PEOPLE_MIN:
+            self.ids[i] = near[c][1]
+            return near[c][1], round(near[c][0], 3)
         clusters = sorted(set(lab) - me)
         known = sorted({v for v in self.ids if v not in (None, "S?", "我")})
         cmap = {}
@@ -119,7 +129,7 @@ def relabel(E: list, dur: list[float], bank: dict[str, np.ndarray], groups: list
     the sentences before it. E: unit voiceprints (None: too short to embed); dur: seconds; groups: per sentence a key
     the engine gives (its speaker id within one piece): sentences sharing one are clustered as one unit, their mean
     voiceprint, so a turn's short sentences follow its long ones. Same rules as add(): 我 when a cluster of MIN_ME
-    sentences is OWNER_MIN close to the bank, a name PEOPLE_MIN close to a named voice, else S<n> in order of first
+    sentences is OWNER_MIN close to the bank, a name PEOPLE_MIN close to a named voice (the closer wins), else S<n> in order of first
     appearance; a sentence in no cluster joins the nearest labelled centroid at JOIN, else S?."""
     from sklearn.cluster import AgglomerativeClustering
     bank_v = [_unit(v) for v in bank.values()]
@@ -148,10 +158,11 @@ def relabel(E: list, dur: list[float], bank: dict[str, np.ndarray], groups: list
         for c in sorted(set(lab), key=lambda c: min(min(units[k]) for k, l in zip(ks, lab) if l == c)):
             members = [i for k, l in zip(ks, lab) if l == c for i in units[k]]
             m = _unit(np.mean([E[i] for i in members if dur[i] >= MIN_DUR], 0))
-            if len(members) >= MIN_ME and max((float(m @ o) for o in bank_v), default=0) >= OWNER_MIN:
+            near = _closest(m, people)
+            if len(members) >= MIN_ME and _me(max((float(m @ o) for o in bank_v), default=0), near):
                 names[c] = "我"
-            elif people and len(members) >= MIN_ME and (best := max((float(m @ v), k) for k, v in people.items()))[0] >= PEOPLE_MIN:
-                names[c] = best[1]
+            elif len(members) >= MIN_ME and near[0] >= PEOPLE_MIN:
+                names[c] = near[1]
             else:
                 n_s += 1
                 names[c] = f"S{n_s}"
@@ -200,4 +211,15 @@ if __name__ == "__main__":
     assert {l for l, v in zip(lab, seq) if v is a}.isdisjoint({l for l, v in zip(lab, seq) if v is b}), lab
     mixed = relabel(E, [2.0] * len(E), {"dji-mac": noisy(me)}, groups=["one"] * len(E))  # an engine id over everyone
     assert mixed == lab, "a group whose voices disagree falls apart instead of making one speaker"
+    # someone who sounds like the owner on this recorder: their cluster passes the bank too; named, the closer voice wins
+    f = _unit(0.76 * me + np.sqrt(1 - 0.76 ** 2) * b)
+    seq2 = [me, f, f, me] * 8
+    E2 = [_unit(v + rng.normal(size=192) * 0.06) for v in seq2]  # cos ~0.77 to their centre, as real rows on one recorder
+    both = relabel(E2, [2.0] * len(E2), {"mic": me})
+    assert set(both) == {"我"}, both  # the old rule: both clusters 我
+    lab2 = relabel(E2, [2.0] * len(E2), {"mic": me}, people={"王五": f})
+    assert [l for l, v in zip(lab2, seq2) if v is f] == ["王五"] * 16 and [l for l, v in zip(lab2, seq2) if v is me] == ["我"] * 16, lab2
+    d = Diarist({"mic": me}, people={"王五": f})
+    on = [d.add(e, 2.0)[0] for e in E2]
+    assert set(l for l, v in zip(on[8:], seq2[8:]) if v is f) == {"王五"} and set(l for l, v in zip(on[8:], seq2[8:]) if v is me) == {"我"}, on
     print("ok", out, named)
