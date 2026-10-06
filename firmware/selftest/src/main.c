@@ -476,8 +476,9 @@ static uint32_t csd_sectors(const uint8_t *csd)
 static void pdm_start(bool rising);
 static void pdm_stop(void);
 
-/* with_mic: the mic powered and clocked meanwhile, as when recording (its 1.28 MHz clock runs beside the SD wires) */
-static void cmd_sd(int khz, bool with_mic)
+/* read_only: no write test, reads only (a card with recordings on a board whose wiring is in doubt). with_mic: the
+ * mic powered and clocked meanwhile, as when recording (its 1.28 MHz clock runs beside the SD wires) */
+static void cmd_sd(int khz, bool with_mic, bool read_only)
 {
 	static uint8_t old[512], pat[512], back[512];
 	const char *fail = "";
@@ -569,6 +570,9 @@ static void cmd_sd(int khz, bool with_mic)
 	}
 	mbr = back[510] == 0x55 && back[511] == 0xAA;
 	part = back[0x1C2];  /* with an MBR, the first partition's type: 0x0B/0x0C FAT32, 0x07 exFAT */
+	if (read_only) {  /* a card someone's recordings are on, its link in doubt: reads only */
+		goto out;
+	}
 	if (!sd_read(sectors - 1, old)) {
 		fail = "read";
 		goto out;
@@ -791,7 +795,13 @@ static void run(char *line)
 	} else if (!strcmp(line, "dcdc")) {
 		cmd_dcdc();
 	} else if (!strncmp(line, "sd", 2)) {
-		cmd_sd(line[2] ? atoi(line + 2) : 8000, strchr(line, 'm') != NULL);
+		cmd_sd(line[2] ? atoi(line + 2) : 8000, strchr(line, 'm') != NULL, strchr(line, 'r') != NULL);
+	} else if (!strncmp(line, "vcc", 3)) {  /* the SD module's supply on for N s, its pins left open: measure it */
+		nrf_gpio_pin_set(SD_PWR);
+		nrf_gpio_cfg_output(SD_PWR);
+		k_sleep(K_SECONDS(CLAMP(atoi(line + 3), 1, 600)));
+		nrf_gpio_cfg_default(SD_PWR);
+		printk("R {\"test\":\"vcc\"}\n");
 	} else if (!strncmp(line, "mic", 3)) {
 		cmd_mic(CLAMP(atoi(line + 3), 1, 10), strchr(line, 'r') != NULL);
 	} else if (!strcmp(line, "sw")) {
@@ -808,7 +818,7 @@ static void run(char *line)
 		NRF_POWER->GPREGRET = 0x57;
 		NVIC_SystemReset();
 	} else {
-		printk("R {\"test\":\"?\",\"commands\":\"info gpio [p3] adc rx led clk N dcdc sd mic N sw all dfu\"}\n");
+		printk("R {\"test\":\"?\",\"commands\":\"info gpio [p3] adc rx led clk N dcdc sd [kHz] [m] [r] vcc N mic N [r] sw all dfu\"}\n");
 	}
 }
 
