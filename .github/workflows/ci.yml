@@ -26,7 +26,7 @@ jobs:
           filters: |
             server: ['server/**', '.github/workflows/ci.yml']
             app: ['app/**', '.github/workflows/ci.yml']
-            firmware: ['firmware/devkit/**', '.github/workflows/ci.yml']
+            firmware: ['firmware/devkit/**', 'firmware/selftest/**', '.github/workflows/ci.yml']
 
   server:
     needs: changes
@@ -83,6 +83,7 @@ jobs:
       - run: west init -m https://github.com/nrfconnect/sdk-nrf --mr v2.7.0 $NCS && cd $NCS && west update --narrow -o=--depth=1
       - run: firmware/devkit/lr.sh build sdmod     # LR-X1 (XIAO nRF52840 Sense)
       - run: firmware/devkit/lr.sh build promicro  # LR-P1 (ProMicro nRF52840)
+      - run: python3 firmware/selftest/selftest.py build  # board self-test (ProMicro nRF52840)
 
   firmware-check:  # host checks of the firmware's logic: the record stream and its timing events (test/store_check.c)
     needs: changes

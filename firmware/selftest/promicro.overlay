@@ -1,0 +1,18 @@
+/* ProMicro nRF52840 (nice!nano and its clones) on the XIAO board definition, as firmware/devkit's LR-P1 build: the app
+ * after S140 6.1.1 at 0x26000. None of the XIAO's own peripherals: their pins are header pins here, and the self-test
+ * drives every header pin itself. */
+&qspi { status = "disabled"; };
+&i2c1 { status = "disabled"; };
+&spi2 { status = "disabled"; };
+&uart0 { status = "disabled"; };
+&pwm0 { status = "disabled"; };
+
+&flash0 {
+	partitions {
+		/delete-node/ partition@27000;
+		code_partition: partition@26000 {
+			label = "code_partition";
+			reg = <0x26000 0xc6000>;
+		};
+	};
+};
