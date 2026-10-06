@@ -476,6 +476,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         var done = 0L
         syncTotalKb = total / 1024; syncDoneKb = 0
         val t0 = android.os.SystemClock.elapsedRealtime()
+        val shown = state  // back to it afterwards: a catch-up while live left 补传离线录音 on for good (10-06)
         for ((f, from) in todo) {
             state = "补传离线录音"
             var stalls = 0
@@ -490,6 +491,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             }
             done += m.have(f) - from
         }
+        state = shown
         Log.i("live-record", "ble caught up: $done B in ${(android.os.SystemClock.elapsedRealtime() - t0) / 1000} s")
         syncNote = "${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())} 补传录音设备的录音 ${done / 1024} KB"
         if (done > 0) DeviceLog.app(mirrorName, "sync", "补传 ${done / 1024} KB，用时 ${(android.os.SystemClock.elapsedRealtime() - t0) / 1000} s")

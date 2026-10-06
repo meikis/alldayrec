@@ -586,7 +586,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     Ble.log("LIST: \(r.count) files, open \(String(open, radix: 16)), \(todo.count) to READ, \(total) B")
     var done: Int64 = 0
     syncTotalKb = total / 1024; syncDoneKb = 0
-    let t0 = Date()
+    let t0 = Date(), shown = state  // back to it afterwards: a catch-up while live left 补传离线录音 on for good (10-06)
     for (f, from) in todo {
       state = "补传离线录音"
       var stalls = 0
@@ -607,6 +607,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       }
       done += m.have(f) - from
     }
+    state = shown
     Ble.log("caught up: \(done) B in \(Int(-t0.timeIntervalSinceNow)) s")
     syncNote = "\(Ble.hhmm()) 补传录音设备的录音 \(done / 1024) KB"
     if done > 0 { DeviceLog.app(tag ?? "", "sync", "补传 \(done / 1024) KB，用时 \(Int(-t0.timeIntervalSinceNow)) s") }
