@@ -45,6 +45,33 @@ class RecorderService : Service() {
                 "dfu" to Dfu.state, "dfuBusy" to Dfu.busy, "source" to (if (slicer == null) null else if (link != null) "ble" else "mic"), "usbNote" to link?.usbNote, "lastSync" to link?.syncNote,
                 "syncDone" to link?.syncDoneKb, "syncTotal" to link?.syncTotalKb, "pausedUntil" to link?.pausedUntil)
         }
+
+        const val BACKLOG_MS = 120_000L  // a piece waiting longer (the longest slice is 60 s, then its upload) is a backlog
+
+        /** The notification for a status(): title and text, as the app's bar puts it (main.dart _bleBar). The BLE
+         *  recorder's battery only while connected: the last read stays in hw after the link is gone. */
+        fun notice(s: Map<String, Any?>, now: Long = System.currentTimeMillis()): Pair<String, String> {
+            val note = s["note"] as String?
+            if (s["running"] != true) return "live-record 正在上传 · 剩 ${s["pending"]} 块" to (note ?: "")
+            val total = s["syncTotal"] as Long? ?: 0L
+            val title = when {
+                s["source"] != "ble" -> "live-record 正在录音"
+                total > 0 -> "补传离线录音 %.1f / %.1f MB".format((s["syncDone"] as Long? ?: 0L) / 1024.0, total / 1024.0)
+                else -> s["link"] as String? ?: "正在启动"
+            }
+            val hw = (s["hw"] as Map<*, *>?).takeIf { title.startsWith("已连接") || total > 0 }
+            val paused = (s["pausedUntil"] as Long? ?: 0L) - now
+            val oldest = s["oldest"] as Long?
+            return title to listOfNotNull(
+                (s["error"] as String?)?.let { "录音错误 $it" },
+                note,
+                if (paused > 0) "已暂停，还剩 ${(paused + 59_999) / 60_000} 分钟" else null,
+                hw?.get("battery")?.let { "电量 $it%" },
+                mapOf(-19 to "没有存储卡", -28 to "存储卡已满")[hw?.get("store")],
+                if (oldest != null && now - oldest > BACKLOG_MS) "待传 ${s["pending"]} 块" else null,
+                (s["interruptedAt"] as Long?)?.let { "曾在 ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it))} 被系统中断，已自动恢复" },
+            ).joinToString(" · ")
+        }
     }
 
     private val screen = object : BroadcastReceiver() {
@@ -59,6 +86,12 @@ class RecorderService : Service() {
             .createNotificationChannel(NotificationChannel(CHANNEL, "录音中", NotificationManager.IMPORTANCE_LOW))
         registerReceiver(screen, IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON) })
         DeviceLog.start(this)
+        Thread {
+            while (alive) {
+                try { refresh() } catch (e: Exception) { Log.w("live-record", "notification: $e") }
+                Thread.sleep(2000)
+            }
+        }.apply { isDaemon = true }.start()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -95,7 +128,7 @@ class RecorderService : Service() {
         }
         prefs.edit().putBoolean("active", true).putInt("pid", Process.myPid()).apply()
         val ble = prefs.getString("source", "mic") == "ble"
-        startForeground(1, notification(), if (ble) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        foreground(if (ble) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
         if (slicer == null) {
             dir.listFiles { f -> f.name.endsWith(".part") }?.forEach { it.renameTo(File(it.path.removeSuffix(".part") + ".ogg")) }  // cut short by a kill: still valid Ogg
             Log.i("live-record", "starting slicer")
@@ -108,6 +141,7 @@ class RecorderService : Service() {
                 { n -> slicer?.let { it.files += n } }, { slicer?.tag = it }, { name, hw -> uploader?.report(name, hw) }).also { it.start() }
             prefs.edit().remove("endAt").remove("endDevice").apply()  // a new recording carries on the conversation: no end for the old stop
             ensureUploader(prefs, dir)
+            refresh()  // recording now, not the upload foreground() saw a moment ago
         }
         return START_STICKY
     }
@@ -130,39 +164,53 @@ class RecorderService : Service() {
 
     /** Stays up while pieces are left and nothing records; then sends `endAt` (if any) and stops. */
     private fun uploadOnly(prefs: android.content.SharedPreferences, dir: File, endAt: Long?) {
-        if (Uploader.queue(dir).isEmpty() && endAt == null) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); return }
-        startForeground(1, notification(Uploader.queue(dir).size), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        if (Uploader.queue(dir).isEmpty() && endAt == null) { background(); stopSelf(); return }
+        foreground(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         val u = ensureUploader(prefs, dir)
         if (draining) return
         draining = true
         Thread {
-            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-            while (slicer == null && Uploader.queue(dir).isNotEmpty()) {
-                nm.notify(1, notification(Uploader.queue(dir).size))
-                Thread.sleep(2000)
-            }
+            while (slicer == null && Uploader.queue(dir).isNotEmpty()) Thread.sleep(2000)
             draining = false
             if (slicer != null) return@Thread  // recording again: the service carries on as before
             endAt?.let { u.end(it, prefs.getString("endDevice", null)) }  // the server may close the conversation now
             prefs.edit().remove("endAt").remove("endDevice").apply()
             u.running = false; uploader = null
-            stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
+            background(); stopSelf()
         }.start()
     }
 
     @Volatile private var draining = false
+    @Volatile private var alive = true
+    private var shown: Pair<String, String>? = null  // what the notification says; null: not in the foreground
 
-    private fun notification(uploading: Int? = null): Notification {
+    private fun foreground(type: Int) = synchronized(this) {
+        shown = notice(status(File(filesDir, "chunks"))).also { startForeground(1, notification(it), type) }
+    }
+
+    /** The notification follows the status (link, catch-up, upload errors, battery): checked every 2 s, posted only
+     *  when what it says changed, far below the 5 posts a second Android allows an app before dropping them (10-06:
+     *  it was set once at the start and never again). Never out of the foreground: a post after stopForeground
+     *  would leave a stray notification. */
+    private fun refresh() = synchronized(this) {
+        val n = notice(status(File(filesDir, "chunks")))
+        if (shown != null && n != shown) { shown = n; getSystemService(NotificationManager::class.java).notify(1, notification(n)) }
+    }
+
+    private fun background() = synchronized(this) { shown = null; stopForeground(STOP_FOREGROUND_REMOVE) }
+
+    private fun notification(n: Pair<String, String>): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-        val title = if (uploading != null) "live-record 正在上传 · 剩 $uploading 块" else if (link != null) "live-record 正在同步录音设备" else "live-record 正在录音"
-        val text = if (uploading == null && interruptedAt > 0) "曾在 ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(interruptedAt))} 被系统中断，已自动恢复" else ""
-        return Notification.Builder(this, CHANNEL).setContentTitle(title).setContentText(text)
-            .setSmallIcon(if (uploading != null) android.R.drawable.stat_sys_upload else android.R.drawable.ic_btn_speak_now)
-            .setContentIntent(open).setOngoing(true).build()
+        return Notification.Builder(this, CHANNEL).setContentTitle(n.first).setContentText(n.second)
+            .setStyle(Notification.BigTextStyle().bigText(n.second))  // a long upload error in full when expanded
+            .setSmallIcon(if (slicer == null) android.R.drawable.stat_sys_upload else android.R.drawable.ic_btn_speak_now)
+            .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).build()
     }
 
     override fun onDestroy() {
         Log.w("live-record", "onDestroy slicer=${slicer != null}")
+        alive = false
+        background()
         unregisterReceiver(screen)
         link?.stop(); link = null
         slicer?.stop(); slicer = null
