@@ -27,6 +27,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconn
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
+import apk
 import ask
 import audio
 import db
@@ -1144,12 +1145,21 @@ async def asset(name: str):
 
 
 @app.get("/app.apk")
-async def apk():
+async def app_apk():
     """The Android client, for installing from the phone's browser."""
     p = DATA / "live-record.apk"
     if not p.exists():
         raise HTTPException(404, "no apk uploaded")
     return FileResponse(p, media_type="application/vnd.android.package-archive", filename="live-record.apk")
+
+
+@app.get("/api/app/latest")
+async def apk_latest():
+    """What /app.apk is: the Android app compares versionCode with its own build number and offers the update."""
+    p = DATA / "live-record.apk"
+    if not p.exists():
+        raise HTTPException(404, "no apk uploaded")
+    return {**await asyncio.to_thread(apk.version, p), "size": p.stat().st_size}
 
 
 @app.post("/api/chunks")

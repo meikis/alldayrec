@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import android.view.WindowManager
+import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -31,6 +32,8 @@ class MainActivity : FlutterActivity() {
                                    else listOf(Manifest.permission.ACCESS_FINE_LOCATION)
 
     private fun granted(p: String) = checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+
+    private val update get() = File(cacheDir, "update.apk")  // the app's own update, downloaded by update.dart
 
     override fun configureFlutterEngine(engine: FlutterEngine) {
         super.configureFlutterEngine(engine)
@@ -153,6 +156,19 @@ class MainActivity : FlutterActivity() {
                                          call.argument<String>("version") ?: "?", zip.size, sha, call.argument<Int>("battery"))
                         Dfu.start(this, addr, p.getString("bleName", null) ?: model, f); result.success(null)
                     }
+                }
+                "app" -> packageManager.getPackageInfo(packageName, 0).let {  // this build, and where update.dart puts a newer one
+                    result.success(mapOf("code" to it.longVersionCode, "apk" to update.path))
+                }
+                "allowInstalls" -> {  // before the download: false opens the setting (the installer's own prompt for it comes back here, not to the install)
+                    val ok = packageManager.canRequestPackageInstalls()
+                    if (!ok) startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                    result.success(ok)
+                }
+                "install" -> {  // the downloaded update to the system installer
+                    startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(FileProvider.getUriForFile(this, "$packageName.update", update),
+                        "application/vnd.android.package-archive").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+                    result.success(null)
                 }
                 else -> result.notImplemented()
             }

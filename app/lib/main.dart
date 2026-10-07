@@ -14,6 +14,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import 'firmware.dart';
+import 'update.dart';
 
 // piece seconds per app state; the server's /api/client-config overrides these (kept from its last answer)
 const defaultSlices = {'foreground': 1, 'background': 20, 'screenOff': 60};
@@ -308,13 +309,13 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
       ),
       body: settings == null
           ? const Center(child: CircularProgressIndicator())
-          : IndexedStack(index: page, children: [  // keeps the WebView alive across pages
+          : Column(children: [const UpdateBanner(), Expanded(child: IndexedStack(index: page, children: [  // keeps the WebView alive across pages
               for (final w in webs)
                 w == null ? _Empty(onSetup: () => setState(() => page = settingsPage)) : WebViewWidget(controller: w),
               UploadPage(settings: settings!, status: status, visible: page == uploadPage),
               RecorderPage(visible: page == recorderPage, onSource: _setSource),
               SettingsPage(settings: settings!, onSaved: _saved),
-            ]),
+            ]))]),
       bottomNavigationBar: page == 0 && settings != null ? _controlBar(cs) : null,
     ));
   }
