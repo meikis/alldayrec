@@ -241,3 +241,50 @@ def test_hold_expires(tmp_path, monkeypatch):
         nxt.cancel()
 
     asyncio.run(run())
+
+
+
+def test_final_goes_on_after_a_gap(tmp_path, monkeypatch):
+    """A recording stopped and finalized to its very end, the next one after a pause (10-07: the iPhone's microphone up
+    to 17:58:55, then from 19:09): the first cut after the finalized time fell in the pause, a piece of no samples, and
+    the final layer waited on it for good (370 pieces queued; restarts did not help). It goes on over the pause, in the
+    same pipeline and in one started after it."""
+    rig(tmp_path, monkeypatch, lambda x, partial=None: heard(x))
+    t0 = dt.datetime.fromtimestamp(round(time.time()) - 900)
+    at = lambda k: t0 + dt.timedelta(seconds=180 * k)  # a recording every 3 min
+    finals = lambda: [r["text"] for r in db.sentences(server.iso(t0), server.iso(at(5)), source=DEVICE)]
+    stop = lambda t: db.put_kv(f"end_at:{DEVICE}", server.iso(t))
+
+    async def until(want):
+        for _ in range(60):
+            if finals() == want:
+                return
+            await asyncio.sleep(0.5)
+        assert finals() == want, (finals(), st()["done_to"])
+
+    async def run():
+        save(at(0), flac(np.concatenate([tone(0, 2), np.zeros(3 * SR, np.int16)])))  # 5 s, then stopped
+        stop(at(0) + dt.timedelta(seconds=5))
+        pipe = asyncio.create_task(server.pipeline(DEVICE))
+        await until(["0"])
+        assert st()["done_to"] == at(0) + dt.timedelta(seconds=5), "finalized to the very end of the recording"
+        # 45 s in 1 s pieces, quiet at first (the VAD pads an utterance's start back: across the pause into the
+        # recording before, it bridged the pause), a pause after the tone ends the final piece
+        x = np.concatenate([np.zeros(5 * SR, np.int16), tone(1, 2), np.zeros(38 * SR, np.int16)])
+        for k in range(45):
+            save(at(1) + dt.timedelta(seconds=k), flac(x[k * SR:(k + 1) * SR]))
+        await until(["0", "1"])
+        stop(at(1) + dt.timedelta(seconds=45))
+        for _ in range(20):
+            if st()["done_to"] == at(1) + dt.timedelta(seconds=45):
+                break
+            await asyncio.sleep(0.5)
+        assert st()["done_to"] == at(1) + dt.timedelta(seconds=45), st()["done_to"]
+        pipe.cancel()
+        save(at(2), flac(np.concatenate([tone(2, 2), np.zeros(3 * SR, np.int16)])))  # while the server restarts
+        stop(at(2) + dt.timedelta(seconds=5))
+        pipe = asyncio.create_task(server.pipeline(DEVICE))  # resumes at the end of a recording, the next after a pause
+        await until(["0", "1", "2"])
+        pipe.cancel()
+
+    asyncio.run(run())

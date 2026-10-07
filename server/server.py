@@ -833,6 +833,12 @@ async def pipeline(device: str):
         a0 = max(seg.audio_base, seg.sample_at(base))
         b0 = min(seg.samples, seg.sample_at(base + dt.timedelta(seconds=cut)))
         if b0 <= a0:
+            # finalized to the very end of a recording, the next one after a pause: the cut fell in the pause, no audio
+            # to finalize. The pause has no speech: on to where the audio goes on (10-07: the iPhone's microphone waited
+            # here from 17:59 on, 370 pieces queued; a restart started over the same way)
+            if a0 < seg.samples and (nxt := seg.time_at(a0)) > base:
+                await commit(grouper.advance(nxt), [], iso(base), nxt)
+                return True
             return False
         x = seg.audio[a0 - seg.audio_base:b0 - seg.audio_base]
         at = lambda s: seg.time_at(a0 + int(s * SR))  # the piece may span a session boundary, where the clock jumps
