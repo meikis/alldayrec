@@ -625,9 +625,10 @@ uint32_t transport_frame_no;  // frames the codec has made since boot, the offli
 static uint32_t tx_frame_no;
 static bool tx_after_gap;  // the loaded frame follows frames left out on purpose (unbound, paused)
 static bool skipped;       // frames have been left out since the last one queued
-// Frames queued by their real size (header + Opus, ~46 B), not in fixed 326 B slots: the same 16 KB hold ~3.5 s, so a
-// card that stalls for most of a second (769 ms seen, 10-04) loses nothing; fixed slots held 320 ms
-static uint8_t tx_queue[16384];
+// Frames queued by their real size (header + Opus, ~46 B), not in fixed 326 B slots: 8 KB hold ~1.7 s. The pusher no
+// longer waits for the card (its batches queue in lr_store.c, #166), so this covers a busy CPU only; 16 KB held a card
+// that stalled for most of a second (769 ms seen, 10-04)
+static uint8_t tx_queue[8192];
 static uint8_t tx_buffer[CODEC_OUTPUT_MAX_BYTES + RING_BUFFER_HEADER_SIZE];
 static uint8_t tx_buffer_2[CODEC_OUTPUT_MAX_BYTES + RING_BUFFER_HEADER_SIZE];
 static uint32_t tx_buffer_size = 0;
@@ -699,11 +700,10 @@ void pusher(void)
     while (1) {
         k_sem_take(&pusher_wake_sem, K_FOREVER);
 
-        // every frame into the record stream (lr_store.c): to the card always, to a phone that follows it (LIVE)
+        // every frame into the record stream (lr_store.c): to the card always, to a phone that follows it (LIVE); the
+        // card's own thread writes it, a card that stalls does not hold this one (#166)
         while (load_tx_frame()) {
-            k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
             lr_store_frame(tx_frame_no, tx_buffer + RING_BUFFER_HEADER_SIZE, tx_buffer_size, tx_after_gap);
-            k_mutex_unlock(&write_sdcard_mutex);
             consume_tx_frame();
             k_yield();
         }

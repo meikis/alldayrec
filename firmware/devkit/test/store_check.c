@@ -110,6 +110,14 @@ static uint32_t ring_buf_put_claim(struct ring_buf *r, uint8_t **d, uint32_t n)
     return n;
 }
 static int ring_buf_put_finish(struct ring_buf *r, uint32_t n) { r->tail += n; assert(r->tail == r->claim); return 0; }
+static uint32_t ring_buf_get_claim(struct ring_buf *r, uint8_t **d, uint32_t n)
+{
+    uint32_t at = r->head % r->size;
+    *d = r->buf + at;
+    return MIN(n, MIN(r->tail - r->head, r->size - at));
+}
+static int ring_buf_get_finish(struct ring_buf *r, uint32_t n) { r->head += n; return 0; }
+static bool ring_buf_is_empty(struct ring_buf *r) { return r->head == r->tail; }
 static uint32_t ring_buf_get(struct ring_buf *r, uint8_t *d, uint32_t n)
 {
     n = MIN(n, r->tail - r->head);
@@ -121,10 +129,12 @@ static uint32_t ring_buf_get(struct ring_buf *r, uint8_t *d, uint32_t n)
 }
 #define __packed __attribute__((packed))
 #define K_SEM_DEFINE(name, ...) int name  // after "static"
+#define K_MUTEX_DEFINE(name) struct k_mutex name  // after "static"
 #define K_THREAD_DEFINE(...)
-static bool stalled;  // the link: nothing goes out (LIVE's thread waits on a TX buffer)
-static void live_send(void);
-static void k_sem_give(int *s) { if (!stalled) live_send(); }
+static bool stalled;     // the link: nothing goes out (LIVE's thread waits on a TX buffer)
+static bool card_stuck;  // the card: its writer sits in one write (#166)
+static void sem_given(int *s);  // after lr_store.c: LIVE's thread or the card writer runs, unless held up
+static void k_sem_give(int *s) { sem_given(s); }
 static int k_sem_take(int *s, int t) { return 0; }
 static bool holes_ok;  // the phone gets LIVE with a gap (it READs that from the card)
 static bool subscribed = true;
@@ -218,6 +228,22 @@ static int fs_statvfs(const char *p, struct fs_statvfs *v) { v->f_bfree = v->f_b
 struct k_mutex write_sdcard_mutex;
 uint32_t transport_frame_no;
 #include "../src/lr_store.c"
+
+static void sem_given(int *s)
+{
+    if (s == &live_sem && !stalled) {
+        live_send();
+    } else if (s == &card_sem && !card_stuck) {
+        card_drain();
+    }
+}
+
+static int append1(void)  // one byte through the card queue, as the writer appends a batch
+{
+    ring_buf_put_claim(&card_rb, &(uint8_t *){0}, 1);
+    ring_buf_put_finish(&card_rb, 1);
+    return append(1);
+}
 
 static void frames(uint32_t from, uint32_t n)
 {
@@ -329,6 +355,31 @@ int main(void)
     flush();
     assert(card_len[2] > phone_len[2]);
 
+    // the card stalls (#166): the stream does not wait for it. LIVE gets every record; the card the batches its queue
+    // kept, then nothing more of that segment (APPEND_ERR x 1, -EAGAIN); once the writer has caught up, the stream goes
+    // on in a new segment, which the card has from its start
+    subscribed = true;
+    next_segment();
+    n_logged = 0;
+    uint16_t sg = seg;
+    uint32_t dropped0 = dropped;
+    card_stuck = true;
+    frames(3433, 1000);  // 10 s: more than the queue holds
+    assert(seg == sg && card_behind && card_len[sg] == 0 && dropped == dropped0);
+    assert(n_logged == 1 && logged[0].code == LR_APPEND_ERR && logged[0].x == 1 && (int32_t) logged[0].a == -EAGAIN);
+    card_stuck = false;
+    card_drain();  // the write returns: the queue goes onto the card
+    uint32_t kept = card_len[sg];
+    assert(kept >= CARD_QUEUE / 2 && kept < phone_len[sg] && memcmp(card[sg], phone[sg], kept) == 0);
+    frames(4433, 500);
+    flush();
+    assert(seg == sg + 1 && card_len[sg] == kept && !card_behind);
+    assert(card_len[seg] == phone_len[seg] && memcmp(card[seg], phone[seg], card_len[seg]) == 0);
+    a = t = 0;
+    parse(phone[sg], phone_len[sg], &a, &t);
+    parse(phone[seg], phone_len[seg], &a, &t);
+    assert(a == 1500 && t == 0);  // every frame went out by LIVE
+
     // card appends over 10 minutes, one SD_WRITES: x over 200 ms, a total | slowest << 20, b <20 | 20-49 << 10 | 50-200 << 20
     memset(&wr, 0, sizeof(wr));
     wr.start = now_ms = 1000;
@@ -336,12 +387,12 @@ int main(void)
     int took[] = {5, 5, 19, 20, 49, 50, 200, 250, 1001};
     for (int i = 0; i < ARRAY_SIZE(took); i++) {
         write_ms = took[i];
-        assert(append("x", 1) == 0);
+        assert(append1() == 0);
     }
     assert(n_logged == 1 && logged[0].code == LR_SLOW && logged[0].a == 1001);  // over 1000 ms only
     now_ms = 1000 + 10 * 60 * 1000;
     write_ms = 3;
-    assert(append("x", 1) == 0);
+    assert(append1() == 0);
     assert(n_logged == 2 && logged[1].code == LR_SD_WRITES && logged[1].x == 2);
     assert(logged[1].a == (1602 | 1001 << 20) && logged[1].b == (4 | 2 << 10 | 2 << 20));
     assert(wr.start == now_ms && wr.ms == 0);

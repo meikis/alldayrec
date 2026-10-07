@@ -93,6 +93,7 @@ uv run --no-project --with bleak python lr_listen.py --selftest
 - SD 总线 8 MHz：ProMicro（LR-P1/P2/P3）用 SPIM（EasyDMA）；XIAO（LR-X1）仍用 legacy SPI（`nordic,nrf-spi`，每字节一次中断）。10-03 SPIM 在 XIAO 焊好的模块上初始化挂死，当时还没有 #59 的 SD 复位；它的 SD 接在 D7–D10，是 low frequency I/O 引脚。之后没有在 XIAO 上复测
 - NCS 2.7 `card_ioctl()` 在 `DISK_IOCTL_CTRL_SYNC` 后缺 `break`，FatFs 每次 sync 都报 -EIO（数据其实写进去了）：新卡第一次开机 `mkdir LR` 因此报错、一分钟不写卡（#137）。`sdcard.c` 用链接器 `--wrap=sdmmc_ioctl` 把这个假错改成 0，升级到修好的 NCS 后删掉
 - 卡写失败或开机时没卡：流照常推（TIME 的 store 显示错误），每分钟重新挂载一次卡，成功后从新段继续写（开机时没卡的这次才计开机次数）
+- 写卡在自己的线程（`card_thread`）里做，切记录和 LIVE 不等卡（#166）：卡卡住时，记录照常发给手机。写卡队列（16 KB，约 4 s）放不下的批次只是不上卡，记一条 APPEND_ERR（x 1，−EAGAIN），这一段后面的也不再上卡；写卡线程追上后从新段继续。所以卡上每个文件仍是流里同名文件的开头
 - `'T'` 的帧号取的是对时那一刻正在编码的帧，这一帧的声音比它早约 0–100 ms（麦克风按 100 ms 一块交数据），时间系统性偏晚约 50 ms
 - 热复位时 SD 卡可能卡在命令中间只能断电恢复；1200 bps 复位前会先卸载，看门狗复位仍有风险
 - 开机前约 0.3 s 音频丢失；`MIC_GAIN` 偏高会削顶；BLE 连接间隔（~20 Hz）串进麦克风的「哒哒」声未修
