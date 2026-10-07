@@ -194,12 +194,6 @@ int main(void)
         LOG_ERR("Battery init failed (err %d)", err);
         return err;
     }
-
-    err = battery_charge_start();
-    if (err) {
-        LOG_ERR("Battery failed to start (err %d)", err);
-        return err;
-    }
     LOG_INF("Battery initialized");
 #endif
 

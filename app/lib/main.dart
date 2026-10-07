@@ -123,12 +123,15 @@ class Recorder {
   }
 }
 
+/// What a BLE recorder runs on (its status' `charge`; none from an older firmware).
+const chargeText = {'battery': '用电池', 'charging': '充电中', 'full': '已充满'};
+
 /// A BLE recorder's battery and card in a few words.
 String hwLine(Map? hw) {
   if (hw == null || hw.isEmpty) return '';
   final store = hw['store'], free = hw['free_kb'], total = hw['total_kb'];
   final card = store == -19 ? '没有存储卡' : store == -28 ? '存储卡已满' : total is num && total > 0 ? '卡剩 ${(free / 1048576).toStringAsFixed(1)} GB' : '';
-  return [if (hw['battery'] != null) '电量 ${hw['battery']}%', if (card.isNotEmpty) card].join(' · ');
+  return [if (hw['battery'] != null) '电量 ${hw['battery']}%', ?chargeText[hw['charge']], if (card.isNotEmpty) card].join(' · ');
 }
 
 class Home extends StatefulWidget {
@@ -929,7 +932,7 @@ class _RecorderPageState extends State<RecorderPage> {
     final recording = st['running'] == true, linked = recording && hw.isNotEmpty;
     final link = '${st['link'] ?? ''}';
     final store = hw['store'] as int?, free = (hw['free_kb'] as num?) ?? 0, total = (hw['total_kb'] as num?) ?? 0;
-    final battery = hw['battery'] as int?;
+    final battery = hw['battery'] as int?, charge = chargeText[hw['charge']];
     final syncDone = (st['syncDone'] as num?) ?? 0, syncTotal = (st['syncTotal'] as num?) ?? 0, syncLive = (st['syncLive'] as num?) ?? 0;
     final syncing = recording && syncTotal > 0;
     final lent = store == -16;
@@ -1023,8 +1026,9 @@ class _RecorderPageState extends State<RecorderPage> {
         const SizedBox(height: 12),
         IntrinsicHeight(
           child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            stat(icon: _batteryIcon(linked ? battery : null), color: batteryColor, label: '电量',
-                value: linked && battery != null ? '$battery%' : '—', fraction: linked && battery != null ? battery / 100 : 0),
+            stat(icon: linked && hw['charge'] == 'charging' ? Icons.battery_charging_full_rounded : _batteryIcon(linked ? battery : null),
+                color: batteryColor, label: '电量', value: linked && battery != null ? '$battery%' : '—', sub: linked ? charge : null,
+                fraction: linked && battery != null ? battery / 100 : 0),
             const SizedBox(width: 12),
             stat(icon: Icons.sd_card_rounded, color: cardColor, label: '存储卡', value: cardValue, sub: cardSub,
                 fraction: linked && total > 0 ? (total - free) / total : 0),

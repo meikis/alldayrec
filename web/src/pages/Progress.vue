@@ -2,7 +2,14 @@
 import { computed, onMounted, ref, watch } from "vue";
 import AppHeader from "../components/AppHeader.vue";
 import Listen from "../components/Listen.vue";
-import { get, type DeviceStatus, type RecorderStatus, type Status, type Upgrade } from "../lib/api";
+import {
+  CHARGE,
+  get,
+  type DeviceStatus,
+  type RecorderStatus,
+  type Status,
+  type Upgrade,
+} from "../lib/api";
 import { upgradeText } from "../lib/recorderLog";
 import { useSocket } from "../lib/socket";
 
@@ -98,7 +105,12 @@ const eta = (d: DeviceStatus) => {
         <template v-if="d.hw">
           <span>录音设备</span
           ><span>{{ [d.hw.model, d.hw.fw && "固件 " + d.hw.fw].filter(Boolean).join(" · ") }}</span>
-          <span>电量</span><span>{{ d.hw.battery != null ? d.hw.battery + "%" : "—" }}</span>
+          <span>电量</span
+          ><span>{{
+            [d.hw.battery != null && d.hw.battery + "%", d.hw.charge && CHARGE[d.hw.charge]]
+              .filter(Boolean)
+              .join(" · ") || "—"
+          }}</span>
           <span>存储卡</span><span :class="{ bad: d.hw.store }">{{ card(d.hw) }}</span>
           <span>上报于</span><span>{{ at(d.hw.at) }}</span>
         </template>

@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import AppHeader from "../components/AppHeader.vue";
 import LineChart from "../components/LineChart.vue";
-import { get, type DeviceEvent, type DeviceLog, type Upgrade } from "../lib/api";
+import { CHARGE, get, type DeviceEvent, type DeviceLog, type Upgrade } from "../lib/api";
 import {
   BOOT,
   DFU,
@@ -101,6 +101,8 @@ const pct = computed(() =>
     .filter((s) => s.battery != null)
     .map((s) => ({ t: Date.parse(s.at), v: s.battery! })),
 );
+// what it runs on, as its phone last read it
+const charge = computed(() => (log.value?.status ?? []).filter((s) => s.charge).pop());
 const NAMES: Record<number, string> = {
   [BOOT]: "重启",
   [FAULT]: "崩溃",
@@ -153,7 +155,14 @@ const when = (at: string) => (hours.value >= 24 ? `${at.slice(5, 10)} ` : "") + 
         </div>
       </section>
       <section class="card">
-        <div class="head"><b>电量</b><span class="muted">%，手机连着时每分钟读一次</span></div>
+        <div class="head">
+          <b>电量</b
+          ><span class="muted"
+            >%，手机连着时每分钟读一次{{
+              charge ? `；${CHARGE[charge.charge!]}（${when(charge.at)}）` : ""
+            }}</span
+          >
+        </div>
         <LineChart
           v-if="pct.length"
           :points="pct"

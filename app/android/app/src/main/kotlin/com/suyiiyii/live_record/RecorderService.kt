@@ -71,6 +71,7 @@ class RecorderService : Service() {
                 note,
                 if (paused > 0) "已暂停，还剩 ${(paused + 59_999) / 60_000} 分钟" else null,
                 hw?.get("battery")?.let { "电量 $it%" },
+                mapOf("battery" to "用电池", "charging" to "充电中", "full" to "已充满")[hw?.get("charge")],
                 mapOf(-19 to "没有存储卡", -28 to "存储卡已满")[hw?.get("store")],
                 if (oldest != null && now - oldest > BACKLOG_MS) "待传 ${s["pending"]} 块" else null,
                 (s["interruptedAt"] as Long?)?.let { "曾在 ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it))} 被系统中断，已自动恢复" },

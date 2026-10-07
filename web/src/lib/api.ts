@@ -126,11 +126,14 @@ export interface DeviceStatus {
   hw?: RecorderStatus | null; // a BLE recorder, as its phone last read it
 }
 
+export const CHARGE = { battery: "用电池", charging: "充电中", full: "已充满" };
+
 export interface RecorderStatus {
   at: string;
   model?: string;
   fw?: string;
   battery?: number;
+  charge?: keyof typeof CHARGE; // what it runs on (firmware lr_power.h); none from an older firmware
   store?: number; // 0 recording to the card; -19 no card; -28 card full
   free_kb?: number;
   total_kb?: number;

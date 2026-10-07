@@ -14,6 +14,7 @@
 #include <zephyr/sys/ring_buffer.h>
 
 #include "lr_log.h"
+#include "lr_power.h"
 #include "sdcard.h"
 #include "usb.h"
 #include "transport.h"
@@ -304,7 +305,7 @@ static ssize_t time_read(struct bt_conn *conn, const struct bt_gatt_attr *attr, 
                          uint16_t offset)
 {
     extern int16_t usb_diag[4];
-    uint8_t v[47];
+    uint8_t v[48];
     sys_put_le16(boot, v);
     sys_put_le32(transport_frame_no, v + 2);
     sys_put_le16(store_err, v + 6);
@@ -321,6 +322,7 @@ static ssize_t time_read(struct bt_conn *conn, const struct bt_gatt_attr *attr, 
     sys_put_le16(usb_diag[3], v + 40);
     v[42] = MIN(lr_bond_count(), UINT8_MAX);
     sys_put_le32(lr_pause_left(), v + 43);
+    v[47] = lr_charge();  // a phone reads this byte every few seconds while it reads no backlog
     return bt_gatt_attr_read(conn, attr, buf, len, offset, v, sizeof(v));
 }
 

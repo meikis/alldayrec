@@ -80,6 +80,11 @@ object Ble {
     const val PAUSED = 4
     fun state(r: ScanResult) = r.scanRecord?.getManufacturerSpecificData(0xFFFF)?.firstOrNull()?.toInt()?.and(0xff) ?: -1
 
+    /** What the recorder runs on, from its status read (firmware lr_power.h, byte 47): "battery", "charging" (a board
+     *  that cannot read its charger says so whenever it is on USB), "full"; null: an older firmware. */
+    fun charge(status: ByteArray): String? = status.getOrNull(47)?.toInt()?.let { listOf("battery", "charging", "full").getOrNull(it) }
+    const val CHARGE_EVERY_MS = 5_000L  // that byte read this often while no READ runs: a plug or unplug shows within seconds
+
     /** The phone's own bond goes too (hidden API, as BLE libraries call it): a bond the recorder has forgotten would
      *  only fail to encrypt when this phone binds it again. */
     fun removeBond(d: BluetoothDevice): Boolean = try {
@@ -328,6 +333,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             state = "正在接上实时"
             var live0 = false  // LIVE taken since the file it goes on in was caught up
             var lastStatus = android.os.SystemClock.elapsedRealtime()
+            var lastCharge = lastStatus
             var lastPieces = 0L
             // One loop for the link (#130): LIVE as it comes, and one READ at a time alongside it for what the mirror
             // lacks (nextRead). LIVE waits only while the file it goes on in is READ (at connect, after a hole, at a new
@@ -354,7 +360,10 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
                 val now = android.os.SystemClock.elapsedRealtime()
                 if (now - lastPieces >= 500) { pieces(m); lastPieces = now }
                 if (System.currentTimeMillis() - synced > Ble.TIME_EVERY_MS) { endRead(g, m); synced = sync(g) }
-                if (now - lastStatus > 60_000) {
+                // not while a READ is in flight: the backlog's DATA keeps the link (#130); the minute's status reads it then
+                val plugged = reading == null && now - lastCharge >= Ble.CHARGE_EVERY_MS &&
+                    run { lastCharge = now; Ble.charge(read(g, Ble.STORE, Ble.TIME)) != hw["charge"] }
+                if (plugged || now - lastStatus > 60_000) {
                     status(g, name)
                     if (live0) {
                         endRead(g, m)
@@ -468,12 +477,14 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
 
     /** The board's state, kept for the app's page and sent to the server under the board's name. */
     private fun status(g: BluetoothGatt, name: String): Status {
-        val t = le(read(g, Ble.STORE, Ble.TIME))
+        val raw = read(g, Ble.STORE, Ble.TIME)
+        val t = le(raw)
         val s = Status(t.getShort(0).toInt() and 0xffff, t.getInt(2).toLong() and 0xffffffffL, t.getShort(6).toInt())
         val left = syncTotalKb - syncDoneKb
         val rate = if (caughtSince > 0) caught * 1000.0 / maxOf(1000L, android.os.SystemClock.elapsedRealtime() - caughtSince) else 0.0
         val h = mutableMapOf<String, Any?>("name" to name, "store" to s.store, "free_kb" to (t.getInt(8).toLong() and 0xffffffffL),
             "total_kb" to (t.getInt(12).toLong() and 0xffffffffL), "battery" to read(g, Ble.BAS, Ble.BATTERY).firstOrNull()?.toInt(),
+            "charge" to Ble.charge(raw),
             // a backlog read in the background (#130): what is left, and when it is done at this pace
             "backlog_kb" to left, "backlog_eta_s" to if (rate > 0 && left > 0) (left * 1024 / rate).toLong() else null)
         if (t.limit() >= 47) pausedUntil = t.getInt(43).toLong().let { if (it > 0) System.currentTimeMillis() + it * 1000 else 0L }

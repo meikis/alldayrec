@@ -39,6 +39,13 @@ enum Ble {
 
   static func u32(_ b: [UInt8], _ at: Int) -> Int64 { Int64(Store.le(b, at, 4)) }
 
+  /// What the recorder runs on, from its status read (firmware lr_power.h, byte 47): "battery", "charging" (a board that
+  /// cannot read its charger says so whenever it is on USB), "full"; nil: an older firmware.
+  static func charge(_ status: [UInt8]) -> String? {
+    status.count > 47 && status[47] < 3 ? ["battery", "charging", "full"][Int(status[47])] : nil
+  }
+  static let chargeEvery: TimeInterval = 5  // that byte read this often while no READ runs: a plug or unplug shows within seconds
+
   static func hhmm() -> String {
     let f = DateFormatter()
     f.dateFormat = "HH:mm"
@@ -448,7 +455,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       caught = 0; caughtSince = nil
       state = "正在接上实时"
       var live0 = false  // LIVE taken since the file it goes on in was caught up
-      var lastStatus = Date(), lastPieces = Date.distantPast
+      var lastStatus = Date(), lastPieces = Date.distantPast, lastCharge = Date()
       // One loop for the link (#130): LIVE as it comes, and one READ at a time alongside it for what the mirror lacks
       // (nextRead). LIVE waits only while the file it goes on in is READ (at connect, after a hole, at a new file):
       // a backlog of days no longer holds back what is said now
@@ -476,7 +483,13 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
           if reading == nil { try nextRead(p, m) }
           if -lastPieces.timeIntervalSinceNow >= 0.5 { try pieces(m); lastPieces = Date() }
           if Recorder.now() - synced > Ble.timeEveryMs { try endRead(p, m); synced = try sync(p) }
-          if -lastStatus.timeIntervalSinceNow > 60 {
+          var plugged = false
+          // not while a READ is in flight: the backlog's DATA keeps the link (#130); the minute's status reads it then
+          if reading == nil && -lastCharge.timeIntervalSinceNow >= Ble.chargeEvery {
+            lastCharge = Date()
+            plugged = Ble.charge(try read(p, Ble.store, Ble.time)) != hw["charge"] as? String
+          }
+          if plugged || -lastStatus.timeIntervalSinceNow > 60 {
             _ = try status(p, name)
             if live0 {
               try endRead(p, m)
@@ -521,7 +534,8 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
                             "backlog_kb": left, "backlog_eta_s": rate > 0 && left > 0 ? Int(Double(left * 1024) / rate) : NSNull(),
                             // optional: macOS cannot publish 180F, so the Mac's fake recorder (app/ios/e2e) has none
                             "battery": (try? read(p, Ble.bas, Ble.battery))?.first.map { Int($0) } ?? NSNull(),
-                            "app_mb": Recorder.footprintMB()]  // this app's own memory, to see it grow from the server (#109)
+                            "app_mb": Recorder.footprintMB(),  // this app's own memory, to see it grow from the server (#109)
+                            "charge": Ble.charge(t) ?? NSNull()]
     if t.count >= 47 {
       let left = Int64(Int32(truncatingIfNeeded: Store.le(t, 43, 4)))
       pausedUntil = left > 0 ? Recorder.now() + left * 1000 : 0

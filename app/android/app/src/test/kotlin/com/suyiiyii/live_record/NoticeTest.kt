@@ -23,6 +23,12 @@ class NoticeTest {
                 "hw" to mapOf("battery" to 9, "store" to -28), "pending" to 40, "oldest" to now - 300_000))
     }
 
+    @Test fun charge() {  // the status read's byte 47 (firmware lr_power.h), and the line it makes
+        assertEquals(listOf(null, "battery", "charging", "full", null),
+            listOf(ByteArray(47), ByteArray(48), ByteArray(48).also { it[47] = 1 }, ByteArray(48).also { it[47] = 2 }, ByteArray(48).also { it[47] = 7 }).map(Ble::charge))
+        assertEquals("已连接 · 实时上传" to "电量 68% · 充电中", ble("link" to "已连接 · 实时上传", "hw" to hw + ("charge" to "charging")))
+    }
+
     @Test fun micAndUpload() {
         assertEquals("live-record 正在录音" to "", RecorderService.notice(mapOf("running" to true, "source" to "mic", "pending" to 0), now))
         assertEquals("live-record 正在上传 · 剩 7 块" to "", RecorderService.notice(mapOf("running" to false, "pending" to 7), now))

@@ -30,7 +30,10 @@ static const struct device *adc_battery_dev = DEVICE_DT_GET(DT_NODELABEL(adc));
 static K_MUTEX_DEFINE(battery_mut);
 
 #define GPIO_BATTERY_CHARGE_SPEED 13
-#define GPIO_BATTERY_CHARGING_ENABLE 17
+// The charger's ~CHG (BQ25101, open drain): low while it charges, open when done or without USB. Its red LED hangs off
+// it (3V3, 2.2k, LED, P0.17), so an input reads it with the LED as it is; Omi drove it low as a "charge enable", which
+// only kept the LED lit on the battery (~0.65 mA, #95). The pull-up: a bare input costs ~50 uA (Seeed's forum).
+#define GPIO_BATTERY_CHG 17
 #define GPIO_BATTERY_READ_ENABLE 14
 
 // Change this to a higher number for better averages
@@ -131,31 +134,15 @@ int battery_set_slow_charge()
     return gpio_pin_set(gpio_battery_dev, GPIO_BATTERY_CHARGE_SPEED, 0); // SLOW charge 50mA
 }
 
-int battery_charge_start()
+int battery_charging()
 {
-    int ret = 0;
-
     if (IS_ENABLED(CONFIG_LR_BATTERY_VDDH)) {
-        return 0; // no charger pins
+        return -ENOTSUP; // the ProMicro's charger drives its blue LED only (#122 has the wire that would read it)
     }
     if (!is_initialized) {
         return -ECANCELED;
     }
-    ret |= battery_enable_read();
-    ret |= gpio_pin_set(gpio_battery_dev, GPIO_BATTERY_CHARGING_ENABLE, 1);
-    return ret;
-}
-
-int battery_charge_stop()
-{
-    if (IS_ENABLED(CONFIG_LR_BATTERY_VDDH)) {
-        return 0; // no charger pins
-    }
-    if (!is_initialized) {
-        return -ECANCELED;
-    }
-
-    return gpio_pin_set(gpio_battery_dev, GPIO_BATTERY_CHARGING_ENABLE, 0);
+    return gpio_pin_get(gpio_battery_dev, GPIO_BATTERY_CHG);
 }
 
 int battery_get_millivolt(uint16_t *battery_millivolt)
@@ -254,7 +241,7 @@ int battery_init()
         return -EIO;
     }
 
-    ret |= gpio_pin_configure(gpio_battery_dev, GPIO_BATTERY_CHARGING_ENABLE, GPIO_OUTPUT | GPIO_ACTIVE_LOW);
+    ret |= gpio_pin_configure(gpio_battery_dev, GPIO_BATTERY_CHG, GPIO_INPUT | GPIO_PULL_UP | GPIO_ACTIVE_LOW);
     ret |= gpio_pin_configure(gpio_battery_dev, GPIO_BATTERY_READ_ENABLE, GPIO_OUTPUT | GPIO_ACTIVE_LOW);
     ret |= gpio_pin_configure(gpio_battery_dev, GPIO_BATTERY_CHARGE_SPEED, GPIO_OUTPUT | GPIO_ACTIVE_LOW);
 

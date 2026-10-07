@@ -790,9 +790,7 @@ int transport_start()
     bt_gatt_service_register(&dfu_service);
     count_bonds();  // and advertising starts with what they say
 
-    int battErr = 0;
-    battErr |= battery_init();
-    battErr |= battery_charge_start();
+    int battErr = battery_init();
     if (battErr) {
         LOG_ERR("Battery init failed (err %d)", battErr);
     } else {

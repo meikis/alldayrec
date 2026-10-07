@@ -133,6 +133,7 @@ static ssize_t bt_gatt_attr_read(struct bt_conn *c, const struct bt_gatt_attr *a
 int16_t usb_diag[4];
 int lr_bond_count(void) { return 1; }
 uint32_t lr_pause_left(void) { return 0; }
+uint8_t lr_charge(void) { return 0; }
 void lr_pause(uint32_t s) {}
 void usb_reattach(void) {}
 int mount_sd_card(void) { return 0; }

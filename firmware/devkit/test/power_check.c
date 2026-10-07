@@ -1,5 +1,6 @@
 // Host check of lr_low_count (src/lr_power.h), what turns a recorder off: cc -o power_check test/power_check.c && ./power_check
 #include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 #include "../src/lr_power.h"
 
@@ -24,6 +25,12 @@ int main(void)
     assert(off_at(fall, 6, false, -5, 3300) == 0);  // the ADC failed
     assert(off_at(misread, 6, false, 0, 3300) == 0);  // no board runs at that: a misread
     assert(off_at(fall, 6, false, 0, 0) == 0);      // CONFIG_LR_LOW_BATTERY_MV 0: never
+    // what the status read says the board runs on (lr_charge_state)
+    assert(lr_charge_state(false, 0) == LR_ON_BATTERY);  // unplugged: ~CHG is open, as when done
+    assert(lr_charge_state(false, -ENOTSUP) == LR_ON_BATTERY);
+    assert(lr_charge_state(true, 1) == LR_CHARGING);
+    assert(lr_charge_state(true, 0) == LR_CHARGED);  // the X1's charger done
+    assert(lr_charge_state(true, -ENOTSUP) == LR_CHARGING);  // the ProMicro: USB is all it knows
     puts("power_check ok");
     return 0;
 }

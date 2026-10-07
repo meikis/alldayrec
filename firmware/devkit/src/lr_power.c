@@ -63,13 +63,17 @@ void lr_power_off(void)
 #endif
     nrf_gpio_pin_clear(PDM_PWR_PIN);
     nrf_gpio_cfg_output(PDM_PWR_PIN);
-    battery_charge_stop();  // the XIAO's P0.17, the charger's ~CHG, driven low keeps its red LED lit (#95)
 #ifdef CONFIG_LR_SWITCH
     lr_switch_arm();
 #endif
     NRF_POWER->SYSTEMOFF = 1;  // VBUS rising wakes it too
     for (;;) {
     }
+}
+
+uint8_t lr_charge(void)
+{
+    return lr_charge_state(nrf_power_usbregstatus_vbusdet_get(NRF_POWER), battery_charging());
 }
 
 static void minute(struct k_work *w)
