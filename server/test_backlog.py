@@ -288,3 +288,27 @@ def test_final_goes_on_after_a_gap(tmp_path, monkeypatch):
         pipe.cancel()
 
     asyncio.run(run())
+
+
+def test_hold_release(tmp_path, monkeypatch):
+    """The phone no longer has the recorder (unbound, or another bound): the hold goes at once, not HOLD_MAX_S after
+    the phone last said it (10-07: LR-P3-116C's 261 pieces waited from 17:47 to 05:47). Meanwhile the status says when
+    the phone last said it and until when the queue waits without it, and whether the device is recording now."""
+    audio.DIR = tmp_path
+    db.open_db(tmp_path / "live.db")
+    monkeypatch.setattr(server, "note", lambda *a, **k: None)
+    t = dt.datetime(2026, 10, 7, 17, 36)
+    save(t, flac(tone(0, 3)))  # it came just now: the device records
+    audio.hold(DEVICE, int(t.timestamp() * 1000))
+    st = {"audio_end": None, "done_to": None, "progress": [], "latency": [], "final_latency": [], "drafting": False,
+          "last_speech": None, "refine": None, "conversation": None, "draft": None, "draft_to": None}
+    d = server.device_status(DEVICE, st)
+    assert d["hold"] == "2026-10-07T17:36:00" and d["recording"], d
+    seen, until = dt.datetime.fromisoformat(d["hold_seen"]), dt.datetime.fromisoformat(d["hold_until"])
+    assert abs((seen - dt.datetime.now()).total_seconds()) < 5 and (until - seen).total_seconds() == audio.HOLD_MAX_S
+    monkeypatch.setattr(server, "LIVE_AUDIO_S", 0)
+    assert not server.device_status(DEVICE, st)["recording"], "no audio came in LIVE_AUDIO_S: not recording"
+
+    asyncio.run(server.hold_release(DEVICE))
+    d = server.device_status(DEVICE, st)
+    assert d["hold"] is None and d["hold_seen"] is None and audio.held(DEVICE) is None

@@ -108,9 +108,13 @@ class MainActivity : FlutterActivity() {
                     val addr = call.argument<String>("address")!!
                     val d = getSystemService(BluetoothManager::class.java).adapter.getRemoteDevice(addr)
                     if (d.bondState == BluetoothDevice.BOND_BONDED) Ble.removeBond(d)  // an old bond the recorder may have forgotten
-                    getSharedPreferences("recorder", MODE_PRIVATE).edit().putString("bleName", call.argument<String>("name"))
+                    val p = getSharedPreferences("recorder", MODE_PRIVATE)
+                    val e = p.edit().putString("bleName", call.argument<String>("name"))
                         .putString("bleAddress", addr).putBoolean("bindPending", true).putBoolean("bindForce", call.argument<Boolean>("force")!!)
-                        .remove("bleKicked").remove("bleModel").remove("bleFw").apply()
+                        .remove("bleKicked").remove("bleModel").remove("bleFw")
+                    // the one bound before: its backlog no longer comes from here (Dart: releaseHold)
+                    p.getString("bleName", null)?.takeIf { it != call.argument<String>("name") }?.let { e.remove("hold:${Ble.tag(it)}") }
+                    e.apply()
                     result.success(null)
                 }
                 "usbDisk" -> {  // the connected board's card to the computer's USB, or back
@@ -122,8 +126,10 @@ class MainActivity : FlutterActivity() {
                     val p = getSharedPreferences("recorder", MODE_PRIVATE)
                     val addr = p.getString("bleAddress", null); val name = p.getString("bleName", null)
                     // first: the link must not reconnect when the recorder drops it
-                    p.edit().remove("bleName").remove("bleAddress").remove("bleModel").remove("bleFw").remove("bindPending")
-                        .remove("bindForce").remove("bleKicked").commit()
+                    val e = p.edit().remove("bleName").remove("bleAddress").remove("bleModel").remove("bleFw").remove("bindPending")
+                        .remove("bindForce").remove("bleKicked")
+                    name?.let { e.remove("hold:${Ble.tag(it)}") }  // its backlog no longer comes from here
+                    e.commit()
                     val forgot = RecorderService.link?.forgetAll() ?: false
                     name?.let { DeviceLog.app(Ble.tag(it), "unbind", if (forgot) "解除绑定：录音设备忘掉了所有手机" else "解除绑定：录音设备没连上，只有这台手机忘掉了它") }
                     if (addr != null && BluetoothAdapter.checkBluetoothAddress(addr))

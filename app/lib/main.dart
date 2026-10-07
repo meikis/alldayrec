@@ -124,6 +124,22 @@ class Recorder {
   }
 }
 
+/// The server stops waiting for the older audio on a recorder's card (its hold, #130) once this phone no longer has
+/// the recorder: unbound, or another bound in its place. The backlog will not come from here; without this the server
+/// waited 12 h after the phone last said the hold (10-07: LR-P3-116C, 17:47 to 05:47). Best effort.
+Future<void> releaseHold(String name) async {
+  try {
+    final s = await Settings.load();
+    if (s.token.isEmpty) return;
+    final c = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+    final dev = Uri.encodeQueryComponent(name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_'));  // as its audio goes up
+    final req = await c.postUrl(Uri.parse('${s.server}/api/hold/release?device=$dev'));
+    req.headers.set('Authorization', 'Bearer ${s.token}');
+    await (await req.close().timeout(const Duration(seconds: 15))).drain<void>();
+    c.close();
+  } catch (_) {}
+}
+
 /// What a BLE recorder runs on (its status' `charge`; none from an older firmware).
 const chargeText = {'battery': '用电池', 'charging': '充电中', 'full': '已充满'};
 
@@ -918,6 +934,7 @@ class _RecorderPageState extends State<RecorderPage> {
       await _call(() async {
         await Recorder.unbind();
         await widget.onSource('mic');
+        await releaseHold(name);
       });
     } finally {
       if (mounted) setState(() => unbinding = false);
@@ -1268,7 +1285,9 @@ class _AddRecorderPageState extends State<AddRecorderPage> {
       ));
       if (ok != true) return;
     }
+    final old = (await Recorder.recorder())['name'] as String?;
     await Recorder.withoutLink(() => Recorder.bind(d['name'], d['address'], force));
+    if (old != null && old != d['name']) await releaseHold(old);  // the one bound before: no longer this phone's
     if (mounted) Navigator.pop(context, true);
   }
 

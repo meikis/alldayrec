@@ -5,6 +5,7 @@ import Listen from "../components/Listen.vue";
 import {
   CHARGE,
   get,
+  holdLeft,
   type Calls,
   type CallSum,
   type DeviceStatus,
@@ -117,6 +118,7 @@ const caughtUp = (d: DeviceStatus) => d.left_s < 30;
 const held = (d: DeviceStatus) => {
   const kb = d.hw?.backlog_kb,
     eta = d.hw?.backlog_eta_s;
+  if (holdLeft(d)) return `定稿停在 ${at(d.hold!)}，等卡里更早的录音；${holdLeft(d)}`;
   return `定稿停在 ${at(d.hold!)}，等手机在后台补传卡里更早的录音${kb ? `（还有 ${(kb / 1024).toFixed(1)} MB${eta ? `，约 ${span(eta)}` : ""}）` : ""}，补完再接着定稿；初稿照常`;
 };
 // how late its newest audio came (a backlog blocking what is said now, #130), how its last 10 min sounded (#155)

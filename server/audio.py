@@ -192,6 +192,12 @@ def held(device: str) -> int | None:
     return h["at"] if h and time.time() - h["seen"] < HOLD_MAX_S else None
 
 
+def hold_seen(device: str) -> float | None:
+    """When a phone last said the device's hold (unix s): it lets go HOLD_MAX_S after that."""
+    h = db.kv(f"hold:{device}")
+    return h and h["seen"]
+
+
 async def stream(device: str, after: dt.datetime | None, edge_s: float | None = None):
     """(start time, samples) of one device in time order, from the piece holding `after` (its first piece when None),
     forever. A piece arriving older than one already handed out is kept for playback but not streamed: a phone that

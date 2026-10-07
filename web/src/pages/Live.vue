@@ -12,7 +12,9 @@ import {
   inSpans,
   hhmm,
   hhmmss,
+  holdLeft,
   type Conversation,
+  type DeviceStatus,
   type LiveState,
   type LogEvent,
   type Row,
@@ -73,13 +75,33 @@ const catchups = computed(() =>
       device: d.device,
       from,
       to,
-      tail: d.hold
-        ? `；${kb ? `录音设备卡里还有 ${(kb / 1024).toFixed(kb >= 10240 ? 0 : 1)} MB 录音` : "手机还"}在后台补传${mins}，补完后定稿接上，实时初稿和分析照常`
-        : mins,
+      tail: !d.hold
+        ? mins
+        : holdLeft(d) // the phone went away: what it said of the card's backlog then is out of date
+          ? `；等录音设备卡里更早的录音，${holdLeft(d)}，之后先定稿已有的录音`
+          : `；${kb ? `录音设备卡里还有 ${(kb / 1024).toFixed(kb >= 10240 ? 0 : 1)} MB 录音` : "手机还"}在后台补传${mins}，补完后定稿接上，实时初稿和分析照常`,
     };
     return [{ s: from, it }];
   }),
 );
+// The status line: what the recording device is doing; with none recording (no audio for 2 min), when the last one
+// did instead of a "behind" that only counts the time since (10-07: 落后 13408 秒 at 01:06, nothing recording). The
+// queue by device and why: 261 pieces of LR-P3-116C held for its card's backlog read as the recording device's
+const when = (iso?: string | null) =>
+  !iso ? "—" : iso.slice(0, 10) === todayOf() ? hhmm(iso) : `${iso.slice(5, 10)} ${hhmm(iso)}`;
+const topQueued = computed(
+  () =>
+    status.value?.devices?.find((d) => d.device === status.value?.device)?.queued ??
+    status.value?.queued ??
+    0,
+);
+const queues = computed(() =>
+  (status.value?.devices ?? []).filter(
+    (d) => d.queued && (status.value?.recording === false || d.device !== status.value?.device),
+  ),
+);
+const queueText = (d: DeviceStatus) =>
+  `${d.device} 排队 ${d.queued} 块${d.hold ? `，等卡里 ${d.done_to ? hhmm(d.done_to) + " 后" : "更早"}的旧录音` : "，定稿中"}`;
 const timeline = computed(() => {
   const ev = [
     ...rows.value.map((r) => ({ s: r.start, it: { k: "row", key: "s" + r.id, r } as Item })),
@@ -311,14 +333,22 @@ const convLink = (c: Conversation) =>
       <RouterLink class="status" to="/progress" title="处理进度">
         <template v-if="!connected">连接断开，重连中…</template>
         <template v-else-if="status">
-          <span>{{ status.device || "等待录音" }}</span>
-          <span :class="{ bad: (status.behind_s ?? 0) > 30 }"
-            >落后 {{ status.behind_s == null ? "—" : status.behind_s + " 秒" }}</span
+          <span v-if="status.recording === false"
+            >未在录音 · 最后录音 {{ when(status.last_audio) }}</span
           >
-          <span :class="{ bad: status.queued }">排队 {{ status.queued ?? 0 }} 块</span>
-          <span :class="{ bad: (status.latency_s ?? 0) > 60 }"
-            >上屏 {{ status.latency_s ?? "—" }} 秒</span
-          >
+          <template v-else>
+            <span>{{ status.device || "等待录音" }}</span>
+            <span :class="{ bad: (status.behind_s ?? 0) > 30 }"
+              >落后 {{ status.behind_s == null ? "—" : status.behind_s + " 秒" }}</span
+            >
+            <span :class="{ bad: topQueued }">排队 {{ topQueued }} 块</span>
+            <span :class="{ bad: (status.latency_s ?? 0) > 60 }"
+              >上屏 {{ status.latency_s ?? "—" }} 秒</span
+            >
+          </template>
+          <span v-for="d in queues" :key="'q' + d.device" :class="{ bad: !d.hold }">{{
+            queueText(d)
+          }}</span>
           <span :class="{ bad: status.refine?.error }">
             分离
             {{

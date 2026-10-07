@@ -1055,7 +1055,7 @@ def device_status(device: str, st: dict) -> dict:
     end, done, pr = st["audio_end"], st["done_to"], st["progress"]
     lat = st["latency"] if st["drafting"] else st["final_latency"]  # what the page shows first: drafts while it watches
     left, received_to = audio.backlog(device, done)
-    hold = audio.held(device)
+    hold, seen, arrived = audio.held(device), audio.hold_seen(device), audio.arrival(device)
     # seconds of audio finalized per second, over the commits of the last 10 min (silence goes fast, speech ~8x)
     rate = (pr[-1][1] - pr[0][1]).total_seconds() / (pr[-1][0] - pr[0][0]) if len(pr) > 1 and pr[-1][0] > pr[0][0] else None
     return {"device": device, "audio_end": end.isoformat(timespec="seconds") if end else None,
@@ -1064,12 +1064,18 @@ def device_status(device: str, st: dict) -> dict:
             "received_to": received_to.isoformat(timespec="seconds") if received_to else None, "left_s": left,
             # finalization waits here for older audio the phone is still sending (its hw: backlog_kb, backlog_eta_s)
             "hold": dt.datetime.fromtimestamp(hold / 1000).isoformat(timespec="seconds") if hold else None,
+            # when its phone last said it, and when it is let go without the phone (audio.HOLD_MAX_S)
+            "hold_seen": dt.datetime.fromtimestamp(seen).isoformat(timespec="seconds") if hold and seen else None,
+            "hold_until": dt.datetime.fromtimestamp(seen + audio.HOLD_MAX_S).isoformat(timespec="seconds") if hold and seen else None,
+            # its newest audio came in LIVE_AUDIO_S ago at most: behind_s and the latencies are about now (otherwise
+            # behind_s is how long ago it last recorded)
+            "recording": bool(arrived) and time.time() * 1000 - arrived["at"] < LIVE_AUDIO_S * 1000,
             "rate": round(rate, 1) if rate else None, "eta_s": round(left / rate) if rate and rate > 0.1 and left > 30 else None,
             "last_speech": st["last_speech"].isoformat(timespec="seconds") if st["last_speech"] else None,
             "refine": st["refine"], "conversation": st["conversation"], "drafting": st["drafting"], "draft": st["draft"],
             "draft_to": st["draft_to"].isoformat(timespec="seconds") if st["draft_to"] else None,
             "latency_s": sorted(lat)[len(lat) // 2] if lat else None,
-            "arrival": audio.arrival(device), "sound": sound(device, received_to)}
+            "arrival": arrived, "sound": sound(device, received_to)}
 
 
 def sound(device: str, end: dt.datetime | None) -> dict | None:
@@ -1088,6 +1094,7 @@ def status() -> dict:
                                                                  "last_speech": None, "refine": None, "conversation": None, "latency_s": None})
     summaries = db.conn().execute("SELECT count(*) FROM summaries WHERE status = 'pending'").fetchone()[0]
     return {**top, "queued": sum(d["queued"] for d in ds), "devices": ds, "summaries_pending": summaries, "summary_queue": summary_q.qsize(),
+            "recording": any(d["recording"] for d in ds), "last_audio": max((d["received_to"] for d in ds if d["received_to"]), default=None),
             "balance": db.balance("stepfun"),
             "commit": state["commit"], "chunks": state["chunks"],
             "engine": f"{ENGINE} · 初稿 {DRAFT_ENGINE}" + (f" · 兜底 {ENGINE_FALLBACK}" if ENGINE_FALLBACK else "")}
@@ -1197,6 +1204,18 @@ async def chunk_end(device: str, t: int):
     db.put_kv(f"end_at:{device}", iso(end))  # kept across a restart: the queue may still hold the audio before it
     log.info("%s stopped recording at %s", device, end.time())
     note(f"{device} 停止录音（{end.strftime('%H:%M:%S')}），处理完剩余音频后关闭对话")
+    return {"ok": True}
+
+
+@app.post("/api/hold/release")
+async def hold_release(device: str):
+    """The phone no longer has the recorder (unbound, or another bound in its place): the older audio on its card will
+    not come from it, so finalization stops waiting for it now, not HOLD_MAX_S after the phone last said the hold
+    (10-07: LR-P3-116C's 261 pieces waited from 17:47 to 05:47)."""
+    if audio.held(device) is not None:
+        audio.hold(device, None)
+        log.info("%s hold let go: its phone no longer has it", device)
+        note(f"{device} 已从手机上解除，不再等它卡里的旧录音，继续定稿")
     return {"ok": True}
 
 

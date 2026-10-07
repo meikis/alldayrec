@@ -119,6 +119,9 @@ export interface DeviceStatus {
   rate: number | null;
   eta_s: number | null;
   hold?: string | null; // finals wait here for older audio the phone is still sending (#130)
+  hold_seen?: string | null; // when its phone last said the hold
+  hold_until?: string | null; // when the queue stops waiting without the phone (12 h after hold_seen)
+  recording?: boolean; // its newest audio came in the last 2 min: behind_s and latency_s are about now
   queued: number;
   latency_s: number | null;
   refine?: { at: string; ms: number; error?: string; backlog_s?: number } | null;
@@ -185,8 +188,10 @@ export interface Status {
   balance?: Balance | null; // StepFun's prepaid account (#155)
   device?: string | null;
   behind_s?: number | null;
-  queued?: number; // uploaded pieces the server has not fed yet
+  queued?: number; // uploaded pieces the server has not fed yet, all devices'
   latency_s?: number | null;
+  recording?: boolean; // some device's audio came in the last 2 min; false: behind_s is how long ago it last did
+  last_audio?: string | null; // where the newest stored audio of any device ends
   refine?: { at: string; ms: number; error?: string } | null;
   conversation?: { start: string; sentences: number } | null;
   engine?: string;
@@ -243,6 +248,12 @@ export async function post<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export const hhmm = (iso: string) => iso.slice(11, 16);
+// A hold (#130) its phone has not said for 5 min: the phone went away with older audio still on the recorder's card
+// (10-07: LR-P3-116C, unbound at 17:58); the queue waits for it until hold_until, then finalizes what it has
+export const holdLeft = (d: DeviceStatus) =>
+  d.hold && d.hold_seen && Date.now() - +new Date(d.hold_seen) > 5 * 60_000
+    ? `手机 ${hhmm(d.hold_seen)} 后没再联系，最晚 ${hhmm(d.hold_until ?? "")} 不再等`
+    : "";
 export const hhmmss = (iso: string) => iso.slice(11, 19);
 export const minutes = (c: Conversation) =>
   Math.max(1, Math.round((+new Date(c.end) - +new Date(c.start)) / 60000));

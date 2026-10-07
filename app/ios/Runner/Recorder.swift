@@ -60,6 +60,9 @@ enum Recorder {
         result(nil)
       case "nearby": result(nearby?.list() ?? [])
       case "bind":  // the recorder the person chose (address: its identifier): the link pairs with it next
+        if let old = defaults.string(forKey: "bleName"), old != a["name"] as? String {
+          defaults.removeObject(forKey: "hold:\(Ble.tag(old))")  // its backlog no longer comes from here (Dart: releaseHold)
+        }
         defaults.set(a["name"] as? String, forKey: "bleName")
         defaults.set(a["address"] as? String, forKey: "bleId")
         defaults.set(true, forKey: "bindPending")
@@ -75,6 +78,7 @@ enum Recorder {
           let name = defaults.string(forKey: "bleName")
           // first: the link must not reconnect when the recorder drops it
           for k in ["bleName", "bleId", "bleModel", "bleFw", "bindPending", "bindForce", "bleKicked"] { defaults.removeObject(forKey: k) }
+          if let name { defaults.removeObject(forKey: "hold:\(Ble.tag(name))") }  // its backlog no longer comes from here
           let forgot = link?.forgetAll() ?? false
           if let name { DeviceLog.app(Ble.tag(name), "unbind", forgot ? "解除绑定：录音设备忘掉了所有手机" : "解除绑定：录音设备没连上，只有这台手机忘掉了它") }
           DispatchQueue.main.async { result(forgot) }
