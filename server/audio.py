@@ -13,6 +13,7 @@ import io
 import logging
 import os
 import re
+import struct
 import subprocess
 import threading
 import time
@@ -42,9 +43,87 @@ def unpad(x: np.ndarray) -> np.ndarray:
     return x[AAC_DELAY:len(x) - AAC_FRAME // 2] if len(x) > AAC_DELAY + AAC_FRAME else x
 
 
-def decode(body: bytes, aac: bool = False, n: int | None = None) -> np.ndarray | None:
+def packets(ogg: bytes) -> list[bytes]:
+    """The packets of an Ogg stream (RFC 3533) in order, Opus's two header packets included."""
+    out, cur, i = [], b"", 0
+    while ogg[i:i + 4] == b"OggS" and i + 27 <= len(ogg):
+        n = ogg[i + 26]
+        j = i + 27 + n
+        for size in ogg[i + 27:j]:
+            cur += ogg[j:j + size]
+            j += size
+            if size < 255:
+                out.append(cur)
+                cur = b""
+        i = j
+    return out
+
+
+def _crc_table() -> list[int]:
+    out = []
+    for i in range(256):
+        r = i << 24
+        for _ in range(8):
+            r = (r << 1) ^ 0x04C11DB7 if r & 0x80000000 else r << 1
+        out.append(r & 0xFFFFFFFF)
+    return out
+
+
+_CRC = _crc_table()  # Ogg's CRC-32: polynomial 0x04C11DB7, not reflected, no initial value or final xor
+
+
+def ogg(audio_packets: list[bytes], frame_ms: int = 10, pre_skip: int = 0) -> bytes:
+    """Opus packets (each one frame of frame_ms) as one 16 kHz mono Ogg Opus stream (RFC 7845), a packet a page;
+    pre_skip in 48 kHz samples, decoded and dropped by the reader."""
+    pages = []
+
+    def page(packet: bytes, flags: int, granule: int):
+        lace = bytes([255] * (len(packet) // 255) + [len(packet) % 255])
+        p = bytearray(b"OggS\0" + bytes([flags]) + struct.pack("<qIII", granule, 1, len(pages), 0) + bytes([len(lace)]) + lace + packet)
+        crc = 0
+        for b in p:
+            crc = (crc << 8 & 0xFFFFFFFF) ^ _CRC[crc >> 24 ^ b]
+        struct.pack_into("<I", p, 22, crc)
+        pages.append(bytes(p))
+    page(b"OpusHead" + struct.pack("<BBHIhB", 1, 1, pre_skip, SR, 0, 0), 2, 0)
+    page(b"OpusTags" + bytes(8), 0, 0)
+    for k, p in enumerate(audio_packets):
+        page(p, 4 if k == len(audio_packets) - 1 else 0, (k + 1) * frame_ms * 48)
+    return b"".join(pages)
+
+
+PREROLL = 8  # packets (80 ms, libopus's advice) of the piece before that a recorder piece's decoder hears first
+
+
+def primed(prev: bytes, body: bytes) -> bytes:
+    """body, an Ogg Opus piece of a recorder, with the last PREROLL packets of the piece it goes on from (`prev`) put
+    ahead of its own and skipped (pre-skip): the decoder then has the state the board's encoder had. A recorder's pieces
+    are slices of one running encoder (CELT, 10 ms frames, pre-skip 0: the app's Store.oggOpus, lr_sync); a fresh
+    decoder starting inside it put out the piece's first 10-40 ms up to 26 dB too loud, a click at every join, each
+    second while the app is in front (10-08). Anything else (an iPhone's own microphone: SILK, 20 ms; a phone that
+    starts each piece anew) is body unchanged."""
+    ps, prev = packets(body), packets(prev)[2:][-PREROLL:]
+    celt10 = lambda p: len(p) > 0 and p[0] >> 3 >= 16 and (p[0] >> 3) & 3 == 2 and p[0] & 3 == 0  # TOC: CELT, one 10 ms frame
+    if (len(ps) < 3 or not ps[0].startswith(b"OpusHead") or struct.unpack_from("<H", ps[0], 10)[0] != 0
+            or len(prev) < PREROLL or not all(map(celt10, prev + ps[2:3]))):
+        return body
+    return ogg(prev + ps[2:], 10, PREROLL * 10 * 48)
+
+
+def before(device: str, start_ms: int) -> bytes | None:
+    """The stored Ogg piece of `device` that ends where start_ms begins (within a frame), as uploaded; None after a gap."""
+    p = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms < ? ORDER BY start_ms DESC LIMIT 1", (device, start_ms)).fetchone()
+    if p is None or not p["path"].endswith(".ogg") or abs(p["start_ms"] + p["seconds"] * 1000 - start_ms) >= 10:
+        return None
+    return read(p)
+
+
+def decode(body: bytes, aac: bool = False, n: int | None = None, prev: bytes | None = None) -> np.ndarray | None:
     """One piece's bytes as 16 kHz mono int16; None when ffmpeg cannot read them. aac: an ADTS piece, cut to the n
-    samples its client wrote (exact), or unpadded when it did not say (older apps, a piece cut short by a kill)."""
+    samples its client wrote (exact), or unpadded when it did not say (older apps, a piece cut short by a kill).
+    prev: the piece this one goes on from (before()), for a recorder's decoder to start where it left off (primed)."""
+    if prev is not None:
+        body = primed(prev, body)
     out = subprocess.run(["ffmpeg", "-v", "error", "-i", "pipe:0", "-f", "s16le", "-ac", "1", "-ar", str(SR), "pipe:1"], input=body, capture_output=True)
     if out.returncode or len(out.stdout) < 2:  # an Opus piece can be one 20 ms packet (the last one of a run)
         return None
@@ -105,7 +184,7 @@ def save(device: str, start_ms: int, body: bytes, content_type: str, n: int | No
     if r := kept():
         return r[0]
     ext = {"audio/ogg": "ogg", "audio/webm": "webm", "audio/aac": "aac"}.get(content_type.split(";")[0], "bin")
-    x = decode(body, aac=ext == "aac", n=n)
+    x = decode(body, aac=ext == "aac", n=n, prev=before(device, start_ms) if ext == "ogg" else None)
     if x is None:  # the client drops it on the 400 that follows: its bytes stay here, for a look later (#155)
         f = DIR / "rejected" / re.sub(r"[^\w.-]", "_", device) / f"{start_ms}.{ext}"
         f.parent.mkdir(parents=True, exist_ok=True)
@@ -123,12 +202,17 @@ def save(device: str, start_ms: int, body: bytes, content_type: str, n: int | No
     return len(x) / SR
 
 
-def samples(p) -> np.ndarray | None:
-    """A pieces row's audio, decoded."""
+def read(p) -> bytes:
+    """A pieces row's bytes, as uploaded."""
     with open(DIR / p["path"], "rb") as f:
         f.seek(p["pos"])
-        body = f.read(p["size"])
-    return decode(body, aac=p["path"].endswith(".aac"), n=p["n"])
+        return f.read(p["size"])
+
+
+def samples(p) -> np.ndarray | None:
+    """A pieces row's audio, decoded, a recorder's going on from the piece before it (decode, primed)."""
+    return decode(read(p), aac=p["path"].endswith(".aac"), n=p["n"],
+                  prev=before(p["device"], p["start_ms"]) if p["path"].endswith(".ogg") else None)
 
 
 def queued(device: str) -> int:
