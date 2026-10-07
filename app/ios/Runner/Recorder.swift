@@ -95,8 +95,13 @@ enum Recorder {
                                 linked: slicer != nil || link != nil, sha256: Dfu.sha256(zip), expected: a["sha256"] as? String) {
           return result(FlutterError(code: no.0, message: no.1, details: nil))
         }
+        Dfu.log = DfuLog(device: Ble.tag(defaults.string(forKey: "bleName") ?? id!), from: defaults.string(forKey: "bleFw"),
+                         to: a["version"] as? String ?? "?", bytes: zip.count, sha256: a["sha256"] as? String ?? "", battery: a["battery"] as? Int)
         do { try Dfu.start(UUID(uuidString: id!)!, zip); result(nil) }  // refusal() checked the identifier
-        catch { result(FlutterError(code: "zip", message: "固件包打不开：\(error)", details: nil)) }
+        catch {
+          Dfu.log?.fail(nil, "固件包打不开：\(error)")
+          result(FlutterError(code: "zip", message: "固件包打不开：\(error)", details: nil))
+        }
       default: result(FlutterMethodNotImplemented)
       }
     }

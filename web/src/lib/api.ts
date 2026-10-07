@@ -150,6 +150,21 @@ export interface DeviceLog {
   status: RecorderStatus[];
 }
 
+// GET /api/upgrades: a device's firmware updates, an app's "dfu" events joined with the recorder's DFU and BOOT records
+export interface Upgrade {
+  at: string; // begun: the app's start, else the recorder's DFU
+  app: boolean; // an app logged it (DfuLog); else only the recorder's records tell (lr_dfu.py, apps before 1.4.1)
+  from: string | null; // the app's revisions, else the BOOT records' firmware hashes
+  to: string | null;
+  ms: number | null; // to done or fail, else to the recorder's next BOOT
+  ok: boolean | null; // null: no end and no BOOT yet; with no app, back on the same firmware (why says so)
+  why: string | null;
+  via?: string | null; // the bootloader the recorder went to: ota (Bluetooth), usb (UF2, lr.sh flash)
+  stage?: string; // where a failure was: start (before the bootloader), boot (in it), send (with pct)
+  pct?: number;
+  back_ms?: number; // the end to the app's first status of the recorder
+}
+
 export interface Status {
   device?: string | null;
   behind_s?: number | null;

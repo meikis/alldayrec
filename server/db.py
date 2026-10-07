@@ -326,6 +326,55 @@ def device_log(device: str, lo: str, hi: str | None = None) -> list[dict]:
     return [{**dict(r), "data": json.loads(r["data"])} for r in conn().execute(q, {"d": device, "lo": lo, "hi": hi})]
 
 
+def upgrades(device: str, lo: str) -> list[dict]:
+    """The firmware updates begun since lo, oldest first: an app's "dfu" events (DfuLog in the apps: start, boot, send,
+    progress, done or fail, back) joined with the recorder's own DFU record (lr_log.h 21) and the BOOT records around it
+    (b: the firmware's hash), or a DFU no app logged (lr_dfu.py, lr.sh flash, apps before 1.4.1). from/to: the app's
+    revisions, else the BOOTs' hashes; ms: start to done or fail, else to the next BOOT; via: the bootloader the recorder
+    went to (ota, usb); ok None: no end and no BOOT yet, or with no app, a BOOT on the same firmware (a failed update or
+    the same one again: the recorder's records cannot tell)."""
+    def boot(seq, before):  # the recorder's BOOT before or after its record seq: when, and the firmware's hash
+        r = conn().execute(f"""SELECT at, json_extract(data, '$.b') FROM device_log WHERE device = ? AND src = 'rec'
+                                 AND json_extract(data, '$.code') & 127 = 1 AND seq {'<' if before else '>'} ?
+                               ORDER BY seq {'DESC' if before else ''} LIMIT 1""", (device, seq)).fetchone()
+        return r and (r[0], f"{r[1] & 0xFFFFFFF:07x}{'+' if r[1] >> 28 & 1 else ''}" if r[1] & 0xFFFFFFF else None)
+    ms = lambda a, b: round((dt.datetime.fromisoformat(b) - dt.datetime.fromisoformat(a)).total_seconds() * 1000)
+    rows = conn().execute("""SELECT src, seq, at, data FROM device_log WHERE device = ? AND at >= ?
+                               AND (src = 'rec' AND json_extract(data, '$.code') & 127 = 21
+                                    OR src != 'rec' AND json_extract(data, '$.kind') = 'dfu') ORDER BY at, seq""", (device, lo))
+    out = []
+    for src, seq, at, data in rows:
+        d = json.loads(data)
+        if src == "rec":  # the update an app began up to 2 min before, else one no app logged
+            u = next((u for u in reversed(out) if u["app"] and "dfu" not in u and ms(u["at"], at) < 120_000), None)
+            if not u:
+                out.append(u := {"at": at, "app": False, "from": None, "to": None, "ms": None, "ok": None, "why": None})
+            old, new = boot(seq, True), boot(seq, False)
+            u.update({"dfu": at, "via": {0xA8: "ota", 0x57: "usb"}.get(d["x"]), "boot": new and new[0],
+                      "from": u["from"] or old and old[1], "to": u["to"] or new and new[1]})
+            if new and new[0] and u["ms"] is None:  # a BOOT no phone could date: no time
+                u["ms"] = ms(u["at"], new[0])
+            if new and u["ok"] is None and u["app"]:  # no word from the app yet: the revision it booted
+                u["ok"] = new[1] == (u["to"] or "").rsplit("-", 1)[-1]
+            elif new and not u["app"] and new[1] != (old and old[1]):
+                u["ok"] = True
+            elif new and not u["app"]:
+                u["why"] = "重启后版本没变"
+        elif d.get("step") == "start":
+            out.append({"at": at, "app": True, "src": src, "from": d.get("from"), "to": d.get("to"), "ms": None, "ok": None,
+                        "why": None})
+        elif u := next((u for u in reversed(out) if u.get("src") == src), None):  # none: begun before lo
+            if d.get("step") in ("done", "fail"):
+                u.update(ms=d.get("ms"), ok=d["step"] == "done")
+            if d.get("step") == "fail":
+                u.update(why=d.get("error"), stage=d.get("stage"), pct=d.get("pct"))
+            if d.get("step") == "back":
+                u.update(back_ms=d.get("ms"), fw=d.get("fw"))
+                if u["ok"] and not d.get("ok"):
+                    u.update(ok=False, why=f"升级后固件是 {d.get('fw')}，不是 {u['to']}")
+    return out
+
+
 def add_device_status(device: str, at: str, body: dict):
     conn().execute("INSERT INTO device_status VALUES (?, ?, ?)", (device, at, json.dumps(body, ensure_ascii=False)))
 

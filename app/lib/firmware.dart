@@ -52,15 +52,17 @@ class _FirmwareTileState extends State<FirmwareTile> {
   }
 
   Future<void> _update() async {
-    final m = latest!;
+    final m = latest!, battery = widget.battery;  // as the page showed it: no battery once the link is down
     if (await _confirm(m) != true) return;
     setState(() { busy = true; note = '正在下载固件'; });
     try {
       final res = await _get('/api/firmware/${m['model']}/${m['version']}.zip');
       if (res.statusCode != 200) throw 'HTTP ${res.statusCode}';
       note = null;
-      // the native side checks again: the model the recorder said it is, and the package's sha256
-      await Recorder.withoutLink(() => _ch.invokeMethod('dfu', {'model': m['model'], 'zip': res.bodyBytes, 'sha256': m['sha256']}));
+      // the native side checks again: the model the recorder said it is, and the package's sha256; version and battery
+      // go into the device log (DfuLog)
+      await Recorder.withoutLink(() => _ch.invokeMethod('dfu',
+          {'model': m['model'], 'zip': res.bodyBytes, 'sha256': m['sha256'], 'version': m['version'], 'battery': battery}));
     } on PlatformException catch (e) {
       note = e.message;
     } catch (e) {

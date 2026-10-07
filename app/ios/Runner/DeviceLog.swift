@@ -95,8 +95,9 @@ enum DeviceLog {
   // The app's events
   //
 
-  /// One of the app's events, filed under the device it is about (a recorder's name, or the phone's for its upload).
-  static func app(_ device: String, _ kind: String, _ text: String, level: String? = nil) {
+  /// One of the app's events, filed under the device it is about (a recorder's name, or the phone's for its upload);
+  /// `fields` go into its data beside kind and text, for the server to read.
+  static func app(_ device: String, _ kind: String, _ text: String, level: String? = nil, fields: [String: Any] = [:]) {
     lock.lock()
     guard file != nil else { lock.unlock(); return }
     let now = Int64(Date().timeIntervalSince1970 * 1000)
@@ -104,7 +105,7 @@ enum DeviceLog {
     let seq = lastSeq
     prefs.set(seq, forKey: "logSeq")
     lock.unlock()
-    var data: [String: Any] = ["kind": kind, "text": text]
+    var data = fields.merging(["kind": kind, "text": text]) { $1 }
     if let level { data["level"] = level }
     add([event(device, src, seq, now, data)])
   }

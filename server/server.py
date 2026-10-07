@@ -1179,6 +1179,13 @@ async def device_log(device: str, since: str, until: str | None = None):
     return {"events": db.device_log(device, since, until), "status": db.device_statuses(device, since, until)}
 
 
+@app.get("/api/upgrades")
+async def upgrades(device: str, since: str):
+    """A device's firmware updates begun since `since`, oldest first: what its app logged joined with the recorder's DFU
+    and BOOT records (db.upgrades)."""
+    return db.upgrades(device, since)
+
+
 @app.get("/api/client-config")
 async def client_config():
     """What the apps ask on start and while recording: piece lengths per app state (the server changes them without

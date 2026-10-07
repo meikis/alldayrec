@@ -1,8 +1,8 @@
 // The record stream as the phone takes it (Runner/Store.swift), the cases of the Android app's StoreTest.kt and the data
 // of firmware/devkit/lr_sync.py's selftest: mirror (LIVE with holes READ again), pieces dated by the nearest 'T', frames
 // held for a boot without one, closed files finished and deletable once their pieces are uploaded; the recorder's
-// event log (Runner/DeviceLog.swift, DeviceLogTest.kt's case); what a firmware update checks first (Runner/Dfu.swift);
-// and listening on the phone (Runner/Listen.swift). Foundation only, so CI runs it on Linux:
+// event log (Runner/DeviceLog.swift, DeviceLogTest.kt's case); what a firmware update checks first and leaves in the
+// device log (Runner/Dfu.swift); and listening on the phone (Runner/Listen.swift). Foundation only, so CI runs it on Linux:
 //   cd app/ios && swiftc -o /tmp/storecheck Runner/Store.swift Runner/DeviceLog.swift Runner/Dfu.swift Runner/Listen.swift StoreCheck/main.swift && /tmp/storecheck
 import Foundation
 #if canImport(AVFoundation)
@@ -387,6 +387,70 @@ do {
   Dfu.busy = true
   check(no(), "busy", "an update under way")
   Dfu.busy = false
+}
+
+// what an update leaves in the device log (DfuLog, DfuLogTest.kt's case): its steps with the fields the server's
+// upgrades() reads, a line every 25 %, the stage a failure got to, and the revision the recorder came back on
+do {
+  var got: [(text: String, level: String?, f: [String: Any])] = []
+  let out: DfuLog.Out = { d, t, l, f in check(d, "LR-P3-116C", "filed under the recorder"); got.append((t, l, f)) }
+  let old = "20261006.120000-1751f88", new = "20261007.023223-c95516b", sha = "858b5aaa" + String(repeating: "0", count: 56)
+  let ok = DfuLog(device: "LR-P3-116C", from: old, to: new, bytes: 343133, sha256: sha, battery: 83, out: out)
+  ok.t0 = Date(timeIntervalSinceNow: -8.5)
+  ok.reached("boot")
+  ok.t0 = Date(timeIntervalSinceNow: -21)
+  ok.reached("send")
+  for p in [0, 10, 24, 25, 26, 49, 51, 76, 99, 100] { ok.progress(p, kbps: 1.94) }
+  ok.t0 = Date(timeIntervalSinceNow: -192.4)
+  ok.done()
+  ok.ended = Date(timeIntervalSinceNow: -28.2)
+  ok.back(new)
+  check(got.map { $0.f["step"] as! String }, ["start", "boot", "send", "progress", "progress", "progress", "done", "back"], "steps")
+  check(got.map(\.text), ["开始升级 \(old) → \(new)，335 KB，sha 858b5aaa，电量 83%", "进入升级模式，开始后 8 秒", "开始传输，开始后 21 秒",
+                          "传输 25%，平均 1.9 KB/s", "传输 51%，平均 1.9 KB/s", "传输 76%，平均 1.9 KB/s", "升级完成，用时 3 分 12 秒",
+                          "升级后连回，用时 28 秒，固件 \(new)（目标版本）"], "texts")
+  check(got.map(\.level), Array(repeating: nil, count: 8), "no warnings")
+  let start = got[0].f
+  check([start["from"], start["to"], start["sha"]].map { $0 as? String }, [old, new, "858b5aaa"], "start: from, to, sha")
+  check([start["bytes"], start["battery"], start["ms"]].map { $0 as? Int }, [343133, 83, 0], "start: bytes, battery")
+  check([got[3].f["pct"] as? Int, got[4].f["pct"] as? Int], [25, 51], "progress: pct")
+  check(got[3].f["kbps"] as? Double, 1.9, "progress: KB/s")
+  check((got[6].f["ms"] as! Int) / 100, 1924, "done: ms since the start")
+  check((got[7].f["ms"] as! Int) / 100, 282, "back: ms since the end")
+  check(got[7].f["ok"] as? Bool, true, "back: on the revision it was sent")
+
+  got = []
+  let bad = DfuLog(device: "LR-P3-116C", from: new, to: old, bytes: 343133, sha256: sha, battery: nil, out: out)
+  bad.reached("boot")
+  bad.reached("send")
+  bad.progress(40, kbps: 2)
+  bad.fail(202, "Device disconnected")
+  bad.back(new)
+  check(got[0].text, "开始升级 \(new) → \(old)，335 KB，sha 858b5aaa，电量 未知", "no battery read")
+  check(got[0].f["battery"] is NSNull, true, "no battery: null")
+  check(got[4].text, "升级失败（传输到 40%）：Device disconnected（错误 202）", "fail: where and why")
+  check(got[4].level, "error", "fail: an error")
+  check([got[4].f["stage"] as? String, got[4].f["error"] as? String], ["send", "Device disconnected"], "fail: stage, error")
+  check([got[4].f["pct"] as? Int, got[4].f["code"] as? Int], [40, 202], "fail: pct, code")
+  check(got[5].text, "升级失败后连回，用时 0 秒，固件 \(new)，不是目标版本", "back after a failure: the old revision")
+  check([got[5].level, got[5].f["ok"] as? Bool == false ? "not ok" : nil], [nil, "not ok"], "back after a failure: expected")
+
+  got = []
+  DfuLog(device: "LR-P3-116C", from: nil, to: new, bytes: 0, sha256: sha, battery: 50, out: out).fail(nil, "连不上录音设备")
+  check(got[1].text, "升级失败（进入升级模式前）：连不上录音设备", "fail before the bootloader, the app's own reason")
+  check([got[0].f["from"] is NSNull, got[1].f["code"] is NSNull], [true, true], "no revision read, no library code: null")
+  let done = DfuLog(device: "LR-P3-116C", from: old, to: new, bytes: 0, sha256: sha, battery: 50, out: out)
+  done.done()
+  done.back(old)
+  check([got.last!.text, got.last!.level], ["升级后连回，用时 0 秒，固件 \(old)，不是目标版本", "warn"], "done, yet back on the old revision")
+
+  // through the real queue: the fields sit in the event's data beside kind and text
+  let dir = tmp()
+  DeviceLog.start(dir: dir, prefs: UserDefaults(suiteName: "storecheck-\(UUID().uuidString)")!)
+  _ = DfuLog(device: "LR-P3-116C", from: old, to: new, bytes: 343133, sha256: sha, battery: 83)
+  let line = try! String(contentsOf: dir.appendingPathComponent("devlog.jsonl"), encoding: .utf8)
+  let e = try! JSONSerialization.jsonObject(with: Data(line.utf8)) as! [String: Any], data = e["data"] as! [String: Any]
+  check([e["device"], data["kind"], data["step"], data["to"]].map { $0 as? String }, ["LR-P3-116C", "dfu", "start", new], "queued event")
 }
 
 print("storecheck ok")

@@ -1,5 +1,7 @@
 // The recorder's event log (firmware/devkit/src/lr_log.h), put in words as lr_sync.py's `log` does; kept in step with
 // lr_log.h by hand: a code it does not know shows its raw arguments.
+import type { Upgrade } from "./api";
+
 export interface Rec {
   boot: number;
   t: number; // the codec frame, or uptime ms when code has UPTIME
@@ -220,3 +222,27 @@ export function describe(r: Rec): Said {
 
 /** The battery mV a BOOT or HEARTBEAT record carries (0: not read). */
 export const millivolts = (r: Rec) => ([BOOT, HEARTBEAT].includes(r.code & ~UPTIME) ? r.x * 20 : 0);
+
+const span = (ms: number) =>
+  ms < 60_000
+    ? `${Math.floor(ms / 1000)} 秒`
+    : `${Math.floor(ms / 60_000)} 分 ${Math.floor(ms / 1000) % 60} 秒`;
+const hash = (v: string | null) => v?.split("-").pop() ?? "?"; // revisions are YYYYMMDD.HHMMSS-<hash>
+
+/** A firmware update in a line: 1751f88 → c95516b，用时 3 分 11 秒，成功. */
+export function upgradeText(u: Upgrade): string {
+  const where = { start: "进入升级模式前", boot: "传输前", send: `传输到 ${u.pct}%` }[
+    u.stage ?? ""
+  ];
+  const end =
+    u.ok == null
+      ? `，${u.why ?? "还没有结果"}`
+      : u.ok
+        ? "，成功"
+        : `，失败${where ? `（${where}）` : ""}${u.why ? "：" + u.why : ""}`;
+  return (
+    `${hash(u.from)} → ${hash(u.to)}${u.via === "usb" ? "（USB）" : ""}` +
+    `${u.ms == null ? "" : "，用时 " + span(u.ms)}${end}` +
+    (u.back_ms == null ? "" : `，${span(u.back_ms)}后连回`)
+  );
+}

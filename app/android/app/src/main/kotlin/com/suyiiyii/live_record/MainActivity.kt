@@ -149,6 +149,8 @@ class MainActivity : FlutterActivity() {
                     else if (sha != call.argument<String>("sha256")) result.error("sha256", "固件下载不完整，再试一次", null)
                     else {
                         val f = File(cacheDir, "$model.zip").apply { writeBytes(zip) }
+                        Dfu.log = DfuLog(Ble.tag(p.getString("bleName", null) ?: model), p.getString("bleFw", null),
+                                         call.argument<String>("version") ?: "?", zip.size, sha, call.argument<Int>("battery"))
                         Dfu.start(this, addr, p.getString("bleName", null) ?: model, f); result.success(null)
                     }
                 }

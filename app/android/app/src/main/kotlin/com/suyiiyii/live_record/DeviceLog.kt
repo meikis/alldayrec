@@ -118,12 +118,13 @@ object DeviceLog {
     // The app's events
     //
 
-    /** One of the app's events, filed under the device it is about (a recorder's name, or the phone's for its upload). */
-    fun app(device: String, kind: String, text: String, level: String? = null) {
+    /** One of the app's events, filed under the device it is about (a recorder's name, or the phone's for its upload);
+     *  `fields` go into its data beside kind and text, for the server to read. */
+    fun app(device: String, kind: String, text: String, level: String? = null, fields: Map<String, Any?> = emptyMap()) {
         if (!::file.isInitialized) return
         val now = System.currentTimeMillis()
         val seq = synchronized(lock) { maxOf(now, lastSeq + 1).also { lastSeq = it; prefs.edit().putLong("logSeq", it).apply() } }
-        add(listOf(event(device, src, seq, now, JSONObject().put("kind", kind).put("text", text).apply { if (level != null) put("level", level) })))
+        add(listOf(event(device, src, seq, now, JSONObject(fields).put("kind", kind).put("text", text).apply { if (level != null) put("level", level) })))
     }
 
     /** A step of connecting (BleLink.step), kept for the connect event. */

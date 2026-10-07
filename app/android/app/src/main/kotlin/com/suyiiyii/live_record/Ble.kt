@@ -481,6 +481,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             h[k] = hw[k] ?: try { String(read(g, Ble.DIS, c)) } catch (e: Exception) { null }
         hw = h
         prefs.edit().putString("bleModel", h["model"] as String?).putString("bleFw", h["fw"] as String?).apply()  // for an update later
+        Dfu.back(h["fw"] as String?)  // the first status after an update, for its log
         report(Ble.tag(name), h - "name")
         return s
     }

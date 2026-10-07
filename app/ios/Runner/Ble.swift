@@ -532,6 +532,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     hw = h
     prefs.set(h["model"] as? String, forKey: "bleModel")  // for the page while not connected
     prefs.set(h["fw"] as? String, forKey: "bleFw")
+    DispatchQueue.main.async { Dfu.back(h["fw"] as? String) }  // the first status after an update, for its log
     report(Ble.tag(name), h.filter { $0.key != "name" })
     return s
   }

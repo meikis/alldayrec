@@ -2,7 +2,7 @@
 import { computed, ref, watch } from "vue";
 import AppHeader from "../components/AppHeader.vue";
 import LineChart from "../components/LineChart.vue";
-import { get, type DeviceEvent, type DeviceLog } from "../lib/api";
+import { get, type DeviceEvent, type DeviceLog, type Upgrade } from "../lib/api";
 import {
   BOOT,
   DFU,
@@ -11,12 +11,13 @@ import {
   UPTIME,
   describe,
   millivolts,
+  upgradeText,
   type Rec,
   type Said,
 } from "../lib/recorderLog";
 
 // One device's history: its battery (the mV its recorder logs every 10 min, the % its phone reads every minute) and
-// what happened, the recorder's own event log and the app's, newest first.
+// what happened, the recorder's own event log and the app's, newest first, with each firmware update in a line.
 const props = defineProps<{ name: string }>();
 const RANGES: [string, number][] = [
   ["6 小时", 6],
@@ -27,6 +28,7 @@ const RANGES: [string, number][] = [
 const hours = ref(24);
 const all = ref(false); // routine records too (heartbeats, connection parameters, ...)
 const log = ref<DeviceLog | null>(null);
+const ups = ref<Upgrade[]>([]);
 const lo = ref(0),
   hi = ref(0);
 const local = (t: number) =>
@@ -37,10 +39,11 @@ watch(
     document.title = `${props.name} · 设备日志`;
     hi.value = Date.now();
     lo.value = hi.value - hours.value * 3600_000;
-    log.value = await get<DeviceLog>("/api/device-log", {
-      device: props.name,
-      since: local(lo.value),
-    });
+    const q = { device: props.name, since: local(lo.value) };
+    [log.value, ups.value] = await Promise.all([
+      get<DeviceLog>("/api/device-log", q),
+      get<Upgrade[]>("/api/upgrades", q),
+    ]);
   },
   { immediate: true },
 );
@@ -68,8 +71,19 @@ const rows = computed(() => {
   let last = "";
   for (const e of ev.filter((e) => e.src === "rec").sort((a, b) => a.seq - b.seq))
     key.set(e, (last = e.at ?? last));
+  // an update's line just above its start
+  const up = ups.value.map((u, i) => ({
+    e: { src: "upgrade", seq: Number.MAX_SAFE_INTEGER - i, at: u.at, data: {} },
+    key: u.at,
+    name: "固件升级",
+    label: "",
+    text: upgradeText(u),
+    level: (u.ok ? "" : u.ok == null ? "warn" : "bad") as Said["level"],
+    routine: false,
+  }));
   return ev
     .map((e) => ({ e, key: key.get(e) ?? e.at ?? "", ...said(e) }))
+    .concat(up)
     .filter((r) => all.value || !r.routine)
     .sort((a, b) => (a.key !== b.key ? (a.key < b.key ? 1 : -1) : b.e.seq - a.e.seq));
 });
@@ -160,7 +174,9 @@ const when = (at: string) => (hours.value >= 24 ? `${at.slice(5, 10)} ` : "") + 
         </div>
         <div v-for="r in rows" :key="r.e.src + r.e.seq" :class="['ev', r.level]">
           <span class="at">{{ r.e.at ? when(r.e.at) : "时间不明" }}</span>
-          <span class="src">{{ r.e.src === "rec" ? "设备" : "App" }}</span>
+          <span class="src">{{
+            r.e.src === "rec" ? "设备" : r.e.src === "upgrade" ? "汇总" : "App"
+          }}</span>
           <span
             ><b>{{ r.label || r.name }}</b> <span class="detail">{{ r.text }}</span></span
           >

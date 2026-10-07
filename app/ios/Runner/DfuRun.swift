@@ -31,7 +31,10 @@ extension Dfu {
     run = nil
   }
 
-  fileprivate static func failed(_ why: String) { end("升级失败：\(why)（录音设备还在就再试一次，不见了就插 USB 用 lr.sh flash 刷）") }
+  fileprivate static func failed(_ why: String, code: Int? = nil) {
+    log?.fail(code, why)
+    end("升级失败：\(why)（录音设备还在就再试一次，不见了就插 USB 用 lr.sh flash 刷）")
+  }
 }
 
 /// One update, on the main thread: connect to the recorder (iOS encrypts with the bond: the control point takes only a
@@ -128,19 +131,21 @@ private final class DfuRun: NSObject, CBCentralManagerDelegate, CBPeripheralDele
 
   func dfuStateDidChange(to s: DFUState) {
     switch s {
-    case .starting: Dfu.state = "开始升级"
-    case .completed: Dfu.end("升级完成，录音设备已重启")  // no .aborted: nothing here aborts (Android's notification can)
+    case .starting: Dfu.state = "开始升级"; Dfu.log?.reached("boot")
+    case .uploading: Dfu.log?.reached("send")
+    case .completed: Dfu.log?.done(); Dfu.end("升级完成，录音设备已重启")  // no .aborted: nothing here aborts (Android's notification can)
     default: break
     }
   }
 
   func dfuError(_ e: DFUError, didOccurWithMessage m: String) {
     NSLog("live-record dfu error %d: %@", e.rawValue, m)
-    Dfu.failed(m)
+    Dfu.failed(m, code: e.rawValue)
   }
 
   func dfuProgressDidChange(for part: Int, outOf totalParts: Int, to progress: Int, currentSpeedBytesPerSecond: Double, avgSpeedBytesPerSecond: Double) {
     Dfu.state = String(format: "升级中 %d%% · %.1f KB/s", progress, avgSpeedBytesPerSecond / 1000)  // Android's B/ms
+    Dfu.log?.progress(progress, kbps: avgSpeedBytesPerSecond / 1000)
   }
 
   func logWith(_ level: LogLevel, message: String) {

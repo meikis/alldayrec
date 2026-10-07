@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import AppHeader from "../components/AppHeader.vue";
 import Listen from "../components/Listen.vue";
-import { get, type DeviceStatus, type RecorderStatus, type Status } from "../lib/api";
+import { get, type DeviceStatus, type RecorderStatus, type Status, type Upgrade } from "../lib/api";
+import { upgradeText } from "../lib/recorderLog";
 import { useSocket } from "../lib/socket";
 
 // What the server is doing per device: how far its audio has arrived, how far it is finalized, what is left and
@@ -20,6 +21,16 @@ const devices = computed(() =>
   [...(status.value?.devices ?? [])].sort((a, b) =>
     (a.received_to ?? "") < (b.received_to ?? "") ? 1 : -1,
   ),
+);
+// each device's last firmware update in 30 days, looked up when the devices change
+const ups = ref<Record<string, Upgrade | undefined>>({});
+watch(
+  () => devices.value.map((d) => d.device).join("\n"),
+  async (names) => {
+    const since = new Date(Date.now() - 30 * 86400_000).toISOString().slice(0, 10);
+    for (const device of names ? names.split("\n") : [])
+      ups.value[device] = (await get<Upgrade[]>("/api/upgrades", { device, since })).at(-1);
+  },
 );
 const at = (iso: string | null) => (iso ? `${iso.slice(5, 10)} ${iso.slice(11, 16)}` : "—");
 function span(s: number) {
@@ -90,6 +101,12 @@ const eta = (d: DeviceStatus) => {
           <span>电量</span><span>{{ d.hw.battery != null ? d.hw.battery + "%" : "—" }}</span>
           <span>存储卡</span><span :class="{ bad: d.hw.store }">{{ card(d.hw) }}</span>
           <span>上报于</span><span>{{ at(d.hw.at) }}</span>
+        </template>
+        <template v-if="ups[d.device]">
+          <span>最近升级</span
+          ><span :class="{ bad: ups[d.device]!.ok === false }"
+            >{{ at(ups[d.device]!.at) }} {{ upgradeText(ups[d.device]!) }}</span
+          >
         </template>
       </div>
       <Listen class="listen" :device="d.device" />
