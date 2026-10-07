@@ -103,7 +103,7 @@ def analyze(state: dict, rows: list[dict]) -> dict:
     if not fresh:
         return state
     msg = {"role": "user", "content": text}
-    res, raw = complete(state["messages"] + [msg], timeout=120)
+    res, raw = complete(state["messages"] + [msg], timeout=120, kind="live")
     topics, next_id = apply(state, res.get("ops"), rows, fresh)
     reply = {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}
     return {**state, "topics": topics, "next_id": next_id, "fed_to": fresh[-1]["start"],
@@ -125,7 +125,8 @@ def final_turn(state: dict, rows: list[dict]) -> str:
 def final(state: dict, rows: list[dict], known_tags: list[str], start: str) -> tuple[dict, dict]:
     """The closing turn: final_turn, then the final summary in summary.SYSTEM's format. start: the closed conversation's
     (due dates count from it; the draft layer may have started the open one on the other side of midnight)."""
-    return complete(state["messages"] + [{"role": "user", "content": f"{final_turn(state, rows)}\n\n{FINAL}{instructions(known_tags, start)}"}])
+    return complete(state["messages"] + [{"role": "user", "content": f"{final_turn(state, rows)}\n\n{FINAL}{instructions(known_tags, start)}"}],
+                    kind="live")
 
 
 if __name__ == "__main__":

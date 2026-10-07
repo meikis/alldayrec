@@ -13,9 +13,17 @@ import urllib.request
 import numpy as np
 
 URL = os.environ.get("STEPFUN_SSE_URL") or "https://api.stepfun.com/v1/audio/asr/sse"  # pay-as-you-go; /step_plan/v1/... is the Plan's
+ACCOUNT = "https://api.stepfun.com/v1/accounts"  # the pay-as-you-go account the key draws on (#155)
 GAP_MS = 600     # a pause this long between characters ends a sentence (#96)
 REACH_MS = 1000  # a character this close to a file sentence joins it (the rule of replay_case.words_to_turns)
 END = "。？！?!"   # ... and these end one
+
+
+def balance() -> float:
+    """The pay-as-you-go balance, CNY."""
+    req = urllib.request.Request(ACCOUNT, headers={"Authorization": f"Bearer {os.environ['STEPFUN_API_KEY']}", "User-Agent": "curl/8"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return float(json.load(r)["balance"])
 
 
 def sse(x: np.ndarray, on_sentence=None) -> list[dict]:

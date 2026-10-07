@@ -188,13 +188,13 @@ def run_tool(name: str, args: str) -> str:
 def call(msgs: list[dict], **extra) -> dict:
     """summary.call, once more after a 429 (the relay's accounts rate-limit for a while): Retry-After seconds, at most 30."""
     try:
-        return summary.call(msgs, timeout=120, **extra)
+        return summary.call(msgs, timeout=120, kind="ask", **extra)
     except urllib.error.HTTPError as e:
         if e.code != 429:
             raise
         wait = (e.headers or {}).get("Retry-After") or ""
         time.sleep(min(float(wait), 30) if wait.replace(".", "", 1).isdigit() else 5)
-        return summary.call(msgs, timeout=120, **extra)
+        return summary.call(msgs, timeout=120, kind="ask", **extra)
 
 
 CITE = ("上面的回答没有用 [对话 id] 标出处。内容不变，在结论后面标上出处，id 只用前面资料和工具结果里出现过的；"

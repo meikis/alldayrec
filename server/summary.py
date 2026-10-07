@@ -7,7 +7,10 @@ A conversation with less than MIN_SPEECH_S of speech gets no call: its title is 
 import datetime as dt
 import json
 import os
+import time
 import urllib.request
+
+import db
 
 MIN_SPEECH_S = 60
 PROMPT_VERSION = 8  # 2: tags, 3: people, 4: speech to AI told apart from speech to people, 5: media played aloud, 6: no "there was none" lines, fewer people,
@@ -46,18 +49,29 @@ def transcript(rows: list[dict]) -> str:
     return "\n".join(f'[{r["start"][11:19]}] {r.get("speaker") or "S?"}: {r["text"]}' for r in rows if r.get("text"))
 
 
-def call(messages: list[dict], timeout: int = 300, **extra) -> dict:
-    """One chat call, extra fields as they are (tools, response_format): the raw response; raises on HTTP errors."""
+def call(messages: list[dict], timeout: int = 300, kind: str = "summary", **extra) -> dict:
+    """One chat call, extra fields as they are (tools, response_format): the raw response; raises on HTTP errors. Kept
+    in the calls table as `kind` (summary, hints, profile, recap, live, ask): time, tokens, the error, never the text."""
     req = {"model": os.environ["LLM_MODEL"], "messages": messages, **extra}
-    r = urllib.request.urlopen(urllib.request.Request(
-        os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions", json.dumps(req).encode(),
-        {"Authorization": f'Bearer {os.environ["LLM_API_KEY"]}', "Content-Type": "application/json"}), timeout=timeout)
-    return json.load(r)
+    t, usage, err = time.perf_counter(), {}, None
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(
+            os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions", json.dumps(req).encode(),
+            {"Authorization": f'Bearer {os.environ["LLM_API_KEY"]}', "Content-Type": "application/json"}), timeout=timeout)
+        out = json.load(r)
+        usage = out.get("usage") or {}
+        return out
+    except Exception as e:
+        err = f"{type(e).__name__}: {e}"[:120]
+        raise
+    finally:
+        db.add_call(kind, req["model"], None, round((time.perf_counter() - t) * 1000), err,
+                    prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"))
 
 
-def complete(messages: list[dict], timeout: int = 300) -> tuple[dict, dict]:
+def complete(messages: list[dict], timeout: int = 300, kind: str = "summary") -> tuple[dict, dict]:
     """One chat call answering a JSON object: (parsed reply, raw response); raises on HTTP errors and on a reply that is not JSON."""
-    raw = call(messages, timeout, response_format={"type": "json_object"})
+    raw = call(messages, timeout, kind, response_format={"type": "json_object"})
     return json.loads(raw["choices"][0]["message"]["content"]), raw
 
 

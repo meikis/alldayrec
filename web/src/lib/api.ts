@@ -182,6 +182,7 @@ export interface Upgrade {
 }
 
 export interface Status {
+  balance?: Balance | null; // StepFun's prepaid account (#155)
   device?: string | null;
   behind_s?: number | null;
   queued?: number; // uploaded pieces the server has not fed yet
@@ -192,6 +193,29 @@ export interface Status {
   commit?: string;
   devices?: DeviceStatus[];
   summaries_pending?: number;
+}
+
+// GET /api/calls: the ASR and LLM calls since a time, by kind and engine (#155), and the StepFun balance
+export interface CallSum {
+  kind: string; // final, draft (ASR); summary, hints, profile, recap, live, ask (LLM)
+  engine: string;
+  n: number;
+  failed: Record<string, number>; // by HTTP code, else exception class
+  ms50: number | null; // of the answered ones
+  ms90: number | null;
+  sent_h: number; // audio hours sent (ASR)
+  prompt_tokens: number;
+  completion_tokens: number;
+}
+export interface Balance {
+  at: string;
+  cny: number;
+  per_day: number | null; // spent a day over the last 7 days, top-ups left out
+  days_left: number | null;
+}
+export interface Calls {
+  calls: CallSum[];
+  balance: Balance | null;
 }
 
 export interface LogEvent {

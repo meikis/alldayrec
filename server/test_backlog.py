@@ -67,7 +67,7 @@ def rig(tmp_path, monkeypatch, final_engine):
     monkeypatch.setattr(server, "LIVE_EVERY_S", 1)
     sent, fed = {"draft": 0.0}, []
 
-    def llm(messages, timeout=None):  # each turn's new sentences (their tone numbers), one topic added
+    def llm(messages, timeout=None, kind=None):  # each turn's new sentences (their tone numbers), one topic added
         new = [int(t) for t in re.findall(r"^\[[\d:]{8}\] [^:]+: (\d+)$", messages[-1]["content"], re.M)]
         fed.append(new)
         return {"ops": [{"op": "add", "title": f"t{new[0]}"}]}, {"choices": [{"message": {"content": "{}"}}]}

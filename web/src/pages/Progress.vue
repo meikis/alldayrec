@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import AppHeader from "../components/AppHeader.vue";
 import Listen from "../components/Listen.vue";
 import {
   CHARGE,
   get,
+  type Calls,
+  type CallSum,
   type DeviceStatus,
   type RecorderStatus,
   type Status,
@@ -23,6 +25,57 @@ useSocket(
   },
   async () => (status.value = await get<Status>("/api/status")),
 );
+
+// what transcription and the AI calls did today, and the money left for them (#155); every minute
+const calls = ref<Calls | null>(null);
+const today = () => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+};
+const loadCalls = async () => (calls.value = await get<Calls>("/api/calls", { since: today() }));
+let tick = 0;
+onMounted(() => {
+  loadCalls();
+  tick = window.setInterval(loadCalls, 60_000);
+});
+onUnmounted(() => clearInterval(tick));
+const KINDS: Record<string, string> = {
+  final: "定稿",
+  draft: "初稿",
+  summary: "摘要",
+  hints: "认人提示",
+  profile: "人物档案",
+  recap: "每日回顾",
+  live: "实时分析",
+  ask: "问 AI",
+};
+const secs = (ms: number | null) => (ms == null ? "—" : `${(ms / 1000).toFixed(1)} s`);
+const callLine = (c: CallSum) => {
+  const failed = Object.entries(c.failed);
+  const nf = failed.reduce((s, [, n]) => s + n, 0);
+  return [
+    `${c.n} 次`,
+    nf ? `失败 ${nf}（${failed.map(([w, n]) => `${w} ×${n}`).join("，")}）` : "",
+    `耗时中位 ${secs(c.ms50)}，慢的 ${secs(c.ms90)}`,
+    c.sent_h
+      ? `送出 ${c.sent_h} 小时${c.engine === "volc" ? `（约 ${Math.round(c.sent_h * 450)} AFP）` : ""}`
+      : "",
+    c.prompt_tokens ? `token 入 ${c.prompt_tokens} 出 ${c.completion_tokens}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+};
+const balance = computed(() => {
+  const b = calls.value?.balance ?? status.value?.balance;
+  if (!b) return null;
+  const rate = b.per_day == null ? "" : `，近 7 天每天约 ¥${b.per_day}`;
+  const left = b.days_left == null ? "" : `，约 ${b.days_left} 天后用完`;
+  return {
+    text: `¥${b.cny}（${b.at.slice(11, 16)} 查）${rate}${left}`,
+    low: b.days_left != null && b.days_left < 3,
+  };
+});
 
 const devices = computed(() =>
   [...(status.value?.devices ?? [])].sort((a, b) =>
@@ -136,6 +189,17 @@ const eta = (d: DeviceStatus) => {
       </div>
       <Listen class="listen" :device="d.device" />
     </section>
+    <section v-if="calls" class="card">
+      <div class="top"><b>转写和 AI 调用</b><span class="muted">今天</span></div>
+      <div v-if="balance" class="call">
+        <b>StepFun 余额</b> <span :class="{ bad: balance.low }">{{ balance.text }}</span>
+      </div>
+      <div v-for="c in calls.calls" :key="c.kind + c.engine" class="call">
+        <b>{{ KINDS[c.kind] ?? c.kind }}</b> <span class="muted">{{ c.engine }}</span>
+        <span :class="{ bad: Object.keys(c.failed).length }">{{ callLine(c) }}</span>
+      </div>
+      <div v-if="!calls.calls.length" class="muted">今天还没有调用</div>
+    </section>
     <section v-if="status" class="card">
       <div class="top"><b>摘要</b></div>
       <div class="grid">
@@ -176,6 +240,15 @@ const eta = (d: DeviceStatus) => {
 }
 .listen {
   margin-top: 8px;
+}
+.call {
+  font-size: 13px;
+  padding: 2px 0;
+  font-variant-numeric: tabular-nums;
+}
+.call b,
+.call .muted {
+  margin-right: 6px;
 }
 .grid span:nth-child(odd) {
   color: var(--muted);

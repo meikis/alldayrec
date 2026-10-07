@@ -41,7 +41,7 @@ def test_profile(monkeypatch):
 
     asked = []
 
-    def complete(messages):
+    def complete(messages, kind=None):
         asked.append(messages[1]["content"])
         return {"who": "同事", "facts": [{"text": "要去上海出差", "src": ["E1", "E99"]}, {"text": "编的", "src": ["E99"]}],
                 "recent": [], "mentions": [{"text": "S1 说他要换工作", "src": ["E7"]}], "open": [{"text": "我要订票", "src": ["E2"]}]}, {"model": "m"}

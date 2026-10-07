@@ -41,7 +41,8 @@ def make(day: str) -> dict | None:
     listing = "\n".join(f"#{i}{' →' + t['to'] if t['to'] else ''} {t['text']}{'（' + t['due'] + '）' if t['due'] else ''}"
                         for i, t in enumerate(todos, 1)) or "（没有）"
     res, raw = summary.complete([{"role": "system", "content": SYSTEM},
-                                 {"role": "user", "content": f"{day} 的对话摘要：\n\n{ask.digest(convs)}\n\n待办清单：\n{listing}"}], timeout=120)
+                                 {"role": "user", "content": f"{day} 的对话摘要：\n\n{ask.digest(convs)}\n\n待办清单：\n{listing}"}], timeout=120,
+                                kind="recap")
     ids = {c["id"] for c in convs}
     picked = {}
     for x in res.get("todos") or []:
@@ -84,7 +85,7 @@ if __name__ == "__main__":
         db.put_summary({"conversation": "c20261004120000", "status": "pending"}, c)
     db.add_feedback("c20261004100000", db.TODO_MARKS[0] + "已做完")
     seen = []
-    def fake(msgs, timeout=300):
+    def fake(msgs, timeout=300, kind=None):
         seen.append(msgs)
         return {"headline": "改存储", "highlights": [{"text": "定了存储", "conv": "c20261004100000"}, {"text": "编的", "conv": "c1"}, "x", {"conv": "c1"}],
                 "todos": [{"n": 1, "text": "改存储方案"}, {"n": 1}, {"n": 9}, {"n": "1"}, {"n": 0}],

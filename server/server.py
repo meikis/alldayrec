@@ -195,11 +195,13 @@ def _http(url, data=None, headers=None, method=None) -> bytes:
 FILE_MODELS = tuple(os.environ.get("FILE_MODELS", "stepaudio-2.5-asr-8006,doubao-seedasr-2.0").split(","))  # file-mode engines, in order of preference
 
 
-def engine_segs(x: np.ndarray, speech: list[tuple[float, float]], partial=None, engine: str = ENGINE) -> list[dict]:
+def engine_segs(x: np.ndarray, speech: list[tuple[float, float]], partial=None, engine: str = ENGINE, kind: str = "final",
+                device: str | None = None) -> list[dict]:
     """Sentences with times and speaker ids for a window of audio, from `engine` (PROVIDERS), or ENGINE_FALLBACK when
     it fails; each carries `engine`, and `fallback` (why) when it came from ENGINE_FALLBACK. speech: the VAD speech in
     x, (start, end) seconds; the provider gets x with the silences squeezed (squeeze.py), the times come back in x.
-    partial(segs): the sentences so far, whenever an answer adds some during the call (volc, stepfun*)."""
+    partial(segs): the sentences so far, whenever an answer adds some during the call (volc, stepfun*). Each try goes
+    in the calls table as `kind` (final, draft) of `device`."""
     xs, spans = squeeze.squeeze(x, speech, SQUEEZE_KEEP_S)
     why = None
     for name in dict.fromkeys(filter(None, (engine, ENGINE_FALLBACK))):
@@ -209,12 +211,19 @@ def engine_segs(x: np.ndarray, speech: list[tuple[float, float]], partial=None, 
             segs = PROVIDERS[name](xs, partial and (lambda gs: partial(mark(gs))))
         except Exception as e:
             log.warning("asr %s: %.0f of %.0f s sent, failed after %.1f s: %r", name, len(xs) / SR, len(x) / SR, time.perf_counter() - t, e)
+            db.add_call(kind, name, device, round((time.perf_counter() - t) * 1000), failure(e), len(x) / SR, len(xs) / SR)
             why = (f"{why}; " if why else "") + f"{name}: {e!r}"[:200]
             continue
+        db.add_call(kind, name, device, round((time.perf_counter() - t) * 1000), None, len(x) / SR, len(xs) / SR)
         log.info("asr %s: %.0f of %.0f s sent, %.1f s, %d sentences%s", name, len(xs) / SR, len(x) / SR, time.perf_counter() - t,
                  len(segs), f" (fallback; {why})" if why else "")
         return mark(segs)
     raise RuntimeError(why)
+
+
+def failure(e: Exception) -> str:
+    """An error as the calls table keeps it: its class and first words (an HTTP code says itself), no response body."""
+    return f"{type(e).__name__}: {e}"[:120]
 
 
 def volc(x: np.ndarray, partial=None) -> list[dict]:
@@ -537,6 +546,16 @@ async def write_recap(day: str) -> dict | None:
     return r
 
 
+async def balance_loop():
+    """The StepFun balance every hour (#155): what transcription costs a day, and when the money runs out."""
+    while True:
+        try:
+            db.add_balance("stepfun", await asyncio.to_thread(stepfun_asr.balance))
+        except Exception as e:
+            log.warning("stepfun balance: %r", e)
+        await asyncio.sleep(3600)
+
+
 async def recap_loop():
     """Yesterday's recap at RECAP_AT, or at the start once that has passed and it is missing (a day without summaries
     gets none); a failed one is tried again in an hour."""
@@ -824,7 +843,7 @@ async def pipeline(device: str):
         was_open = bool(grouper.open)
         m0 = dia.mark()
         try:
-            segs = await asyncio.to_thread(engine_segs, x, speech_in(seg, a0, len(x)))
+            segs = await asyncio.to_thread(engine_segs, x, speech_in(seg, a0, len(x)), device=device)
             engine = segs[0]["engine"] if segs else None
             marks = await asyncio.to_thread(label_sentences, dia, embed, segs, x)
         except Exception as e:
@@ -947,7 +966,8 @@ async def pipeline(device: str):
 
         loop, answers = asyncio.get_running_loop(), asyncio.Queue()
         call = asyncio.ensure_future(asyncio.to_thread(engine_segs, x, speech_in(dseg, a0, len(x)),
-                                                       lambda segs: loop.call_soon_threadsafe(answers.put_nowait, segs), DRAFT_ENGINE))
+                                                       lambda segs: loop.call_soon_threadsafe(answers.put_nowait, segs), DRAFT_ENGINE,
+                                                       "draft", device))
         m0 = ddia.mark()
         try:
             while not call.done():  # a 5 min backfill window: its first sentences in ~3 s, not after the whole call
@@ -1061,6 +1081,7 @@ def status() -> dict:
                                                                  "last_speech": None, "refine": None, "conversation": None, "latency_s": None})
     summaries = db.conn().execute("SELECT count(*) FROM summaries WHERE status = 'pending'").fetchone()[0]
     return {**top, "queued": sum(d["queued"] for d in ds), "devices": ds, "summaries_pending": summaries, "summary_queue": summary_q.qsize(),
+            "balance": db.balance("stepfun"),
             "commit": state["commit"], "chunks": state["chunks"],
             "engine": f"{ENGINE} · 初稿 {DRAFT_ENGINE}" + (f" · 兜底 {ENGINE_FALLBACK}" if ENGINE_FALLBACK else "")}
 
@@ -1191,6 +1212,12 @@ async def device_log(device: str, since: str, until: str | None = None):
     ms = lambda t: int(dt.datetime.fromisoformat(t).timestamp() * 1000)
     return {"events": db.device_log(device, since, until), "status": db.device_statuses(device, since, until),
             "audio": audio.minutes(device, ms(since), ms(until) if until else 1 << 62)}
+
+
+@app.get("/api/calls")
+async def calls(since: str):
+    """The ASR and LLM calls since `since`, by kind and engine (db.calls), and the StepFun balance (db.balance)."""
+    return {"calls": db.calls(since), "balance": db.balance("stepfun")}
 
 
 @app.get("/api/upgrades")
@@ -1846,7 +1873,8 @@ def main():
     @app.on_event("startup")
     async def start():
         for name, coro in (("pipeline", pipelines()), ("status", status_loop()), ("summary", summary_worker()),
-                           ("voices", voices_loop()), *((("recap", recap_loop()),) if RECAP_AT else ())):
+                           ("voices", voices_loop()), *((("recap", recap_loop()),) if RECAP_AT else ()),
+                           *((("balance", balance_loop()),) if os.environ.get("STEPFUN_API_KEY") else ())):
             asyncio.create_task(coro, name=name).add_done_callback(
                 lambda t, n=name: log.error("task %s ended: %r", n, t.exception()) if not t.cancelled() else None)
 

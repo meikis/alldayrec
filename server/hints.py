@@ -24,7 +24,7 @@ NOT_NAMES = {"我", "你", "他", "她", "您", "大家", "你们", "他们", "�
 
 
 def ask(rows: list[dict]) -> tuple[dict, dict]:
-    return summary.complete([{"role": "system", "content": SYSTEM}, {"role": "user", "content": summary.transcript(rows)}])
+    return summary.complete([{"role": "system", "content": SYSTEM}, {"role": "user", "content": summary.transcript(rows)}], kind="hints")
 
 
 def check(res: dict, rows: list[dict], skip: set[str] = frozenset()) -> list[dict]:

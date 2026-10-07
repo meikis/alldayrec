@@ -4,6 +4,7 @@ never wait for a write; every multi-step change is one `tx()`.
 """
 import datetime as dt
 import json
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -53,6 +54,14 @@ CREATE INDEX IF NOT EXISTS device_log_at ON device_log(device, at);
 CREATE TABLE IF NOT EXISTS device_status (    -- every status a client read from a BLE recorder (battery, card, firmware)
     device TEXT NOT NULL, at TEXT NOT NULL, body TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS device_status_at ON device_status(device, at);
+CREATE TABLE IF NOT EXISTS calls (            -- every ASR and LLM call (#155): how it went and what it took, never what it said.
+    at TEXT NOT NULL, kind TEXT NOT NULL,     -- kind: final, draft (ASR); summary, hints, profile, recap, live, ask (LLM)
+    engine TEXT NOT NULL, device TEXT,        -- engine: the provider or model; device: whose audio (ASR)
+    ms INTEGER NOT NULL, error TEXT,          -- error: NULL when it answered, else its class, code and first words
+    audio_s REAL, sent_s REAL,                -- ASR: the window, and what was sent of it (silences squeezed)
+    prompt_tokens INTEGER, completion_tokens INTEGER);
+CREATE INDEX IF NOT EXISTS calls_at ON calls(at);
+CREATE TABLE IF NOT EXISTS balances (at TEXT NOT NULL, provider TEXT NOT NULL, cny REAL NOT NULL);  -- a prepaid account, hourly
 """
 
 PATH: Path | None = None
@@ -394,3 +403,54 @@ def device_status(device: str) -> dict | None:
     """The newest one."""
     r = conn().execute("SELECT at, body FROM device_status WHERE device = ? ORDER BY at DESC LIMIT 1", (device,)).fetchone()
     return {**json.loads(r[1]), "at": r[0]} if r else None
+
+
+# what the ASR and LLM calls took (#155)
+
+def add_call(kind: str, engine: str, device: str | None, ms: int, error: str | None = None, audio_s: float | None = None,
+             sent_s: float | None = None, prompt_tokens: int | None = None, completion_tokens: int | None = None):
+    if PATH is None:  # a script on a read-only copy (db._local.c set by hand), a test without a db: no ledger
+        return
+    conn().execute("INSERT INTO calls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   (dt.datetime.now().isoformat(timespec="milliseconds"), kind, engine, device, ms, error, audio_s, sent_s,
+                    prompt_tokens, completion_tokens))
+
+
+def calls(lo: str) -> list[dict]:
+    """Since lo, by kind and engine: calls, failures (by HTTP code or exception class), ms (median, 90th percentile of the
+    answered ones), audio hours sent, tokens."""
+    out = {}
+    for r in conn().execute("SELECT * FROM calls WHERE at >= ? ORDER BY at", (lo,)):
+        c = out.setdefault((r["kind"], r["engine"]), {"kind": r["kind"], "engine": r["engine"], "n": 0, "failed": {}, "ms": [],
+                                                      "sent_h": 0.0, "prompt_tokens": 0, "completion_tokens": 0})
+        c["n"] += 1
+        if r["error"]:
+            why = re.search(r"\b[45]\d\d\b", r["error"])
+            why = why[0] if why else r["error"].split(":")[0]
+            c["failed"][why] = c["failed"].get(why, 0) + 1
+        else:
+            c["ms"].append(r["ms"])
+        c["sent_h"] += (r["sent_s"] or 0) / 3600
+        c["prompt_tokens"] += r["prompt_tokens"] or 0
+        c["completion_tokens"] += r["completion_tokens"] or 0
+    for c in out.values():
+        ms = sorted(c.pop("ms"))
+        c.update(ms50=ms[len(ms) // 2] if ms else None, ms90=ms[int(len(ms) * 0.9)] if ms else None, sent_h=round(c["sent_h"], 2))
+    return sorted(out.values(), key=lambda c: (c["kind"], c["engine"]))
+
+
+def add_balance(provider: str, cny: float):
+    conn().execute("INSERT INTO balances VALUES (?, ?, ?)", (dt.datetime.now().isoformat(timespec="seconds"), provider, cny))
+
+
+def balance(provider: str, days: int = 7) -> dict | None:
+    """The newest balance, what went out a day over the last `days` (top-ups left out) and the days it lasts at that."""
+    lo = (dt.datetime.now() - dt.timedelta(days=days)).isoformat()
+    rs = conn().execute("SELECT at, cny FROM balances WHERE provider = ? AND at >= ? ORDER BY at", (provider, lo)).fetchall()
+    if not rs:
+        return None
+    spent = sum(max(0.0, a[1] - b[1]) for a, b in zip(rs, rs[1:]))
+    span = (dt.datetime.fromisoformat(rs[-1][0]) - dt.datetime.fromisoformat(rs[0][0])).total_seconds() / 86400
+    per_day = spent / span if span >= 0.5 else None  # half a day at least: an hour's step says little
+    return {"at": rs[-1][0], "cny": rs[-1][1], "per_day": per_day and round(per_day, 2),
+            "days_left": round(rs[-1][1] / per_day, 1) if per_day else None}
