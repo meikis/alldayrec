@@ -357,6 +357,9 @@ const convLink = (c: Conversation) =>
       </div>
       <div
         class="grip"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="拖动调整实时分析的高度"
         title="拖动调整高度"
         @pointerdown="dragStart"
         @pointermove="dragMove"
@@ -428,24 +431,61 @@ const convLink = (c: Conversation) =>
   color: var(--muted);
   padding-top: 4px;
 }
+/* the whole strip takes the drag (tall enough for a finger); its bottom is the header's bottom line, through the
+   header's padding, and a handle sits on that line: the line between the analysis and the transcript is what moves */
 .grip {
-  height: 14px;
-  margin-bottom: -8px;
+  position: relative;
+  height: 24px;
+  margin-bottom: -12px;
   cursor: ns-resize;
   touch-action: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+}
+.grip::before {
+  content: "";
+  position: absolute;
+  inset: auto 0 -1px;
+  height: 2px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 0.15s;
 }
 .grip::after {
   content: "";
-  width: 40px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--line);
+  position: absolute;
+  left: 50%;
+  bottom: -9px;
+  width: 48px;
+  height: 18px;
+  margin-left: -24px;
+  border: 1px solid #d5d8e2;
+  border-radius: 9px;
+  background:
+    linear-gradient(var(--muted) 0 0) 50% 5px / 18px 1.5px no-repeat,
+    linear-gradient(var(--muted) 0 0) 50% 9px / 18px 1.5px no-repeat,
+    var(--bg);
+  box-shadow: 0 1px 4px rgb(31 35 48 / 0.14);
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
 }
-.grip:hover::after {
-  background: var(--muted);
+.grip:hover::before,
+.grip:active::before {
+  opacity: 1;
+}
+.grip:hover::after,
+.grip:active::after {
+  border-color: var(--accent);
+  background:
+    linear-gradient(var(--accent) 0 0) 50% 5px / 18px 1.5px no-repeat,
+    linear-gradient(var(--accent) 0 0) 50% 9px / 18px 1.5px no-repeat,
+    var(--bg);
+  box-shadow: 0 2px 8px rgb(59 63 158 / 0.3);
+}
+@media (max-width: 600px) {
+  .grip {
+    height: 28px;
+    margin-bottom: -8px; /* the header's padding here */
+  }
 }
 .conv {
   color: var(--accent);
