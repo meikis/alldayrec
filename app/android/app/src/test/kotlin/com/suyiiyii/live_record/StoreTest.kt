@@ -55,6 +55,25 @@ class StoreTest {
         assertEquals(0L, m2.have(f))
     }
 
+    /** What is said now sent ahead of a backlog still on the card (#130): where its first piece starts, before it is made. */
+    @Test fun nextStart() {
+        val dir = tmp(); val out = tmp(); val undated = tmp()
+        val m = Mirror(dir)
+        val old = 1L shl 16 or 1; val open = 1L shl 16 or 2  // a closed file not read yet; the one the stream goes on in
+        m.listed(mapOf(old to 72L, open to 85L), open)
+        assertNull(m.nextStart(open))  // nothing of the open file yet
+        m.put(open, 0, t(100, 5_000_000) + a(100, 10) + a(110, 10))
+        assertEquals(5_000_000L, m.nextStart(open))  // its first frame, by its 'T'
+        assertEquals(1, m.pieces(out, undated, "X", 15, 1))
+        assertEquals(listOf("5000000@X.ogg"), names(out))  // starts where nextStart said
+        assertNull(m.nextStart(open))  // all of it in pieces
+        m.put(old, 0, a(80, 10) + a(90, 10))  // the backlog, read off the card afterwards
+        assertNull(m.nextStart(open))  // older files are not ahead
+        assertEquals(4_999_800L, m.nextStart(old))  // dated by the same boot's 'T'
+        assertEquals(1, m.pieces(out, undated, "X", 15, 1))
+        assertEquals(listOf("4999800@X.ogg", "5000000@X.ogg"), names(out))  // older than what went ahead
+    }
+
     /** #109: a piece appends one line to the state instead of writing all of it again (at 1 s pieces that grew with
      *  every piece of the open file); a restart reads the lines back, finds the 'T' again and goes on where it was. */
     @Test fun stateAppended() {

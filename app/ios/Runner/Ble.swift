@@ -423,6 +423,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         throw error
       }
       live.clear(); ctrl.clear(); data.clear()
+      syncDoneKb = 0; syncTotalKb = 0
       try subscribe(p, Ble.ctrl)  // replies to LIST/READ/DELETE and the app's USB disk switch
       try subscribe(p, Ble.data)
       try subscribe(p, Ble.live)  // before LIST: nothing the stream adds after it is missed
@@ -442,39 +443,51 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       }
       let m = Mirror(mirrors.appendingPathComponent(Ble.tag(name)))
       boot = st.boot
-      try catchUp(p, m)
-      readLog(p)
-      DeviceLog.connected(Ble.tag(name))
-      state = "已连接 · 实时上传"
-      var lastStatus = Date()
-      var open: Int64 = -1  // the file LIVE goes on in
+      open = -1; liveFloor = -1; ahead = -1; reading = nil; needList = true; listFull = false; liveRead = true; stalls = [:]
+      caught = 0; caughtSince = nil
+      state = "补传离线录音"
+      var live0 = false  // LIVE taken since the file it goes on in was caught up
+      var lastStatus = Date(), lastPieces = Date.distantPast
+      // One loop for the link (#130): LIVE as it comes, and one READ at a time alongside it for what the mirror lacks
+      // (nextRead). LIVE waits only while the file it goes on in is READ (at connect, after a hole, at a new file):
+      // a backlog of days no longer holds back what is said now
       while alive(p) {
         // a pool per pass: this thread lives as long as the link, and what Foundation autoreleases here (each pieces()'s
         // read of the live file) would stay until it ends: 3.4 GB and killed by iOS within hours on 10-06 (#109)
         try autoreleasepool {
-          let pk = live.poll(1)
-          guard alive(p) else { return }
-          if let pk, pk.count > 8 {
-            let f = Ble.u32(pk, 0)
-            if f != open { let moved = open >= 0; open = f; if moved { try catchUp(p, m) } }  // a new file: LIST says how the last ended
-            if let hole = try m.put(f, Ble.u32(pk, 4), Data(pk[8...])) {
-              Ble.log("LIVE hole in \(String(f, radix: 16)) at \(hole): READ")
-              try catchUp(p, m)
+          var took = false
+          if !liveRead {
+            var pk = live.poll(reading == nil ? 1 : 0)  // nothing to READ: wait for LIVE here
+            guard alive(p) else { return }
+            while let x = pk {
+              took = true
+              if try takeLive(p, m, x) { break }
+              pk = live.poll(0)
             }
-            if !live.isEmpty { return }  // a burst: take it all before the rest
           }
-          try pieces(m)
-          if Recorder.now() - synced > Ble.timeEveryMs { synced = try sync(p) }
-          if -lastStatus.timeIntervalSinceNow > 60 {
-            try jobs.poll()?(p)
-            _ = try status(p, name)
+          if reading != nil { took = try takeData(p, m) || took }
+          if !live0 && !liveRead {  // the live file caught up: LIVE from here on
+            live0 = true
             readLog(p)
-            try clean(p, m)
+            DeviceLog.connected(Ble.tag(name))
+            state = "已连接 · 实时上传"
+          }
+          if reading == nil { try nextRead(p, m) }
+          if -lastPieces.timeIntervalSinceNow >= 0.5 { try pieces(m); lastPieces = Date() }
+          if Recorder.now() - synced > Ble.timeEveryMs { try endRead(p, m); synced = try sync(p) }
+          if -lastStatus.timeIntervalSinceNow > 60 {
+            _ = try status(p, name)
+            if live0 {
+              try endRead(p, m)
+              readLog(p)
+              try clean(p, m)
+            }
+            unhold(m)
             lastStatus = Date()
             Ble.log("status: battery \(hw["battery"] ?? "-")% card \(hw["store"] ?? "-") free \(hw["free_kb"] ?? "-") KB")
-          } else {
-            try jobs.poll()?(p)
           }
+          if let job = jobs.poll() { try endRead(p, m); try job(p) }
+          if !took && reading != nil { Thread.sleep(forTimeInterval: 0.01) }  // a READ's DATA on its way
         }
       }
     } catch is Gone {
@@ -501,7 +514,10 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     let t = try read(p, Ble.store, Ble.time)
     guard t.count >= 16 else { throw Fail(description: "状态只有 \(t.count) 字节") }
     let s = Status(boot: Int(Store.le(t, 0, 2)), frame: Ble.u32(t, 2), store: Int(Int16(truncatingIfNeeded: Store.le(t, 6, 2))))
+    let left = syncTotalKb - syncDoneKb, rate = caughtSince.map { Double(caught) / max(1, -$0.timeIntervalSinceNow) } ?? 0
     var h: [String: Any] = ["name": name, "store": s.store, "free_kb": Ble.u32(t, 8), "total_kb": Ble.u32(t, 12),
+                            // a backlog read in the background (#130): what is left, and when it is done at this pace
+                            "backlog_kb": left, "backlog_eta_s": rate > 0 && left > 0 ? Int(Double(left * 1024) / rate) : NSNull(),
                             // optional: macOS cannot publish 180F, so the Mac's fake recorder (app/ios/e2e) has none
                             "battery": (try? read(p, Ble.bas, Ble.battery))?.first.map { Int($0) } ?? NSNull(),
                             "app_mb": Recorder.footprintMB()]  // this app's own memory, to see it grow from the server (#109)
@@ -581,82 +597,184 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     return nil
   }
 
-  /// LIST, then READ whatever the mirror lacks, oldest first: what the board recorded while the phone was away (it
-  /// keeps writing the card; the stream goes on in the same file), files from earlier boots, a lost notify.
-  private func catchUp(_ p: Conn, _ m: Mirror) throws {
+  //
+  // What the mirror lacks, READ alongside LIVE (#130). At most one READ at a time; the board ends one at any other
+  // command or TIME write, so the session ends it first (endRead) and the next READ goes on from what the mirror has.
+  // Order: the file LIVE goes on in (and the one before it, after a new file) while LIVE waits; then the rest, oldest
+  // first: what the board recorded while the phone was away, files of earlier boots, a lost notify
+  //
+  private struct Reading { let f: Int64, from: Int64; var last: Date }
+  private var reading: Reading?
+  private var open: Int64 = -1      // the file the stream goes on in
+  private var liveFloor: Int64 = -1     // LIVE waits for the files from here on (liveRead); older ones are the backlog
+  private var ahead: Int64 = -1     // a backlog under way: pieces of the files from here on go up ahead of it
+  private var liveRead = true       // the live file (and the one before it) first: LIVE goes on from where its READ ends
+  private var needList = true
+  private var listFull = false      // the last LIST was cut at Mirror.listMax: more files once some are deleted
+  private var stalls: [Int64: Int] = [:]
+  private var caught: Int64 = 0     // a catch-up under way: bytes taken since
+  private var caughtSince: Date?
+
+  /// LIST: the card's files with their sizes into the mirror, and the file the stream goes on in.
+  private func list(_ p: Conn, _ m: Mirror) throws {
     var r: [Int64: Int64] = [:]
     ctrl.clear { $0.first == 0x81 || $0.first == 0x80 }
     try write(p, Ble.ctrl, [1])  // LIST
-    var open: Int64 = -1
+    var o: Int64 = -1
     for waited in 0... {
       guard alive(p) else { throw Gone() }
       guard let x = ctrl.poll(1) else { if waited >= 10 { throw Fail(description: "卡上文件列表超时") }; continue }
       if x.first == 0x81 && x.count >= 9 { r[Ble.u32(x, 1)] = Ble.u32(x, 5) }
       if x.first == 0x80 {
         if x.count > 1 && x[1] != 0 { Ble.log("LIST error \(Int8(bitPattern: x[1]))") }
-        if x.count >= 6 { open = Ble.u32(x, 2) }
+        if x.count >= 6 { o = Ble.u32(x, 2) }
         break
       }
     }
+    if o >= 0 { open = o }
+    if liveFloor < 0 { liveFloor = open }
     m.listed(r, open: open)
-    // the open file last, listed or not (a full LIST may leave it out): READ goes up to what the stream has finished
-    let todo = m.missing().filter { $0.0 != open } + (open >= 0 ? [(open, m.have(open))] : [])
-    let total = todo.reduce(Int64(0)) { $0 + max(0, m.files[$1.0]!.size - $1.1) }
-    Ble.log("LIST: \(r.count) files, open \(String(open, radix: 16)), \(todo.count) to READ, \(total) B")
-    var done: Int64 = 0
-    syncTotalKb = total / 1024; syncDoneKb = 0
-    let t0 = Date(), shown = state  // back to it afterwards: a catch-up while live left 补传离线录音 on for good (10-06)
-    for (f, from) in todo {
-      state = "补传离线录音"
-      var stalls = 0
-      while f == open || m.have(f) < m.files[f]!.size {
-        guard alive(p) else { throw Gone() }  // stopped: a new link may have this mirror now
-        let before = m.have(f)
-        try autoreleasepool {  // a catch-up runs for minutes: a pool per READ (see the session's loop)
-          try take(p, m, f) { self.syncDoneKb = (done + $0 - from) / 1024 }
-          try pieces(m)
-        }
-        // the open file: one READ, up to the stream's end as it began; LIVE (subscribed first) has every record
-        // from there. Reading on never ended while recording: each READ found what the last one took time for (#56)
-        if f == open { break }
-        if m.have(f) == before {
-          stalls += 1
-          if stalls > 3 { m.noMore(f); break }  // the card has no more of it
-        }
-      }
-      done += m.have(f) - from
-    }
-    state = shown
-    Ble.log("caught up: \(done) B in \(Int(-t0.timeIntervalSinceNow)) s")
-    syncNote = "\(Ble.hhmm()) 补传录音设备的录音 \(done / 1024) KB"
-    if done > 0 { DeviceLog.app(tag ?? "", "sync", "补传 \(done / 1024) KB，用时 \(Int(-t0.timeIntervalSinceNow)) s") }
-    syncDoneKb = 0; syncTotalKb = 0
+    needList = false
+    listFull = r.count >= Mirror.listMax
+    Ble.log("LIST: \(r.count) files, open \(String(open, radix: 16)), missing \(m.missing().map { String($0.0, radix: 16) })")
   }
 
-  /// One READ of `f` from what the mirror has, into it, until the board says it is at the end (0x82) or a notify is
-  /// lost (the caller asks again from there).
-  private func take(_ p: Conn, _ m: Mirror, _ f: Int64, _ progress: (Int64) -> Void) throws {
+  /// Bytes on the card the mirror lacks: the live file's while LIVE waits for it, and the backlog (older files). A
+  /// backlog makes the pieces of what is said now go up ahead of it (pieces(), the hold); the progress of both is the
+  /// app's and the server's (status()).
+  private func behind(_ m: Mirror) -> Int64 {
+    var backlog: Int64 = 0, live: Int64 = 0
+    for (f, from) in m.missing() {
+      let n = max(0, m.files[f]!.size - from)
+      if f < liveFloor { backlog += n } else if liveRead { live += n }
+    }
+    if backlog > 0 && ahead < 0 { ahead = liveFloor }
+    if backlog + live > 0 && caughtSince == nil { caughtSince = Date() }
+    syncDoneKb = caught / 1024
+    syncTotalKb = backlog + live > 0 ? (caught + backlog + live) / 1024 : 0
+    return backlog + live
+  }
+
+  /// The next READ, or LIST first; none: caught up.
+  private func nextRead(_ p: Conn, _ m: Mirror) throws {
+    if needList { try list(p, m) }
+    let missing = m.missing()
+    if liveRead && open < 0 { liveRead = false }  // a LIST without the open file: nothing to wait for
+    if liveRead {
+      // the file before the live one, its end (LIVE may have missed it), then the live one: once, up to the stream's
+      // end as the READ starts; LIVE (subscribed first) has every record from there. Reading on never ended while
+      // recording: each READ found what the last one took time for (#56)
+      if let (f, _) = missing.first(where: { $0.0 >= liveFloor && $0.0 != open }) { return try startRead(p, m, f) }
+      return try startRead(p, m, open)
+    }
+    if let (f, _) = missing.first(where: { $0.0 != open }) { return try startRead(p, m, f) }
+    if let t0 = caughtSince, behind(m) == 0 {  // caught up
+      Ble.log("caught up: \(caught) B in \(Int(-t0.timeIntervalSinceNow)) s")
+      syncNote = "\(Ble.hhmm()) 补传录音设备的录音 \(caught / 1024) KB"
+      if caught > 0 { DeviceLog.app(tag ?? "", "sync", "补传 \(caught / 1024) KB，用时 \(Int(-t0.timeIntervalSinceNow)) s") }
+      caught = 0; caughtSince = nil; ahead = -1
+      unhold(m)
+    }
+  }
+
+  private func startRead(_ p: Conn, _ m: Mirror, _ f: Int64) throws {
     data.clear()
     ctrl.clear { $0.first == 0x82 }
-    try write(p, Ble.ctrl, [2] + Store.le(UInt32(f)) + Store.le(UInt32(m.have(f))))  // READ
-    var last = Date()
-    while -last.timeIntervalSinceNow < 10 && alive(p) {
-      guard let d = data.poll(0.2) else {
-        if ctrl.contains(where: { $0.first == 0x82 }) && data.isEmpty { return }  // the end; its DATA came before it
-        continue
-      }
-      last = Date()
+    let from = m.have(f)
+    try write(p, Ble.ctrl, [2] + Store.le(UInt32(f)) + Store.le(UInt32(from)))  // READ
+    reading = Reading(f: f, from: from, last: Date())
+  }
+
+  /// The READ's DATA so far into the mirror; true when there was any. It ends at its 0x82 (the DATA came before it),
+  /// at a lost notify (a hole: STOP, and the rest of it is not taken), or after 10 s without DATA.
+  private func takeData(_ p: Conn, _ m: Mirror) throws -> Bool {
+    guard var r = reading else { return false }
+    var took = false
+    while let d = data.poll(0) {
+      took = true
+      r.last = Date()
       guard d.count > 4 else { continue }
-      if try autoreleasepool(invoking: { try m.put(f, Ble.u32(d, 0), Data(d[4...])) }) != nil {  // one READ: up to 16 MB of notifies
-        // a hole: STOP, and the rest of this READ (up to its 0x82) is not taken for the next one, maybe of another file
-        try write(p, Ble.ctrl, [3])
-        let until = Date(timeIntervalSinceNow: 3)
-        while !ctrl.contains(where: { $0.first == 0x82 }) && Date() < until { Thread.sleep(forTimeInterval: 0.05) }
-        data.clear()
-        return
+      let had = m.have(r.f)
+      if let hole = try autoreleasepool(invoking: { try m.put(r.f, Ble.u32(d, 0), Data(d[4...])) }) {
+        Ble.log("DATA hole in \(String(r.f, radix: 16)) at \(hole) (got \(Ble.u32(d, 0))): STOP")
+        try endRead(p, m, keep: false)
+        return true
       }
-      if m.have(f) % 32768 < d.count { progress(m.have(f)) }
+      caught += m.have(r.f) - had
+      if m.have(r.f) % 32768 < d.count { _ = behind(m) }
     }
+    reading = r
+    if ctrl.contains(where: { $0.first == 0x82 }) && data.isEmpty || -r.last.timeIntervalSinceNow > 10 { finishRead(m, stopped: false) }
+    return took
+  }
+
+  /// The READ in flight ended before anything else goes on CTRL or TIME; what it sent so far kept (keep: false after
+  /// a hole: what comes after it is not the mirror's yet).
+  private func endRead(_ p: Conn, _ m: Mirror, keep: Bool = true) throws {
+    guard let r = reading else { return }
+    try write(p, Ble.ctrl, [3])  // STOP
+    let until = Date(timeIntervalSinceNow: 3)
+    while !ctrl.contains(where: { $0.first == 0x82 }) && Date() < until && alive(p) { Thread.sleep(forTimeInterval: 0.05) }
+    // no end: its DATA may still come and be taken for what goes next on DATA (LOG): the link again instead
+    guard ctrl.contains(where: { $0.first == 0x82 }) else { throw Fail(description: "READ 停不下来") }
+    while keep, let d = data.poll(0), d.count > 4 {
+      let had = m.have(r.f)
+      if try m.put(r.f, Ble.u32(d, 0), Data(d[4...])) != nil { break }
+      caught += m.have(r.f) - had
+    }
+    data.clear()
+    finishRead(m, stopped: true)
+  }
+
+  private func finishRead(_ m: Mirror, stopped: Bool) {
+    guard let r = reading else { return }
+    reading = nil
+    ctrl.clear { $0.first == 0x82 }
+    let got = m.have(r.f) - r.from
+    if r.f == open && !stopped {
+      liveRead = false  // LIVE goes on from where this READ ended
+    } else if got > 0 || stopped {
+      stalls[r.f] = nil
+    } else if (stalls[r.f] ?? 0) >= 3 {
+      m.noMore(r.f)  // the card has no more of it
+    } else {
+      stalls[r.f, default: 0] += 1
+    }
+    _ = behind(m)
+  }
+
+  /// One LIVE packet into the mirror; true when LIVE has to wait for a READ: a new file (LIST says how the last one
+  /// ended), a hole in the live file (a lost notify).
+  private func takeLive(_ p: Conn, _ m: Mirror, _ pk: [UInt8]) throws -> Bool {
+    guard pk.count > 8 else { return false }
+    let f = Ble.u32(pk, 0)
+    if f > open {
+      liveFloor = open; open = f; needList = true; liveRead = true
+      try endRead(p, m)
+    }
+    if let hole = try m.put(f, Ble.u32(pk, 4), Data(pk[8...])), f == open {
+      Ble.log("LIVE hole in \(String(f, radix: 16)) at \(hole): READ")
+      liveFloor = open; liveRead = true
+      try endRead(p, m)
+    }
+    return liveRead
+  }
+
+  /// Where the server's finalization waits while a backlog goes up after what is said now (`hold:<tag>`, sent with
+  /// every upload, #130): a minute before the first piece that goes ahead of it (its start, as pieces() will put it,
+  /// may still move by the clock's drift). Set before that piece exists, so no upload has it without the hold.
+  private func holdAhead(_ m: Mirror) {
+    guard ahead >= 0, let tag, Recorder.hold(tag) == nil, let at = m.nextStart(from: ahead) else { return }
+    prefs.set(at - 60_000, forKey: "hold:\(tag)")
+    Ble.log("hold \(tag) at \(at - 60_000): the backlog goes up after what is said now")
+  }
+
+  /// No backlog left, and none of its pieces waiting to go up: the server may finalize past the hold.
+  private func unhold(_ m: Mirror) {
+    guard let tag, let h = Recorder.hold(tag), behind(m) == 0,
+          !Uploader.files(chunks).contains(where: { Uploader.piece($0).map { $0.device == tag && $0.start < h } ?? false }) else { return }
+    prefs.removeObject(forKey: "hold:\(tag)")
+    Ble.log("hold \(tag) let go")
   }
 
   private var boot = 0  // the session's
@@ -683,12 +801,15 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
   /// The mirror into dated pieces (Mirror.pieces): the live file in pieces as long as the app's slice.
   private func pieces(_ m: Mirror) throws {
+    holdAhead(m)
     files += try m.pieces(chunks, undated, tag: tag ?? "recorder", liveFrames: sliceS() * 100, boot: boot)
   }
 
   /// Files mirrored whole and uploaded: off the card (DELETE) and out of the mirror.
   private func clean(_ p: Conn, _ m: Mirror) throws {
-    for f in m.done(chunks) {
+    let done = m.done(chunks)
+    if !done.isEmpty && listFull { needList = true }  // room in the next LIST for files it left out
+    for f in done {
       guard let r = try reply(p, [4] + Store.le(UInt32(f)), 0x84), r.count >= 6 else { return }  // DELETE
       let err = Int8(bitPattern: r[5])
       Ble.log("DELETE \(String(f, radix: 16)): \(err)")

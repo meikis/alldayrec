@@ -347,7 +347,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
               const SizedBox(width: 12),
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                  Text(syncing ? '补传离线录音 ${(syncDone / 1024).toStringAsFixed(1)} / ${(syncTotal / 1024).toStringAsFixed(1)} MB' : link,
+                  Text(syncing ? '${connected ? '实时上传 · 后台补传' : '补传离线录音'} ${(syncDone / 1024).toStringAsFixed(1)} / ${(syncTotal / 1024).toStringAsFixed(1)} MB' : link,
                       style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500), maxLines: 2, overflow: TextOverflow.ellipsis),
                   if (syncing) ...[
                     const SizedBox(height: 6),
@@ -1027,7 +1027,8 @@ class _RecorderPageState extends State<RecorderPage> {
             const SizedBox(height: 10),
             LinearProgressIndicator(value: syncTotal > 0 ? syncDone / syncTotal : null, minHeight: 8, borderRadius: BorderRadius.circular(4)),
             const SizedBox(height: 6),
-            Text('取完再开始实时录音', style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+            Text(link.startsWith('已连接') ? '实时上传照常，卡上积压的录音在后台取' : '先取完正在录的这一段，再开始实时上传',
+                style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
           ] else
             Row(children: [
               Icon(st['lastSync'] != null ? Icons.check_circle_rounded : Icons.cloud_sync_rounded,

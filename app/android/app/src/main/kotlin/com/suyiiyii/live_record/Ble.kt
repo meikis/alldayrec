@@ -306,6 +306,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
                 if (!adding && e.message in AUTH_FAILED) return kicked(g, "${e.message}") else throw e
             }
             live.clear(); ctrl.clear(); data.clear()
+            syncDoneKb = 0; syncTotalKb = 0
             subscribe(g, Ble.STORE, Ble.CTRL)  // replies to LIST/READ/DELETE and the app's USB disk switch
             subscribe(g, Ble.STORE, Ble.DATA)
             subscribe(g, Ble.STORE, Ble.LIVE)  // first: nothing the stream adds after LIST is missed
@@ -322,36 +323,50 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             }
             val m = Mirror(File(ctx.filesDir, "recorder/${Ble.tag(name)}"))
             mirrorName = Ble.tag(name); boot = st.boot
-            catchUp(g, m)
-            DeviceLog.read(mirrorName, { write(g, Ble.STORE, Ble.CTRL, it) }, ctrl, data)
-            DeviceLog.connected(mirrorName)
-            state = "已连接 · 实时上传"
+            open = -1; liveFloor = -1; ahead = -1; reading = null; needList = true; listFull = false; liveRead = true; stalls.clear()
+            caught = 0; caughtSince = 0
+            state = "补传离线录音"
+            var live0 = false  // LIVE taken since the file it goes on in was caught up
             var lastStatus = android.os.SystemClock.elapsedRealtime()
-            var open = -1L  // the file LIVE goes on in
+            var lastPieces = 0L
+            // One loop for the link (#130): LIVE as it comes, and one READ at a time alongside it for what the mirror
+            // lacks (nextRead). LIVE waits only while the file it goes on in is READ (at connect, after a hole, at a new
+            // file): a backlog of days no longer holds back what is said now
             while (gatt === g && on) {
-                val p = live.poll(1, TimeUnit.SECONDS)
-                if (gatt !== g || !on) break
-                if (p != null) {
-                    val b = le(p)
-                    val f = b.getInt(0).toLong() and 0xffffffffL
-                    if (f != open) { val moved = open >= 0; open = f; if (moved) catchUp(g, m) }  // a new file: LIST says how the last ended
-                    m.put(f, b.getInt(4).toLong() and 0xffffffffL, p.copyOfRange(8, p.size))?.let { hole ->
-                        Log.i("live-record", "ble LIVE hole in %08X at $hole: READ".format(f))
-                        catchUp(g, m)
+                var took = false
+                if (!liveRead) {
+                    var p = live.poll(if (reading == null) 1000L else 0L, TimeUnit.MILLISECONDS)  // nothing to READ: wait for LIVE here
+                    if (gatt !== g || !on) break
+                    while (p != null) {
+                        took = true
+                        if (takeLive(g, m, p)) break
+                        p = live.poll()
                     }
-                    if (live.isNotEmpty()) continue  // a burst: take it all before the rest
                 }
-                pieces(m)
-                val now = android.os.SystemClock.elapsedRealtime()
-                if (System.currentTimeMillis() - synced > Ble.TIME_EVERY_MS) synced = sync(g)
-                if (now - lastStatus > 60_000) {
-                    jobs.poll()?.invoke(g)
-                    status(g, name)
+                if (reading != null) took = takeData(g, m) || took
+                if (!live0 && !liveRead) {  // the live file caught up: LIVE from here on
+                    live0 = true
                     DeviceLog.read(mirrorName, { write(g, Ble.STORE, Ble.CTRL, it) }, ctrl, data)
-                    clean(g, m)
+                    DeviceLog.connected(mirrorName)
+                    state = "已连接 · 实时上传"
+                }
+                if (reading == null) nextRead(g, m)
+                val now = android.os.SystemClock.elapsedRealtime()
+                if (now - lastPieces >= 500) { pieces(m); lastPieces = now }
+                if (System.currentTimeMillis() - synced > Ble.TIME_EVERY_MS) { endRead(g, m); synced = sync(g) }
+                if (now - lastStatus > 60_000) {
+                    status(g, name)
+                    if (live0) {
+                        endRead(g, m)
+                        DeviceLog.read(mirrorName, { write(g, Ble.STORE, Ble.CTRL, it) }, ctrl, data)
+                        clean(g, m)
+                    }
+                    unhold(m)
                     lastStatus = now
                     Log.i("live-record", "ble status: battery ${hw["battery"]}% card ${hw["store"]} free ${hw["free_kb"]} KB")
-                } else jobs.poll()?.invoke(g)
+                }
+                jobs.poll()?.let { endRead(g, m); it(g) }
+                if (!took && reading != null) Thread.sleep(10)  // a READ's DATA on its way
             }
         } catch (e: Gone) {
         } catch (e: Exception) {
@@ -452,8 +467,12 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
     private fun status(g: BluetoothGatt, name: String): Status {
         val t = le(read(g, Ble.STORE, Ble.TIME))
         val s = Status(t.getShort(0).toInt() and 0xffff, t.getInt(2).toLong() and 0xffffffffL, t.getShort(6).toInt())
+        val left = syncTotalKb - syncDoneKb
+        val rate = if (caughtSince > 0) caught * 1000.0 / maxOf(1000L, android.os.SystemClock.elapsedRealtime() - caughtSince) else 0.0
         val h = mutableMapOf<String, Any?>("name" to name, "store" to s.store, "free_kb" to (t.getInt(8).toLong() and 0xffffffffL),
-            "total_kb" to (t.getInt(12).toLong() and 0xffffffffL), "battery" to read(g, Ble.BAS, Ble.BATTERY).firstOrNull()?.toInt())
+            "total_kb" to (t.getInt(12).toLong() and 0xffffffffL), "battery" to read(g, Ble.BAS, Ble.BATTERY).firstOrNull()?.toInt(),
+            // a backlog read in the background (#130): what is left, and when it is done at this pace
+            "backlog_kb" to left, "backlog_eta_s" to if (rate > 0 && left > 0) (left * 1024 / rate).toLong() else null)
         if (t.limit() >= 47) pausedUntil = t.getInt(43).toLong().let { if (it > 0) System.currentTimeMillis() + it * 1000 else 0L }
         for ((k, c) in listOf("model" to Ble.MODEL, "fw" to Ble.FW_REV))
             h[k] = hw[k] ?: try { String(read(g, Ble.DIS, c)) } catch (e: Exception) { null }
@@ -463,78 +482,191 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         return s
     }
 
-    /** LIST, then READ whatever the mirror lacks, oldest first: what the board recorded while the phone was away (it
-     *  keeps writing the card; the stream goes on in the same file), files from earlier boots, a lost notify. */
-    private fun catchUp(g: BluetoothGatt, m: Mirror) {
-        val r = mutableListOf<Pair<Long, Long>>()
+    //
+    // What the mirror lacks, READ alongside LIVE (#130). At most one READ at a time; the board ends one at any other
+    // command or TIME write, so the session ends it first (endRead) and the next READ goes on from what the mirror has.
+    // Order: the file LIVE goes on in (and the one before it, after a new file) while LIVE waits; then the rest, oldest
+    // first: what the board recorded while the phone was away, files of earlier boots, a lost notify
+    //
+    private class Reading(val f: Long, val from: Long, var last: Long)
+    private var reading: Reading? = null
+    private var open = -1L       // the file the stream goes on in
+    private var liveFloor = -1L  // LIVE waits for the files from here on (liveRead); older ones are the backlog
+    private var ahead = -1L      // a backlog under way: pieces of the files from here on go up ahead of it
+    private var liveRead = true  // the live file (and the one before it) first: LIVE goes on from where its READ ends
+    private var needList = true
+    private var listFull = false  // the last LIST was cut at Mirror.LIST_MAX: more files once some are deleted
+    private val stalls = HashMap<Long, Int>()
+    private var caught = 0L       // a catch-up under way: bytes taken since (elapsedRealtime; 0: none)
+    private var caughtSince = 0L
+    private var fastAt = -60_000L
+
+    /** LIST: the card's files with their sizes into the mirror, and the file the stream goes on in. */
+    private fun list(g: BluetoothGatt, m: Mirror) {
+        val r = mutableMapOf<Long, Long>()
         ctrl.removeIf { it[0] == 0x81.toByte() || it[0] == 0x80.toByte() }
         write(g, Ble.STORE, Ble.CTRL, byteArrayOf(1))  // LIST
-        var open = -1L
+        var o = -1L
         while (true) {
             val x = ctrl.poll(10, TimeUnit.SECONDS) ?: throw Exception("卡上文件列表超时")
-            if (x[0] == 0x81.toByte()) r += (le(x).getInt(1).toLong() and 0xffffffffL) to (le(x).getInt(5).toLong() and 0xffffffffL)
+            if (x[0] == 0x81.toByte()) r[le(x).getInt(1).toLong() and 0xffffffffL] = le(x).getInt(5).toLong() and 0xffffffffL
             if (x[0] == 0x80.toByte()) {
                 if (x[1] != 0.toByte()) Log.w("live-record", "ble LIST error ${x[1]}")
-                if (x.size >= 6) open = le(x).getInt(2).toLong() and 0xffffffffL
+                if (x.size >= 6) o = le(x).getInt(2).toLong() and 0xffffffffL
                 break
             }
         }
-        m.listed(r.toMap(), open)
-        // the open file last, listed or not (a full LIST may leave it out): READ goes up to what the stream has finished
-        val todo = m.missing().filter { it.first != open } + listOf(open to m.have(open)).filter { open >= 0 }
-        val total = todo.sumOf { (f, from) -> maxOf(0, m.files[f]!!.size - from) }
-        Log.i("live-record", "ble LIST: ${r.size} files, open %08X, ${todo.size} to READ, $total B".format(open))
-        // a short interval for it (the result is logged below); the recorder puts its slow one back after the last READ
-        if (total > 0) g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
-        var done = 0L
-        syncTotalKb = total / 1024; syncDoneKb = 0
-        val t0 = android.os.SystemClock.elapsedRealtime()
-        val shown = state  // back to it afterwards: a catch-up while live left 补传离线录音 on for good (10-06)
-        for ((f, from) in todo) {
-            state = "补传离线录音"
-            var stalls = 0
-            while (f == open || m.have(f) < m.files[f]!!.size) {
-                val before = m.have(f)
-                take(g, m, f) { syncDoneKb = (done + it - from) / 1024 }
-                pieces(m)
-                // the open file: one READ, up to the stream's end as it began; LIVE (subscribed first) has every record
-                // from there. Reading on never ended while recording: each READ found what the last one took time for (#56)
-                if (f == open) break
-                if (m.have(f) == before && ++stalls > 3) { m.noMore(f); break }  // the card has no more of it
-            }
-            done += m.have(f) - from
-        }
-        state = shown
-        Log.i("live-record", "ble caught up: $done B in ${(android.os.SystemClock.elapsedRealtime() - t0) / 1000} s")
-        syncNote = "${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())} 补传录音设备的录音 ${done / 1024} KB"
-        if (done > 0) DeviceLog.app(mirrorName, "sync", "补传 ${done / 1024} KB，用时 ${(android.os.SystemClock.elapsedRealtime() - t0) / 1000} s")
-        syncDoneKb = 0; syncTotalKb = 0
+        if (o >= 0) open = o
+        if (liveFloor < 0) liveFloor = open
+        m.listed(r, open)
+        needList = false
+        listFull = r.size >= Mirror.LIST_MAX
+        Log.i("live-record", "ble LIST: ${r.size} files, open %08X, missing ${m.missing().map { "%08X".format(it.first) }}".format(open))
     }
 
-    /** One READ of `f` from what the mirror has, into it, until the board says it is at the end (0x82) or a notify is
-     *  lost (the caller asks again from there). */
-    private fun take(g: BluetoothGatt, m: Mirror, f: Long, progress: (Long) -> Unit) {
+    /** Bytes on the card the mirror lacks: the live file's while LIVE waits for it, and the backlog (older files). A
+     *  backlog makes the pieces of what is said now go up ahead of it (pieces(), the hold); the progress of both is
+     *  the app's and the server's (status()). */
+    private fun behind(m: Mirror): Long {
+        var backlog = 0L
+        var cur = 0L
+        for ((f, from) in m.missing()) {
+            val n = maxOf(0L, m.files[f]!!.size - from)
+            if (f < liveFloor) backlog += n else if (liveRead) cur += n
+        }
+        if (backlog > 0 && ahead < 0) ahead = liveFloor
+        if (backlog + cur > 0 && caughtSince == 0L) caughtSince = android.os.SystemClock.elapsedRealtime()
+        syncDoneKb = caught / 1024
+        syncTotalKb = if (backlog + cur > 0) (caught + backlog + cur) / 1024 else 0
+        return backlog + cur
+    }
+
+    /** The next READ, or LIST first; none: caught up. */
+    private fun nextRead(g: BluetoothGatt, m: Mirror) {
+        if (needList) list(g, m)
+        val missing = m.missing()
+        if (liveRead && open < 0) liveRead = false  // a LIST without the open file: nothing to wait for
+        if (liveRead) {
+            // the file before the live one, its end (LIVE may have missed it), then the live one: once, up to the
+            // stream's end as the READ starts; LIVE (subscribed first) has every record from there. Reading on never
+            // ended while recording: each READ found what the last one took time for (#56)
+            missing.firstOrNull { it.first >= liveFloor && it.first != open }?.let { return startRead(g, m, it.first) }
+            return startRead(g, m, open)
+        }
+        missing.firstOrNull { it.first != open }?.let { return startRead(g, m, it.first) }
+        if (caughtSince > 0 && behind(m) == 0L) {  // caught up
+            val s = (android.os.SystemClock.elapsedRealtime() - caughtSince) / 1000
+            Log.i("live-record", "ble caught up: $caught B in $s s")
+            syncNote = "${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())} 补传录音设备的录音 ${caught / 1024} KB"
+            if (caught > 0) DeviceLog.app(mirrorName, "sync", "补传 ${caught / 1024} KB，用时 $s s")
+            caught = 0; caughtSince = 0; ahead = -1
+            unhold(m)
+        }
+    }
+
+    private fun startRead(g: BluetoothGatt, m: Mirror, f: Long) {
         data.clear()
         ctrl.removeIf { it[0] == 0x82.toByte() }
-        write(g, Ble.STORE, Ble.CTRL, le(ByteArray(9)).put(2).putInt(f.toInt()).putInt(m.have(f).toInt()).array())  // READ
-        var last = System.currentTimeMillis()
-        while (System.currentTimeMillis() - last < 10_000) {
-            val d = data.poll(200, TimeUnit.MILLISECONDS)
-            if (d == null) {
-                if (ctrl.any { it[0] == 0x82.toByte() } && data.isEmpty()) return  // the end; its DATA came before it
-                continue
+        val from = m.have(f)
+        val now = android.os.SystemClock.elapsedRealtime()
+        // a short interval for it (logged by onConnectionUpdated); the recorder puts its slow one back after the last READ
+        if (now - fastAt > 60_000) { g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH); fastAt = now }
+        write(g, Ble.STORE, Ble.CTRL, le(ByteArray(9)).put(2).putInt(f.toInt()).putInt(from.toInt()).array())  // READ
+        reading = Reading(f, from, System.currentTimeMillis())
+    }
+
+    /** The READ's DATA so far into the mirror; true when there was any. It ends at its 0x82 (the DATA came before it),
+     *  at a lost notify (a hole: STOP, and the rest of it is not taken), or after 10 s without DATA. */
+    private fun takeData(g: BluetoothGatt, m: Mirror): Boolean {
+        val r = reading ?: return false
+        var took = false
+        while (true) {
+            val d = data.poll() ?: break
+            took = true
+            r.last = System.currentTimeMillis()
+            if (d.size <= 4) continue
+            val had = m.have(r.f)
+            m.put(r.f, le(d).getInt(0).toLong() and 0xffffffffL, d.copyOfRange(4, d.size))?.let { hole ->
+                Log.i("live-record", "ble DATA hole in %08X at $hole (got ${le(d).getInt(0)}): STOP".format(r.f))
+                endRead(g, m, keep = false)
+                return true
             }
-            last = System.currentTimeMillis()
-            if (m.put(f, le(d).getInt(0).toLong() and 0xffffffffL, d.copyOfRange(4, d.size)) != null) {
-                // a hole: STOP, and the rest of this READ (up to its 0x82) is not taken for the next one, maybe of another file
-                write(g, Ble.STORE, Ble.CTRL, byteArrayOf(3))
-                val until = System.currentTimeMillis() + 3000
-                while (ctrl.none { it[0] == 0x82.toByte() } && System.currentTimeMillis() < until) Thread.sleep(50)
-                data.clear()
-                return
-            }
-            if (m.have(f) % 32768 < d.size) progress(m.have(f))
+            caught += m.have(r.f) - had
+            if (m.have(r.f) % 32768 < d.size) behind(m)
         }
+        if (ctrl.any { it[0] == 0x82.toByte() } && data.isEmpty() || System.currentTimeMillis() - r.last > 10_000) finishRead(m, false)
+        return took
+    }
+
+    /** The READ in flight ended before anything else goes on CTRL or TIME; what it sent so far kept (keep: false
+     *  after a hole: what comes after it is not the mirror's yet). */
+    private fun endRead(g: BluetoothGatt, m: Mirror, keep: Boolean = true) {
+        val r = reading ?: return
+        write(g, Ble.STORE, Ble.CTRL, byteArrayOf(3))  // STOP
+        val until = System.currentTimeMillis() + 3000
+        while (ctrl.none { it[0] == 0x82.toByte() } && System.currentTimeMillis() < until) Thread.sleep(50)
+        // no end: its DATA may still come and be taken for what goes next on DATA (LOG): the link again instead
+        if (ctrl.none { it[0] == 0x82.toByte() }) throw Exception("READ 停不下来")
+        while (keep) {
+            val d = data.poll() ?: break
+            if (d.size <= 4) continue
+            val had = m.have(r.f)
+            if (m.put(r.f, le(d).getInt(0).toLong() and 0xffffffffL, d.copyOfRange(4, d.size)) != null) break
+            caught += m.have(r.f) - had
+        }
+        data.clear()
+        finishRead(m, true)
+    }
+
+    private fun finishRead(m: Mirror, stopped: Boolean) {
+        val r = reading ?: return
+        reading = null
+        ctrl.removeIf { it[0] == 0x82.toByte() }
+        val got = m.have(r.f) - r.from
+        when {
+            r.f == open && !stopped -> liveRead = false  // LIVE goes on from where this READ ended
+            got > 0 || stopped -> stalls.remove(r.f)
+            (stalls[r.f] ?: 0) >= 3 -> m.noMore(r.f)  // the card has no more of it
+            else -> stalls[r.f] = (stalls[r.f] ?: 0) + 1
+        }
+        behind(m)
+    }
+
+    /** One LIVE packet into the mirror; true when LIVE has to wait for a READ: a new file (LIST says how the last one
+     *  ended), a hole in the live file (a lost notify). */
+    private fun takeLive(g: BluetoothGatt, m: Mirror, p: ByteArray): Boolean {
+        if (p.size <= 8) return false
+        val b = le(p)
+        val f = b.getInt(0).toLong() and 0xffffffffL
+        if (f > open) {
+            liveFloor = open; open = f; needList = true; liveRead = true
+            endRead(g, m)
+        }
+        val hole = m.put(f, b.getInt(4).toLong() and 0xffffffffL, p.copyOfRange(8, p.size))
+        if (hole != null && f == open) {
+            Log.i("live-record", "ble LIVE hole in %08X at $hole: READ".format(f))
+            liveFloor = open; liveRead = true
+            endRead(g, m)
+        }
+        return liveRead
+    }
+
+    /** Where the server's finalization waits while a backlog goes up after what is said now (prefs hold:<name>, sent
+     *  with every upload, #130): a minute before the first piece that goes ahead of it (its start, as pieces() will put
+     *  it, may still move by the clock's drift). Set before that piece exists, so no upload has it without the hold. */
+    private fun holdAhead(m: Mirror) {
+        if (ahead < 0 || mirrorName.isEmpty() || prefs.contains("hold:$mirrorName")) return
+        val at = m.nextStart(ahead) ?: return
+        prefs.edit().putLong("hold:$mirrorName", at - 60_000).apply()
+        Log.i("live-record", "ble hold $mirrorName at ${at - 60_000}: the backlog goes up after what is said now")
+    }
+
+    /** No backlog left, and none of its pieces waiting to go up: the server may finalize past the hold. */
+    private fun unhold(m: Mirror) {
+        val h = prefs.getLong("hold:$mirrorName", -1)
+        if (h < 0 || behind(m) > 0 || Uploader.queue(chunks).any { Uploader.deviceOf(it) == mirrorName && Uploader.startMs(it) < h }) return
+        prefs.edit().remove("hold:$mirrorName").apply()
+        Log.i("live-record", "ble hold $mirrorName let go")
     }
 
     private var mirrorName = ""  // the session's: the board's name as pieces carry it, its boot now
@@ -542,13 +674,16 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
 
     /** The mirror into dated pieces (Mirror.pieces): the live file in pieces as long as the app's slice. */
     private fun pieces(m: Mirror) {
+        holdAhead(m)
         val n = m.pieces(chunks, undated, mirrorName, sliceS() * 100, boot)
         if (n > 0) onPiece(n)
     }
 
     /** Files mirrored whole and uploaded: off the card (DELETE) and out of the mirror. */
     private fun clean(g: BluetoothGatt, m: Mirror) {
-        for (f in m.done(chunks)) {
+        val done = m.done(chunks)
+        if (done.isNotEmpty() && listFull) needList = true  // room in the next LIST for files it left out
+        for (f in done) {
             val r = reply(g, le(ByteArray(5)).put(4).putInt(f.toInt()).array(), 0x84) ?: return  // DELETE
             val err = r[5].toInt()
             Log.i("live-record", "ble DELETE %08X: $err".format(f))

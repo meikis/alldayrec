@@ -178,8 +178,33 @@ class Mirror(private val dir: File) {
     /** A file whose card copy cannot give more (its READ ends where the mirror does): take what the mirror has. */
     fun noMore(f: Long) { files[f]?.let { it.size = minOf(it.size, have(f)); save() } }
 
-    private fun bytes(f: Long, from: Long): ByteArray = if (!bin(f).exists()) ByteArray(0) else RandomAccessFile(bin(f), "r").use { r ->
-        r.seek(from); ByteArray((r.length() - from).toInt()).also { r.readFully(it) }
+    private fun bytes(f: Long, from: Long, max: Long = Long.MAX_VALUE): ByteArray = if (!bin(f).exists()) ByteArray(0) else RandomAccessFile(bin(f), "r").use { r ->
+        r.seek(from); ByteArray(minOf(r.length() - from, max).toInt()).also { r.readFully(it) }
+    }
+
+    /** Every 'T' record the mirror has: a later file may date an earlier one. */
+    private fun scanSyncs() {
+        for ((f, s) in files) if (have(f) > s.tscan) {
+            for ((r, end) in Store.scan(bytes(f, s.tscan), s.tscan)) {
+                if (r is Store.Sync) syncs.getOrPut(clock(f)) { mutableListOf() }.let { ts -> if (ts.none { it[0] == r.frame }) ts += longArrayOf(r.frame, r.epochMs) }
+                s.tscan = end
+            }
+        }
+    }
+
+    /** Where the next piece of the files from `f0` on will start (unix ms), as pieces() will name it; null when none of
+     *  them has a dated frame yet. A phone sending these ahead of older audio still on the card says so first (#130). */
+    fun nextStart(f0: Long): Long? {
+        scanSyncs()
+        for ((f, s) in files.tailMap(f0)) {
+            val ts = syncs[clock(f)]
+            if (s.finished || ts.isNullOrEmpty()) continue
+            for ((r, _) in Store.scan(bytes(f, s.cut, 8192), s.cut)) if (r is Store.Audio) {  // a record is at most 2.6 KB
+                val near = ts.minBy { Math.abs(it[0] - r.first) }
+                return near[1] + (r.first - near[0]) * Store.FRAME_MS
+            }
+        }
+        return null
     }
 
     /** Turns what the mirror has into Ogg pieces in `out`, `start@tag.ogg`, `start` = the frame's boot's nearest 'T' +
@@ -190,12 +215,7 @@ class Mirror(private val dir: File) {
      *  them at anyway).
      *  Returns the number of pieces written. */
     fun pieces(out: File, undated: File, tag: String, liveFrames: Int, boot: Int): Int {
-        for ((f, s) in files) if (have(f) > s.tscan) {  // first every 'T' there is: a later file may date an earlier one
-            for ((r, end) in Store.scan(bytes(f, s.tscan), s.tscan)) {
-                if (r is Store.Sync) syncs.getOrPut(clock(f)) { mutableListOf() }.let { ts -> if (ts.none { it[0] == r.frame }) ts += longArrayOf(r.frame, r.epochMs) }
-                s.tscan = end
-            }
-        }
+        scanSyncs()
         var n = 0
         for ((f, s) in files) {
             val whole = s.closed && s.size in 0..have(f)

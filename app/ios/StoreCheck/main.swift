@@ -70,6 +70,25 @@ do {
   check(m2.have(f), 0, "dropped")
 }
 
+// what is said now sent ahead of a backlog still on the card (#130): where its first piece starts, before it is made
+do {
+  let dir = tmp(), out = tmp(), undated = tmp()
+  let m = Mirror(dir)
+  let old: Int64 = 1 << 16 | 1, open: Int64 = 1 << 16 | 2  // a closed file not read yet; the one the stream goes on in
+  m.listed([old: 72, open: 85], open: open)
+  check(m.nextStart(from: open), nil, "nothing of the open file yet")
+  _ = try m.put(open, 0, t(100, 5_000_000) + a(100, 10) + a(110, 10))
+  check(m.nextStart(from: open), 5_000_000, "its first frame, by its 'T'")
+  check(try m.pieces(out, undated, tag: "X", liveFrames: 15, boot: 1), 1, "the piece")
+  check(names(out), ["5000000@X.ogg"], "starts where nextStart said")
+  check(m.nextStart(from: open), nil, "all of it in pieces")
+  _ = try m.put(old, 0, a(80, 10) + a(90, 10))  // the backlog, read off the card afterwards
+  check(m.nextStart(from: open), nil, "older files are not ahead")
+  check(m.nextStart(from: old), 4_999_800, "dated by the same boot's 'T'")
+  check(try m.pieces(out, undated, tag: "X", liveFrames: 15, boot: 1), 1, "the backlog's piece")
+  check(names(out), ["4999800@X.ogg", "5000000@X.ogg"], "older than what went ahead")
+}
+
 // undated
 do {
   let dir = tmp(), out = tmp(), undated = tmp()

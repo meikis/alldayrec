@@ -57,7 +57,8 @@ class RecorderService : Service() {
             val total = s["syncTotal"] as Long? ?: 0L
             val title = when {
                 s["source"] != "ble" -> "live-record 正在录音"
-                total > 0 -> "补传离线录音 %.1f / %.1f MB".format((s["syncDone"] as Long? ?: 0L) / 1024.0, total / 1024.0)
+                total > 0 -> (if ((s["link"] as String?).orEmpty().startsWith("已连接")) "实时上传 · 后台补传" else "补传离线录音") +
+                    " %.1f / %.1f MB".format((s["syncDone"] as Long? ?: 0L) / 1024.0, total / 1024.0)
                 else -> s["link"] as String? ?: "正在启动"
             }
             val hw = (s["hw"] as Map<*, *>?).takeIf { title.startsWith("已连接") || total > 0 }
@@ -150,7 +151,7 @@ class RecorderService : Service() {
     private fun ensureUploader(prefs: android.content.SharedPreferences, dir: File): Uploader {
         uploader?.let { return it }
         val archive = if (prefs.getBoolean("archive", true)) File(getExternalFilesDir(null), "recordings") else null
-        return Uploader(dir, prefs.getString("server", "")!!, prefs.getString("token", "")!!, prefs.getString("device", "phone")!!, archive)
+        return Uploader(prefs, dir, prefs.getString("server", "")!!, prefs.getString("token", "")!!, prefs.getString("device", "phone")!!, archive)
             .also { uploader = it; it.start() }
     }
 
@@ -224,7 +225,7 @@ class RecorderService : Service() {
  *  so the directory is the offline queue. Back-to-back pieces waiting together go as one request (each piece is a
  *  whole Ogg stream, so their bytes in a row decode as one): with 1 s pieces one request per piece cannot keep up
  *  when a request takes over a second (10-03: the queue grew to 16 s). */
-class Uploader(private val dir: File, private val server: String, private val token: String, private val device: String,
+class Uploader(private val prefs: android.content.SharedPreferences, private val dir: File, private val server: String, private val token: String, private val device: String,
                private val archive: File?) : Thread() {
     @Volatile var running = true
     @Volatile var sent = 0
@@ -239,19 +240,30 @@ class Uploader(private val dir: File, private val server: String, private val to
         /** A piece's file name is its start (ms) and, for the BLE recorder, @ its name: start@LR-P1-BDAE.ogg */
         fun startMs(f: File) = f.nameWithoutExtension.substringBefore('@').toLong()
         fun deviceOf(f: File) = f.nameWithoutExtension.substringAfter('@', "")
-    }
 
-    private fun files() = queue(dir)
-
-    /** The oldest pieces of one device that follow each other without a gap (a stop or a kill leaves one), at most MAX_BATCH. */
-    private fun batch(q: List<File>): List<File> {
-        val out = mutableListOf(q[0])
-        for (f in q.drop(1)) {
-            if (out.size >= MAX_BATCH || startMs(f) - startMs(out.last()) > BATCH_GAP_MS || deviceOf(f) != deviceOf(out[0])) break
-            out += f
+        /** The first pieces of the queue `q` of one device that follow each other without a gap (a stop or a kill
+         *  leaves one), at most MAX_BATCH: one request, one stretch from its first piece's start. Following means
+         *  later: with what is said now first (#130), the backlog after it is older and goes on its own. */
+        fun batch(q: List<File>): List<File> {
+            val out = mutableListOf(q[0])
+            for (f in q.drop(1)) {
+                if (out.size >= MAX_BATCH || startMs(f) - startMs(out.last()) !in 1..BATCH_GAP_MS || deviceOf(f) != deviceOf(out[0])) break
+                out += f
+            }
+            return out
         }
-        return out
     }
+
+    /** A recorder's pieces from its hold on go first (what is said now, ahead of a backlog read off its card, #130). */
+    private fun files(): List<File> {
+        val q = queue(dir)
+        val ahead = { f: File -> hold(deviceOf(f))?.let { startMs(f) >= it } ?: false }
+        return q.filter(ahead) + q.filterNot(ahead)
+    }
+
+    /** Where the server's finalization waits for a recorder's backlog (BleLink.holdAhead), null: it does not. */
+    private fun hold(device: String) = prefs.getLong("hold:$device", -1).takeIf { device.isNotEmpty() && it >= 0 }
+
 
     override fun run() {
         while (running) {
@@ -259,7 +271,9 @@ class Uploader(private val dir: File, private val server: String, private val to
             if (q.isEmpty()) { sleep(200); continue }
             val b = batch(q)
             try {
-                val code = post("$server/api/chunks?device=${enc(deviceOf(b[0]).ifEmpty { device })}&start=${startMs(b[0])}",
+                // the hold with every upload while there is one: the server lets go when an upload comes without it
+                val code = post("$server/api/chunks?device=${enc(deviceOf(b[0]).ifEmpty { device })}&start=${startMs(b[0])}" +
+                                (hold(deviceOf(b[0]))?.let { "&hold=$it" } ?: ""),
                                 b.fold(ByteArray(0)) { acc, f -> acc + f.readBytes() }, "audio/ogg")
                 Log.i("live-record", "upload ${b.size} pieces of ${deviceOf(b[0]).ifEmpty { device }} from ${startMs(b[0])}: HTTP $code")
                 when {

@@ -216,11 +216,41 @@ final class Mirror {
     save()
   }
 
-  private func bytes(_ f: Int64, _ from: Int64) -> Data {
+  private func bytes(_ f: Int64, _ from: Int64, max: Int? = nil) -> Data {
     guard let h = FileHandle(forReadingAtPath: bin(f).path) else { return Data() }
     defer { try? h.close() }
     try? h.seek(toOffset: UInt64(from))
-    return (try? h.readToEnd()) ?? Data()
+    return (try? max.map { try h.read(upToCount: $0) ?? Data() } ?? h.readToEnd()) ?? Data()
+  }
+
+  /// Every 'T' record the mirror has: a later file may date an earlier one.
+  private func scanSyncs() {
+    for f in files.keys.sorted() where have(f) > files[f]!.tscan {
+      let s = files[f]!
+      for (r, end) in Store.scan(bytes(f, s.tscan), base: s.tscan) {
+        if case let .sync(frame, epochMs) = r, !(syncs[clock(f)] ?? []).contains(where: { $0.frame == frame }) {
+          syncs[clock(f), default: []].append((frame, epochMs))
+        }
+        s.tscan = end
+      }
+    }
+  }
+
+  /// Where the next piece of the files from `f0` on will start (unix ms), as pieces() will name it; nil when none of
+  /// them has a dated frame yet. A phone sending these ahead of older audio still on the card says so first (#130).
+  func nextStart(from f0: Int64) -> Int64? {
+    scanSyncs()
+    for f in files.keys.sorted() where f >= f0 {
+      let s = files[f]!
+      guard !s.finished, let ts = syncs[clock(f)], !ts.isEmpty else { continue }
+      for (r, _) in Store.scan(bytes(f, s.cut, max: 8192), base: s.cut) {  // a record is at most 2.6 KB
+        if case let .audio(first, _) = r {
+          let near = ts.min { abs($0.frame - first) < abs($1.frame - first) }!
+          return near.epochMs + (first - near.frame) * Store.frameMs
+        }
+      }
+    }
+    return nil
   }
 
   /// Turns what the mirror has into Ogg pieces in `out`, `start@tag.ogg`, `start` = the frame's boot's nearest 'T' +
@@ -231,15 +261,7 @@ final class Mirror {
   /// them at anyway).
   /// Returns the number of pieces written.
   func pieces(_ out: URL, _ undated: URL, tag: String, liveFrames: Int, boot: Int) throws -> Int {
-    for f in files.keys.sorted() where have(f) > files[f]!.tscan {  // first every 'T' there is: a later file may date an earlier one
-      let s = files[f]!
-      for (r, end) in Store.scan(bytes(f, s.tscan), base: s.tscan) {
-        if case let .sync(frame, epochMs) = r, !(syncs[clock(f)] ?? []).contains(where: { $0.frame == frame }) {
-          syncs[clock(f), default: []].append((frame, epochMs))
-        }
-        s.tscan = end
-      }
-    }
+    scanSyncs()
     var n = 0
     for f in files.keys.sorted() {
       let s = files[f]!

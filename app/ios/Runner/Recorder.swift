@@ -256,6 +256,9 @@ enum Recorder {
 
   static func now() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 
+  /// Where the server's finalization waits for a recorder's backlog (BleLink.holdAhead), nil: it does not.
+  static func hold(_ tag: String) -> Int64? { (defaults.object(forKey: "hold:\(tag)") as? NSNumber)?.int64Value }
+
   /// This process's memory as iOS counts it against the app's limit (phys_footprint), in MB.
   static func footprintMB() -> Int {
     var info = task_vm_info_data_t()
@@ -436,13 +439,14 @@ final class Uploader: Thread {
     return (start, p.count == 2 ? p[1] : nil, at.count == 2 ? String(at[1]) : nil)
   }
 
-  /// The oldest pieces of one BLE recorder that follow each other (a stop or a kill leaves a gap), at most 30; the
-  /// microphone's go one at a time, each with its n.
+  /// The first pieces of the queue of one BLE recorder that follow each other (a stop or a kill leaves a gap), at most
+  /// 30: one request, one stretch from its first piece's start. Following means later: with what is said now first
+  /// (#130), the backlog after it is older and goes on its own. The microphone's go one at a time, each with its n.
   private func batch(_ q: [URL]) -> [URL] {
     guard let d = Uploader.piece(q[0])?.device else { return [q[0]] }
     var out = [q[0]]
     for f in q.dropFirst() {
-      guard out.count < 30, let p = Uploader.piece(f), p.device == d, p.start - Uploader.piece(out.last!)!.start <= 1500 else { break }
+      guard out.count < 30, let p = Uploader.piece(f), p.device == d, (1...1500).contains(p.start - Uploader.piece(out.last!)!.start) else { break }
       out.append(f)
     }
     return out
@@ -461,11 +465,17 @@ final class Uploader: Thread {
   override func main() { while true { autoreleasepool(invoking: pass) } }
 
   private func pass() {
-    let q = Uploader.files(dir)
+    // a recorder's pieces from its hold on go first (what is said now, ahead of a backlog read off its card, #130)
+    let all = Uploader.files(dir), ahead = { (f: URL) in
+      Uploader.piece(f).map { p in p.device.flatMap(Recorder.hold).map { p.start >= $0 } ?? false } ?? false
+    }
+    let q = all.filter(ahead) + all.filter { !ahead($0) }
     guard let f = q.first, let p = Uploader.piece(f) else { Thread.sleep(forTimeInterval: 1); return }
     let b = batch(q)
+    // the hold with every upload while there is one: the server lets go when an upload comes without it
+    let hold = p.device.flatMap(Recorder.hold).map { "&hold=\($0)" } ?? ""
     do {
-      let code = try post("\(server)/api/chunks?device=\(enc(p.device ?? device))&start=\(p.start)" + (p.n.map { "&n=\($0)" } ?? ""),
+      let code = try post("\(server)/api/chunks?device=\(enc(p.device ?? device))&start=\(p.start)" + (p.n.map { "&n=\($0)" } ?? "") + hold,
                           try b.reduce(Data()) { $0 + (try Data(contentsOf: $1)) }, f.pathExtension == "ogg" ? "audio/ogg" : "audio/aac")
       switch code {
       case 200:
