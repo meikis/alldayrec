@@ -260,13 +260,14 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
     }
 
     @Suppress("DEPRECATION")
-    private fun subscribe(g: BluetoothGatt, s: UUID, c: UUID) {
+    private fun subscribe(g: BluetoothGatt, s: UUID, c: UUID, on: Boolean = true) {
         val ch = chr(g, s, c)
-        g.setCharacteristicNotification(ch, true)
+        g.setCharacteristicNotification(ch, on)
         val d = ch.getDescriptor(Ble.CCCD)
-        op("subscribe $c") {
-            if (Build.VERSION.SDK_INT >= 33) g.writeDescriptor(d, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothGatt.GATT_SUCCESS
-            else { d.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; g.writeDescriptor(d) }
+        val v = if (on) BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE else BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+        op("${if (on) "subscribe" else "unsubscribe"} $c") {
+            if (Build.VERSION.SDK_INT >= 33) g.writeDescriptor(d, v) == BluetoothGatt.GATT_SUCCESS
+            else { d.value = v; g.writeDescriptor(d) }
         }
     }
 
@@ -329,6 +330,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             val m = Mirror(File(ctx.filesDir, "recorder/${Ble.tag(name)}"))
             mirrorName = Ble.tag(name); boot = st.boot
             open = -1; liveFloor = -1; ahead = -1; reading = null; needList = true; listFull = false; liveRead = true; stalls.clear()
+            holeAt = -1; refollow = false; abandoned = -1; liveGaps = 0; settleUntil = android.os.SystemClock.elapsedRealtime() + 3000
             caught = 0; caughtSince = 0
             state = "正在接上实时"
             var live0 = false  // LIVE taken since the file it goes on in was caught up
@@ -339,6 +341,11 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             // lacks (nextRead). LIVE waits only while the file it goes on in is READ (at connect, after a hole, at a new
             // file): a backlog of days no longer holds back what is said now
             while (gatt === g && on) {
+                if (refollow) {  // a hole in the live file no card can fill: LIVE goes on in a new file, dated at once
+                    refollow = false
+                    follow(g)
+                    synced = sync(g)
+                }
                 var took = false
                 if (!liveRead) {
                     var p = live.poll(if (reading == null) 1000L else 0L, TimeUnit.MILLISECONDS)  // nothing to READ: wait for LIVE here
@@ -480,13 +487,15 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         val raw = read(g, Ble.STORE, Ble.TIME)
         val t = le(raw)
         val s = Status(t.getShort(0).toInt() and 0xffff, t.getInt(2).toLong() and 0xffffffffL, t.getShort(6).toInt())
+        noCard = s.store < 0 && t.getInt(12) == 0
         val left = syncTotalKb - syncDoneKb
         val rate = if (caughtSince > 0) caught * 1000.0 / maxOf(1000L, android.os.SystemClock.elapsedRealtime() - caughtSince) else 0.0
         val h = mutableMapOf<String, Any?>("name" to name, "store" to s.store, "free_kb" to (t.getInt(8).toLong() and 0xffffffffL),
             "total_kb" to (t.getInt(12).toLong() and 0xffffffffL), "battery" to read(g, Ble.BAS, Ble.BATTERY).firstOrNull()?.toInt(),
             "charge" to Ble.charge(raw),
             // a backlog read in the background (#130): what is left, and when it is done at this pace
-            "backlog_kb" to left, "backlog_eta_s" to if (rate > 0 && left > 0) (left * 1024 / rate).toLong() else null)
+            "backlog_kb" to left, "backlog_eta_s" to if (rate > 0 && left > 0) (left * 1024 / rate).toLong() else null,
+            "live_gaps" to liveGaps)  // holes in LIVE the card could not fill this session (follow())
         if (t.limit() >= 47) pausedUntil = t.getInt(43).toLong().let { if (it > 0) System.currentTimeMillis() + it * 1000 else 0L }
         for ((k, c) in listOf("model" to Ble.MODEL, "fw" to Ble.FW_REV))
             h[k] = hw[k] ?: try { String(read(g, Ble.DIS, c)) } catch (e: Exception) { null }
@@ -511,6 +520,14 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
     private var liveRead = true  // the live file (and the one before it) first: LIVE goes on from where its READ ends
     private var needList = true
     private var listFull = false  // the last LIST was cut at Mirror.LIST_MAX: more files once some are deleted
+    private var holeAt = -1L      // LIVE went on at this offset past a hole in the live file: its READ has to reach it
+    private var refollow = false  // that READ did not: no card to fill it from (none in the board, or it failed)
+    private var abandoned = -1L   // the live file given up for a new one (follow()): what LIVE still sends of it is dropped
+    private var liveGaps = 0
+    // no card (store < 0, none mounted this boot): nothing to LIST or READ; each READ kept the link on its fast interval
+    // (2420, 10-07: 15 ms for an hour). A hole in LIVE is a new file at once (follow())
+    private var noCard = false
+    private var settleUntil = 0L  // elapsedRealtime; after a subscribe LIVE still sends the file before the new one, from mid-way
     private val stalls = HashMap<Long, Int>()
     private var caught = 0L       // a catch-up under way: bytes taken since (elapsedRealtime; 0: none)
     private var caughtSince = 0L
@@ -559,6 +576,11 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
 
     /** The next READ, or LIST first; none: caught up. */
     private fun nextRead(g: BluetoothGatt, m: Mirror) {
+        if (noCard) {  // what a LIST would say, without asking: no files, the stream goes on in the live one
+            if (needList) { m.listed(emptyMap(), open); needList = false }
+            liveRead = false
+            return
+        }
         if (needList) list(g, m)
         val missing = m.missing()
         if (liveRead && open < 0) liveRead = false  // a LIST without the open file: nothing to wait for
@@ -640,7 +662,13 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         ctrl.removeIf { it[0] == 0x82.toByte() }
         val got = m.have(r.f) - r.from
         when {
-            r.f == open && !stopped -> liveRead = false  // LIVE goes on from where this READ ended
+            r.f == open && !stopped -> {
+                // a hole the card did not fill: without a card nothing ever will, and every LIVE packet after it found
+                // the hole again and was dropped (2420 with no card, 10-07: an hour of LIVE, no piece)
+                if (holeAt > m.have(r.f)) refollow = true
+                holeAt = -1
+                liveRead = false  // LIVE goes on from where this READ ended
+            }
             got > 0 || stopped -> stalls.remove(r.f)
             (stalls[r.f] ?: 0) >= 3 -> m.noMore(r.f)  // the card has no more of it
             else -> stalls[r.f] = (stalls[r.f] ?: 0) + 1
@@ -654,17 +682,35 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         if (p.size <= 8) return false
         val b = le(p)
         val f = b.getInt(0).toLong() and 0xffffffffL
+        if (f <= abandoned) return false
         if (f > open) {
             liveFloor = open; open = f; needList = true; liveRead = true
             endRead(g, m)
         }
         val hole = m.put(f, b.getInt(4).toLong() and 0xffffffffL, p.copyOfRange(8, p.size))
+        if (hole != null && f == open && noCard) {
+            if (android.os.SystemClock.elapsedRealtime() > settleUntil) refollow = true
+            return refollow
+        }
         if (hole != null && f == open) {
             Log.i("live-record", "ble LIVE hole in %08X at $hole: READ".format(f))
-            liveFloor = open; liveRead = true
+            liveFloor = open; liveRead = true; holeAt = b.getInt(4).toLong() and 0xffffffffL
             endRead(g, m)
         }
         return liveRead
+    }
+
+    /** LIVE from a new file: the board starts one for a phone that subscribes (#135), so LIVE has it from offset 0 again.
+     *  What the old one lacks is lost (the board had no card for it); the caller dates the new one (boot 0 dates each
+     *  file by its own 'T'). */
+    private fun follow(g: BluetoothGatt) {
+        abandoned = open
+        liveGaps++
+        settleUntil = android.os.SystemClock.elapsedRealtime() + 3000
+        Log.i("live-record", "ble LIVE hole in %08X the card cannot fill (card ${hw["store"]}): a new file".format(open))
+        if (liveGaps == 1) DeviceLog.app(mirrorName, "live_gap", "实时音频断了一小段，录音设备上没有卡可以补，从新文件接着收", "warn")
+        subscribe(g, Ble.STORE, Ble.LIVE, on = false)
+        subscribe(g, Ble.STORE, Ble.LIVE)
     }
 
     /** Where the server's finalization waits while a backlog goes up after what is said now (prefs hold:<name>, sent
@@ -697,6 +743,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
 
     /** Files mirrored whole and uploaded: off the card (DELETE) and out of the mirror. */
     private fun clean(g: BluetoothGatt, m: Mirror) {
+        if (noCard) return
         val done = m.done(chunks)
         if (done.isNotEmpty() && listFull) needList = true  // room in the next LIST for files it left out
         for (f in done) {

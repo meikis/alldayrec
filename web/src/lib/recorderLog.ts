@@ -118,7 +118,12 @@ const EVENTS: Record<number, [string, string, (r: Rec) => string]> = {
       `上次结束于 ${reas(r.a)}，电池 ${r.x * 20} mV，固件 ${hex(r.b & 0xfffffff, 7)}${(r.b >>> 28) & 1 ? "+" : ""}`,
   ],
   2: ["FAULT", "崩溃", (r) => `${FAULTS[r.a] ?? r.a}，PC 0x${hex(r.b, 8)}（上一次运行）`],
-  3: ["MOUNT", "挂载存储卡", (r) => `第 ${r.x} 次：${err(r.a)}`],
+  3: [
+    "MOUNT",
+    "挂载存储卡",
+    // no answer (ETIMEDOUT) or no device: no card, or one not seated (LR-P3-2420 without one, 10-07)
+    (r) => `第 ${r.x} 次：${err(r.a)}${[-116, -19].includes(r.a | 0) ? "（没插卡或没插好）" : ""}`,
+  ],
   4: [
     "STORE",
     "离线存储就绪",

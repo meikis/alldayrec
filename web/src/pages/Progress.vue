@@ -97,14 +97,20 @@ function span(s: number) {
   const m = Math.round(s / 60);
   return m >= 60 ? `${Math.floor(m / 60)} 小时 ${m % 60} 分` : `${m} 分钟`;
 }
+// store is an errno; with nothing mounted this boot (total_kb 0) no card or one not seated (-19, -116: a mount that
+// timed out), as the app's cardState says it
 const card = (h: RecorderStatus) =>
-  h.store === -19
-    ? "没有卡"
-    : h.store === -28
-      ? "已满，停止离线录音"
-      : h.total_kb
-        ? `剩 ${((h.free_kb ?? 0) / 1048576).toFixed(1)} / ${(h.total_kb / 1048576).toFixed(1)} GB`
-        : "—";
+  h.store === -28
+    ? "已满，停止离线录音"
+    : h.store === -16
+      ? "U 盘模式，离线录音暂停"
+      : h.store && !h.total_kb
+        ? "没插卡或没插好，只能实时上传"
+        : h.store
+          ? "出错，重插或换卡"
+          : h.total_kb
+            ? `剩 ${((h.free_kb ?? 0) / 1048576).toFixed(1)} / ${(h.total_kb / 1048576).toFixed(1)} GB`
+            : "—";
 const caughtUp = (d: DeviceStatus) => d.left_s < 30;
 // Held (#130): the phone reads older audio off the recorder's card in the background while it sends what is said now;
 // finals wait at the hold for it, so the server's own estimate does not apply

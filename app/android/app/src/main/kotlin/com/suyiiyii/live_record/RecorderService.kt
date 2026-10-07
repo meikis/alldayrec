@@ -47,6 +47,16 @@ class RecorderService : Service() {
                 "listen" to link?.listening?.lines)
         }
 
+        /** The recorder's card when it does not record to it, as main.dart cardState says it: store an errno, total_kb 0
+         *  when none mounted this boot (no card, or one not seated: -19, a mount that timed out -116). */
+        fun cardLine(store: Int?, totalKb: Long?): String? = when {
+            store == null || store == 0 -> null
+            store == -28 -> "存储卡已满"
+            store == -16 -> "存储卡在 U 盘模式"
+            (totalKb ?: 0L) == 0L -> "没插存储卡"
+            else -> "存储卡出错"
+        }
+
         const val BACKLOG_MS = 120_000L  // a piece waiting longer (the longest slice is 60 s, then its upload) is a backlog
 
         /** The notification for a status(): title and text, as the app's bar puts it (main.dart _bleBar). The BLE
@@ -72,7 +82,7 @@ class RecorderService : Service() {
                 if (paused > 0) "已暂停，还剩 ${(paused + 59_999) / 60_000} 分钟" else null,
                 hw?.get("battery")?.let { "电量 $it%" },
                 mapOf("battery" to "用电池", "charging" to "充电中", "full" to "已充满")[hw?.get("charge")],
-                mapOf(-19 to "没有存储卡", -28 to "存储卡已满")[hw?.get("store")],
+                cardLine((hw?.get("store") as Number?)?.toInt(), (hw?.get("total_kb") as Number?)?.toLong()),
                 if (oldest != null && now - oldest > BACKLOG_MS) "待传 ${s["pending"]} 块" else null,
                 (s["interruptedAt"] as Long?)?.let { "曾在 ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it))} 被系统中断，已自动恢复" },
             ).joinToString(" · ")

@@ -452,6 +452,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       let m = Mirror(mirrors.appendingPathComponent(Ble.tag(name)))
       boot = st.boot
       open = -1; liveFloor = -1; ahead = -1; reading = nil; needList = true; listFull = false; liveRead = true; stalls = [:]
+      holeAt = -1; refollow = false; abandoned = -1; liveGaps = 0; settleUntil = Date(timeIntervalSinceNow: 3)
       caught = 0; caughtSince = nil
       state = "正在接上实时"
       var live0 = false  // LIVE taken since the file it goes on in was caught up
@@ -463,6 +464,11 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         // a pool per pass: this thread lives as long as the link, and what Foundation autoreleases here (each pieces()'s
         // read of the live file) would stay until it ends: 3.4 GB and killed by iOS within hours on 10-06 (#109)
         try autoreleasepool {
+          if refollow {  // a hole in the live file no card can fill: LIVE goes on in a new file, dated at once
+            refollow = false
+            try follow(p)
+            synced = try sync(p)
+          }
           var took = false
           if !liveRead {
             var pk = live.poll(reading == nil ? 1 : 0)  // nothing to READ: wait for LIVE here
@@ -528,6 +534,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     let t = try read(p, Ble.store, Ble.time)
     guard t.count >= 16 else { throw Fail(description: "状态只有 \(t.count) 字节") }
     let s = Status(boot: Int(Store.le(t, 0, 2)), frame: Ble.u32(t, 2), store: Int(Int16(truncatingIfNeeded: Store.le(t, 6, 2))))
+    noCard = s.store < 0 && Ble.u32(t, 12) == 0
     let left = syncTotalKb - syncDoneKb, rate = caughtSince.map { Double(caught) / max(1, -$0.timeIntervalSinceNow) } ?? 0
     var h: [String: Any] = ["name": name, "store": s.store, "free_kb": Ble.u32(t, 8), "total_kb": Ble.u32(t, 12),
                             // a backlog read in the background (#130): what is left, and when it is done at this pace
@@ -535,6 +542,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
                             // optional: macOS cannot publish 180F, so the Mac's fake recorder (app/ios/e2e) has none
                             "battery": (try? read(p, Ble.bas, Ble.battery))?.first.map { Int($0) } ?? NSNull(),
                             "app_mb": Recorder.footprintMB(),  // this app's own memory, to see it grow from the server (#109)
+                            "live_gaps": liveGaps,  // holes in LIVE the card could not fill this session (follow())
                             "charge": Ble.charge(t) ?? NSNull()]
     if t.count >= 47 {
       let left = Int64(Int32(truncatingIfNeeded: Store.le(t, 43, 4)))
@@ -628,6 +636,14 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   private var needList = true
   private var listFull = false      // the last LIST was cut at Mirror.listMax: more files once some are deleted
   private var stalls: [Int64: Int] = [:]
+  private var holeAt: Int64 = -1    // LIVE went on at this offset past a hole in the live file: its READ has to reach it
+  private var refollow = false      // that READ did not: no card to fill it from (none in the board, or it failed)
+  private var abandoned: Int64 = -1  // the live file given up for a new one (follow()): what LIVE still sends of it is dropped
+  private var liveGaps = 0
+  // no card (store < 0, none mounted this boot): nothing to LIST or READ; each READ kept the link on its fast interval
+  // (2420, 10-07: 15 ms for an hour). A hole in LIVE is a new file at once (follow())
+  private var noCard = false
+  private var settleUntil = Date.distantPast  // after a subscribe: LIVE still sends the file before the new one, from mid-way
   private var caught: Int64 = 0     // a catch-up under way: bytes taken since
   private var caughtSince: Date?
 
@@ -674,6 +690,11 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
   /// The next READ, or LIST first; none: caught up.
   private func nextRead(_ p: Conn, _ m: Mirror) throws {
+    if noCard {  // what a LIST would say, without asking: no files, the stream goes on in the live one
+      if needList { m.listed([:], open: open); needList = false }
+      liveRead = false
+      return
+    }
     if needList { try list(p, m) }
     let missing = m.missing()
     if liveRead && open < 0 { liveRead = false }  // a LIST without the open file: nothing to wait for
@@ -749,6 +770,10 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     ctrl.clear { $0.first == 0x82 }
     let got = m.have(r.f) - r.from
     if r.f == open && !stopped {
+      // a hole the card did not fill: without a card nothing ever will, and every LIVE packet after it found the hole
+      // again and was dropped (2420 with no card, 10-07: an hour of LIVE, no piece)
+      if holeAt > m.have(r.f) { refollow = true }
+      holeAt = -1
       liveRead = false  // LIVE goes on from where this READ ended
     } else if got > 0 || stopped {
       stalls[r.f] = nil
@@ -765,16 +790,35 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   private func takeLive(_ p: Conn, _ m: Mirror, _ pk: [UInt8]) throws -> Bool {
     guard pk.count > 8 else { return false }
     let f = Ble.u32(pk, 0)
+    if f <= abandoned { return false }
     if f > open {
       liveFloor = open; open = f; needList = true; liveRead = true
       try endRead(p, m)
     }
     if let hole = try m.put(f, Ble.u32(pk, 4), Data(pk[8...])), f == open {
+      if noCard {
+        if Date() > settleUntil { refollow = true }
+        return refollow
+      }
       Ble.log("LIVE hole in \(String(f, radix: 16)) at \(hole): READ")
-      liveFloor = open; liveRead = true
+      liveFloor = open; liveRead = true; holeAt = Ble.u32(pk, 4)
       try endRead(p, m)
     }
     return liveRead
+  }
+
+  /// LIVE from a new file: the board starts one for a phone that subscribes (#135), so LIVE has it from offset 0 again.
+  /// What the old one lacks is lost (the board had no card for it); the caller dates the new one (boot 0 dates each
+  /// file by its own 'T').
+  private func follow(_ p: Conn) throws {
+    abandoned = open
+    liveGaps += 1
+    settleUntil = Date(timeIntervalSinceNow: 3)
+    Ble.log("LIVE hole in \(String(open, radix: 16)) the card cannot fill (card \(hw["store"] ?? "-")): a new file")
+    if liveGaps == 1, let tag { DeviceLog.app(tag, "live_gap", "实时音频断了一小段，录音设备上没有卡可以补，从新文件接着收", level: "warn") }
+    let ch = try chr(p, Ble.store, Ble.live)
+    _ = try op(p, "unsubscribe live") { p.p.setNotifyValue(false, for: ch) }
+    try subscribe(p, Ble.live)
   }
 
   /// Where the server's finalization waits while a backlog goes up after what is said now (`hold:<tag>`, sent with
@@ -824,6 +868,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
   /// Files mirrored whole and uploaded: off the card (DELETE) and out of the mirror.
   private func clean(_ p: Conn, _ m: Mirror) throws {
+    if noCard { return }
     let done = m.done(chunks)
     if !done.isEmpty && listFull { needList = true }  // room in the next LIST for files it left out
     for f in done {

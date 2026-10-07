@@ -220,7 +220,17 @@ async function recorderState(gatt: BluetoothRemoteGATTServer) {
   const t = await (await setClock(gatt)).readValue();
   const battery = (await (await (await gatt.getPrimaryService("battery_service")).getCharacteristic("battery_level")).readValue()).getUint8(0);
   const st = { store: t.getInt16(6, true), free_kb: t.getUint32(8, true), total_kb: t.getUint32(12, true), battery };
-  hw.value = `电量 ${battery}% · ${st.store === -19 ? "没有存储卡" : st.store === -28 ? "存储卡已满" : `卡剩 ${(st.free_kb / 1048576).toFixed(1)} GB`}`;
+  const card =
+    st.store === -28
+      ? "存储卡已满"
+      : st.store === -16
+        ? "存储卡在 U 盘模式"
+        : st.store && !st.total_kb
+          ? "没插存储卡"
+          : st.store
+            ? "存储卡出错"
+            : `卡剩 ${(st.free_kb / 1048576).toFixed(1)} GB`;
+  hw.value = `电量 ${battery}% · ${card}`;
   await send(`/api/device-status?device=${encodeURIComponent(target())}`, new Blob([JSON.stringify(st)], { type: "application/json" }), "application/json").catch(() => {});
 }
 async function onDrop() {

@@ -136,7 +136,7 @@ export interface RecorderStatus {
   fw?: string;
   battery?: number;
   charge?: keyof typeof CHARGE; // what it runs on (firmware lr_power.h); none from an older firmware
-  store?: number; // 0 recording to the card; -19 no card; -28 card full
+  store?: number; // 0 recording to the card; an errno otherwise: with total_kb 0 no card (-19, -116), -28 full, -16 lent
   free_kb?: number;
   total_kb?: number;
   backlog_kb?: number; // left on the card for the phone to read in the background (#130)
