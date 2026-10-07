@@ -35,6 +35,13 @@ const card = (h: RecorderStatus) =>
         ? `剩 ${((h.free_kb ?? 0) / 1048576).toFixed(1)} / ${(h.total_kb / 1048576).toFixed(1)} GB`
         : "—";
 const caughtUp = (d: DeviceStatus) => d.left_s < 30;
+// Held (#130): the phone reads older audio off the recorder's card in the background while it sends what is said now;
+// finals wait at the hold for it, so the server's own estimate does not apply
+const held = (d: DeviceStatus) => {
+  const kb = d.hw?.backlog_kb,
+    eta = d.hw?.backlog_eta_s;
+  return `定稿停在 ${at(d.hold!)}，等手机在后台补传卡里更早的录音${kb ? `（还有 ${(kb / 1024).toFixed(1)} MB${eta ? `，约 ${span(eta)}` : ""}）` : ""}，补完再接着定稿；初稿照常`;
+};
 const eta = (d: DeviceStatus) => {
   if (!d.eta_s) return "—";
   const t = new Date(Date.now() + d.eta_s * 1000);
@@ -51,14 +58,19 @@ const eta = (d: DeviceStatus) => {
           ><b>{{ d.device }}</b>
           <RouterLink :to="`/device/${encodeURIComponent(d.device)}`">日志</RouterLink></span
         >
-        <span :class="caughtUp(d) ? 'ok' : 'busy'">{{ caughtUp(d) ? "已追上" : "处理中" }}</span>
+        <span :class="caughtUp(d) ? 'ok' : 'busy'">{{
+          caughtUp(d) ? "已追上" : d.hold ? "等补传" : "处理中"
+        }}</span>
       </div>
       <div class="grid">
         <span>已收到</span><span>{{ at(d.received_to) }}</span> <span>已定稿</span
         ><span>{{ at(d.done_to) }}</span> <span>待处理</span
         ><span>{{ caughtUp(d) ? "—" : span(d.left_s) + " 录音" }} · 排队 {{ d.queued }} 块</span>
+        <template v-if="d.hold"
+          ><span>补传</span><span>{{ held(d) }}</span></template
+        >
         <span>速度</span><span>{{ d.rate ? `${d.rate} 倍实时` : "—" }}</span> <span>预计完成</span
-        ><span>{{ caughtUp(d) ? "—" : eta(d) }}</span> <span>最近一轮</span
+        ><span>{{ caughtUp(d) ? "—" : d.hold ? "补传完之后" : eta(d) }}</span> <span>最近一轮</span
         ><span :class="{ bad: d.refine?.error }">{{
           d.refine?.error
             ? "失败：" + d.refine.error

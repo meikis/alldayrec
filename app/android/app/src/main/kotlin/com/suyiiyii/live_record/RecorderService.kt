@@ -43,7 +43,7 @@ class RecorderService : Service() {
                 "pending" to q.size, "pendingBytes" to q.sumOf { it.length() }, "oldest" to q.firstOrNull()?.let(Uploader::startMs),
                 "interruptedAt" to if (interruptedAt > 0) interruptedAt else null, "link" to link?.state, "tag" to slicer?.tag, "hw" to link?.hw,
                 "dfu" to Dfu.state, "dfuBusy" to Dfu.busy, "source" to (if (slicer == null) null else if (link != null) "ble" else "mic"), "usbNote" to link?.usbNote, "lastSync" to link?.syncNote,
-                "syncDone" to link?.syncDoneKb, "syncTotal" to link?.syncTotalKb, "pausedUntil" to link?.pausedUntil,
+                "syncDone" to link?.syncDoneKb, "syncTotal" to link?.syncTotalKb, "syncLive" to link?.syncLiveKb, "pausedUntil" to link?.pausedUntil,
                 "listen" to link?.listening?.lines)
         }
 
@@ -57,8 +57,10 @@ class RecorderService : Service() {
             val total = s["syncTotal"] as Long? ?: 0L
             val title = when {
                 s["source"] != "ble" -> "live-record 正在录音"
-                total > 0 -> (if ((s["link"] as String?).orEmpty().startsWith("已连接")) "实时上传 · 后台补传" else "补传离线录音") +
-                    " %.1f / %.1f MB".format((s["syncDone"] as Long? ?: 0L) / 1024.0, total / 1024.0)
+                // LIVE goes on while the backlog is read (#130); before that only the file being recorded is waited for
+                total > 0 -> if ((s["link"] as String?).orEmpty().startsWith("已连接"))
+                    "实时上传 · 后台补传 %.1f / %.1f MB".format((s["syncDone"] as Long? ?: 0L) / 1024.0, total / 1024.0)
+                else "接上实时前先取正在录的这段 · 还差 %.1f MB".format((s["syncLive"] as Long? ?: 0L) / 1024.0)
                 else -> s["link"] as String? ?: "正在启动"
             }
             val hw = (s["hw"] as Map<*, *>?).takeIf { title.startsWith("已连接") || total > 0 }

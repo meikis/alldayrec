@@ -306,7 +306,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
                 if (!adding && e.message in AUTH_FAILED) return kicked(g, "${e.message}") else throw e
             }
             live.clear(); ctrl.clear(); data.clear()
-            syncDoneKb = 0; syncTotalKb = 0
+            syncDoneKb = 0; syncTotalKb = 0; syncLiveKb = 0
             subscribe(g, Ble.STORE, Ble.CTRL)  // replies to LIST/READ/DELETE and the app's USB disk switch
             subscribe(g, Ble.STORE, Ble.DATA)
             subscribe(g, Ble.STORE, Ble.LIVE)  // first: nothing the stream adds after LIST is missed
@@ -325,7 +325,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             mirrorName = Ble.tag(name); boot = st.boot
             open = -1; liveFloor = -1; ahead = -1; reading = null; needList = true; listFull = false; liveRead = true; stalls.clear()
             caught = 0; caughtSince = 0
-            state = "补传离线录音"
+            state = "正在接上实时"
             var live0 = false  // LIVE taken since the file it goes on in was caught up
             var lastStatus = android.os.SystemClock.elapsedRealtime()
             var lastPieces = 0L
@@ -372,6 +372,8 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         } catch (e: Exception) {
             Log.w("live-record", "ble session: $e")
             if (gatt === g) { state = "录音设备出错：${e.message}"; g.disconnect() }
+        } finally {
+            syncDoneKb = 0; syncTotalKb = 0; syncLiveKb = 0  // no link, no catch-up under way
         }
     }
 
@@ -432,6 +434,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
     @Volatile var syncNote: String? = null  // the last catch-up, for the app's recorder page
     @Volatile var syncDoneKb = 0L           // the catch-up under way: taken of total (0 of 0: none)
     @Volatile var syncTotalKb = 0L
+    @Volatile var syncLiveKb = 0L           // of it, what LIVE still waits for: the file being recorded (#130, #135)
 
     /** The board's SD card as a USB disk on the computer it is plugged into (CTRL 0x06), or back. */
     fun usbDisk(on: Boolean) {
@@ -538,6 +541,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         if (backlog + cur > 0 && caughtSince == 0L) caughtSince = android.os.SystemClock.elapsedRealtime()
         syncDoneKb = caught / 1024
         syncTotalKb = if (backlog + cur > 0) (caught + backlog + cur) / 1024 else 0
+        syncLiveKb = cur / 1024
         return backlog + cur
     }
 

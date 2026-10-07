@@ -138,6 +138,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   @Shared var syncNote: String?        // the last catch-up, for the app's recorder page
   @Shared var syncDoneKb: Int64 = 0    // the catch-up under way: taken of total (0 of 0: none)
   @Shared var syncTotalKb: Int64 = 0
+  @Shared var syncLiveKb: Int64 = 0    // of it, what LIVE still waits for: the file being recorded (#130, #135)
   @Shared private(set) var listening: Listen?  // the recorder's sound played on this phone too (Listen.swift)
 
   private let prefs = Recorder.defaults
@@ -396,7 +397,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
   private func session(_ p: Conn) {
     one.lock()
-    defer { one.unlock() }
+    defer { syncDoneKb = 0; syncTotalKb = 0; syncLiveKb = 0; one.unlock() }  // no link, no catch-up under way
     guard alive(p) else { return }
     let name = prefs.string(forKey: "bleName") ?? p.p.identifier.uuidString
     let adding = prefs.bool(forKey: "bindPending")
@@ -423,7 +424,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         throw error
       }
       live.clear(); ctrl.clear(); data.clear()
-      syncDoneKb = 0; syncTotalKb = 0
+      syncDoneKb = 0; syncTotalKb = 0; syncLiveKb = 0
       try subscribe(p, Ble.ctrl)  // replies to LIST/READ/DELETE and the app's USB disk switch
       try subscribe(p, Ble.data)
       try subscribe(p, Ble.live)  // before LIST: nothing the stream adds after it is missed
@@ -445,7 +446,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       boot = st.boot
       open = -1; liveFloor = -1; ahead = -1; reading = nil; needList = true; listFull = false; liveRead = true; stalls = [:]
       caught = 0; caughtSince = nil
-      state = "补传离线录音"
+      state = "正在接上实时"
       var live0 = false  // LIVE taken since the file it goes on in was caught up
       var lastStatus = Date(), lastPieces = Date.distantPast
       // One loop for the link (#130): LIVE as it comes, and one READ at a time alongside it for what the mirror lacks
@@ -652,6 +653,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     if backlog + live > 0 && caughtSince == nil { caughtSince = Date() }
     syncDoneKb = caught / 1024
     syncTotalKb = backlog + live > 0 ? (caught + backlog + live) / 1024 : 0
+    syncLiveKb = live / 1024
     return backlog + live
   }
 

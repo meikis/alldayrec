@@ -320,7 +320,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   Widget _bleBar(ColorScheme cs) {
     final s = status, hw = (s['hw'] as Map?) ?? {};
     final link = '${s['link'] ?? '正在启动'}';
-    final syncDone = (s['syncDone'] as num?) ?? 0, syncTotal = (s['syncTotal'] as num?) ?? 0;
+    final syncDone = (s['syncDone'] as num?) ?? 0, syncTotal = (s['syncTotal'] as num?) ?? 0, syncLive = (s['syncLive'] as num?) ?? 0;
     final connected = link.startsWith('已连接'), syncing = syncTotal > 0;
     final (IconData icon, Color color) = syncing
         ? (Icons.sync_rounded, cs.tertiary)
@@ -347,11 +347,15 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
               const SizedBox(width: 12),
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                  Text(syncing ? '${connected ? '实时上传 · 后台补传' : '补传离线录音'} ${(syncDone / 1024).toStringAsFixed(1)} / ${(syncTotal / 1024).toStringAsFixed(1)} MB' : link,
+                  // LIVE goes on while the backlog is read (#130); before that only the file being recorded is waited
+                  // for (old firmware: up to 16 MiB; since #135 a new one at connect: a moment)
+                  Text(!syncing ? link : connected
+                          ? '实时上传 · 后台补传 ${(syncDone / 1024).toStringAsFixed(1)} / ${(syncTotal / 1024).toStringAsFixed(1)} MB'
+                          : '接上实时前先取正在录的这段 · 还差 ${(syncLive / 1024).toStringAsFixed(1)} MB',
                       style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500), maxLines: 2, overflow: TextOverflow.ellipsis),
                   if (syncing) ...[
                     const SizedBox(height: 6),
-                    LinearProgressIndicator(value: syncDone / syncTotal, borderRadius: BorderRadius.circular(2)),
+                    LinearProgressIndicator(value: connected ? syncDone / syncTotal : null, borderRadius: BorderRadius.circular(2)),
                   ],
                   if (detail.isNotEmpty) Text(detail, style: small),
                   if (s['note'] != null) Text('${s['note']}', style: small.copyWith(color: cs.error), maxLines: 2, overflow: TextOverflow.ellipsis),
@@ -500,7 +504,8 @@ class _UploadPageState extends State<UploadPage> {
             : pending > 0
                 ? ('等待上传', Colors.orange.shade700, Icons.schedule_rounded)
                 : ('已全部上传', Colors.green.shade600, Icons.cloud_done_rounded);
-    final left = (srv?['left_s'] ?? 0) as num, eta = srv?['eta_s'] as num?;
+    final left = (srv?['left_s'] ?? 0) as num, eta = srv?['eta_s'] as num?, hold = srv?['hold'];
+    final backlogKb = (srv?['hw'] as Map?)?['backlog_kb'] as num?, backlogEta = (srv?['hw'] as Map?)?['backlog_eta_s'] as num?;
     final caughtUp = left < 30;
     final name = dev.isEmpty ? widget.settings.device : dev;
     return RefreshIndicator(
@@ -559,7 +564,17 @@ class _UploadPageState extends State<UploadPage> {
                       const SizedBox(height: 10),
                       const LinearProgressIndicator(minHeight: 6),
                       const SizedBox(height: 6),
-                      Text(eta == null ? '' : '预计约 ${_span(eta)} 后完成', style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+                      // held (#132): finals wait for the backlog the phone reads in the background; the server's
+                      // own estimate does not know when that is in
+                      Text(
+                          hold != null
+                              ? '定稿停在 ${_at(hold)}，等手机在后台补传卡里更早的录音'
+                                  '${backlogKb != null && backlogKb > 0 ? '（还有 ${_size(backlogKb * 1024)}${backlogEta != null ? '，约 ${_span(backlogEta)}' : ''}）' : ''}'
+                                  '，补完再接着定稿；初稿和实时分析照常'
+                              : eta == null
+                                  ? ''
+                                  : '预计约 ${_span(eta)} 后完成',
+                          style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
                     ],
                     const Divider(height: 24),
                     ListTile(
@@ -915,7 +930,7 @@ class _RecorderPageState extends State<RecorderPage> {
     final link = '${st['link'] ?? ''}';
     final store = hw['store'] as int?, free = (hw['free_kb'] as num?) ?? 0, total = (hw['total_kb'] as num?) ?? 0;
     final battery = hw['battery'] as int?;
-    final syncDone = (st['syncDone'] as num?) ?? 0, syncTotal = (st['syncTotal'] as num?) ?? 0;
+    final syncDone = (st['syncDone'] as num?) ?? 0, syncTotal = (st['syncTotal'] as num?) ?? 0, syncLive = (st['syncLive'] as num?) ?? 0;
     final syncing = recording && syncTotal > 0;
     final lent = store == -16;
     final dfu = (st['dfu'] ?? r['dfu']) as String?;
@@ -925,7 +940,7 @@ class _RecorderPageState extends State<RecorderPage> {
     final (String chip, Color chipColor, IconData chipIcon) = !recording
         ? ('未连接', cs.outline, Icons.bluetooth_disabled_rounded)
         : syncing
-            ? ('同步中', cs.tertiary, Icons.sync_rounded)
+            ? (link.startsWith('已连接') ? '已连接 · 补传中' : '同步中', cs.tertiary, Icons.sync_rounded)
             : link.startsWith('已连接')
                 ? ('已连接', Colors.green.shade600, Icons.bluetooth_connected_rounded)
                 : ('连接中', cs.secondary, Icons.bluetooth_searching_rounded);
@@ -957,7 +972,7 @@ class _RecorderPageState extends State<RecorderPage> {
         heroCard(context, icon: Icons.mic_external_on_rounded, title: '未绑定', chips: [stateChip('未绑定', cs.outline, Icons.link_off_rounded)]),
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Text('录音设备绑定到这台手机后开始录音：手机在附近时实时上传，不在时存进它的卡里，回来后自动补传。'
+          child: Text('录音设备绑定到这台手机后开始录音：手机在附近时实时上传，不在时存进它的卡里，回来后在后台自动补传，实时上传照常。'
               '没绑定时它不录音，现在用的是手机麦克风。', style: small),
         ),
         add,
@@ -983,7 +998,7 @@ class _RecorderPageState extends State<RecorderPage> {
         ],
         Padding(
           padding: const EdgeInsets.only(top: 8),
-          child: Text('录音设备开着就一直在录：手机在附近时实时上传，不在时存进它的卡里，回来后自动补传。需要时可以暂停。', style: small),
+          child: Text('录音设备开着就一直在录：手机在附近时实时上传，不在时存进它的卡里，回来后在后台自动补传，实时上传照常。需要时可以暂停。', style: small),
         ),
         // pause
         section('暂停录音', Row(children: [
@@ -1027,14 +1042,16 @@ class _RecorderPageState extends State<RecorderPage> {
             const SizedBox(height: 10),
             LinearProgressIndicator(value: syncTotal > 0 ? syncDone / syncTotal : null, minHeight: 8, borderRadius: BorderRadius.circular(4)),
             const SizedBox(height: 6),
-            Text(link.startsWith('已连接') ? '实时上传照常，卡上积压的录音在后台取' : '先取完正在录的这一段，再开始实时上传',
+            Text(link.startsWith('已连接')
+                    ? '实时上传照常，卡上积压的录音在后台补传；补完前服务端定稿先停在积压处，初稿和实时分析照常'
+                    : '正在录的这段取完（还差 ${_size(syncLive)}）就开始实时上传，更早的录音之后在后台补传',
                 style: t.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
           ] else
             Row(children: [
               Icon(st['lastSync'] != null ? Icons.check_circle_rounded : Icons.cloud_sync_rounded,
                   color: st['lastSync'] != null ? Colors.green.shade600 : cs.outline),
               const SizedBox(width: 8),
-              Expanded(child: Text((st['lastSync'] as String?) ?? '连上录音设备时自动取回它离线录下的音频')),
+              Expanded(child: Text((st['lastSync'] as String?) ?? '连上录音设备时在后台自动取回它离线录下的音频，不耽误实时上传')),
             ]),
         ])),
         // USB disk

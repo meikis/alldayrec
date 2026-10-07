@@ -33,7 +33,7 @@ defineProps<{ row: Row; hit?: boolean; media?: boolean }>(); // media: played al
     </div>
     <div v-if="row.error" class="text err">识别失败：{{ row.error }}</div>
     <div v-else class="text">
-      <span v-if="row.state === 'draft'" class="draft" title="页面开着时的快速转写，几分钟后由定稿替换">初稿</span
+      <span v-if="row.state === 'draft'" class="draft" title="页面开着时的快速转写，定稿出来后替换：通常几分钟，手机在补传卡里的积压时要等补完">初稿</span
       ><span v-if="row.dictation" class="dict">口述→{{ row.dictation }}</span
       >{{ row.text || "（空）" }}
     </div>
