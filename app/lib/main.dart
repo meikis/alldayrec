@@ -835,7 +835,7 @@ class _QrScanPageState extends State<QrScanPage> {
 }
 
 /// The BLE recorder: which one is bound and, as last read over the link, its battery, card, offline sync and firmware;
-/// the card as a USB disk on a computer, a firmware update from the server (firmware.dart, Android), unbinding.
+/// the card as a USB disk on a computer, the firmware page (firmware.dart: versions, notes, the update), unbinding.
 class RecorderPage extends StatefulWidget {
   final bool visible;
   final Future<void> Function(String source) onSource;  // bound: 'ble'; unbound: back to 'mic'
@@ -1077,7 +1077,7 @@ class _RecorderPageState extends State<RecorderPage> {
         ])),
         // firmware and binding
         section('设备管理', Column(children: [
-          FirmwareTile(model: model, fw: fw, dfu: dfu, dfuBusy: st['dfuBusy'] == true, battery: linked ? battery : null),
+          FirmwareTile(name: name, model: model, fw: fw, dfu: dfu, dfuBusy: st['dfuBusy'] == true),
           const Divider(height: 20),
           ListTile(
             contentPadding: EdgeInsets.zero,

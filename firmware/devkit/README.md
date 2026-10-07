@@ -30,12 +30,20 @@ nrfutil install sdk-manager && nrfutil sdk-manager install --ncs-version v2.7.0 
 ## 发布到 App 在线升级
 
 ```bash
+# 1. 起草：列出这个型号上次发布以来改了固件的提交（不构建、不上传）
+LR_TOKEN=<服务器 AUTH_TOKEN> uv run --no-project python lr_release.py promicro-p3 --server https://lr.example.com
+# 2. 把草稿改写成给用户看的说明，再发布
 LR_TOKEN=<服务器 AUTH_TOKEN> LR_FIRMWARE_TOKEN=<服务器 FIRMWARE_TOKEN> \
-  uv run --no-project python lr_release.py sdmod promicro --server https://lr.example.com --notes "改了什么"
+  uv run --no-project python lr_release.py promicro-p3 --server https://lr.example.com --notes "$(cat notes.txt)"
 ```
 
-逐个变体构建、打包、上传；型号取自那次构建自己的 `.config`（`CONFIG_BT_DIS_MODEL`），只收 sdmod→LR-X1、promicro→LR-P1。
-只发布已在 origin/main 上、本目录无未提交改动的提交。App 录音设备页「检查更新」按型号取服务器上最新的一个，用户点了才升级。
+逐个变体构建、打包、上传；型号取自那次构建自己的 `.config`（`CONFIG_BT_DIS_MODEL`）：sdmod→LR-X1、promicro→LR-P1、
+promicro-p2→LR-P2、promicro-p3→LR-P3。只发布已在 origin/main 上、本目录无未提交改动的提交。
+App 录音设备页 › 固件更新列出这个型号的所有版本和说明（新的在上，标出当前和最新），用户点了才升级。
+
+说明（`--notes`）写给用户看：中文、短、一行一条，讲用户能感觉到的变化，比如「开关要拨稳 0.5 秒才算数」「灯的含义改了：……」；
+不写 issue 号、引脚、芯片、驱动和工具名、内部代号和真名（服务器拒收带 `#数字` 的说明）。一起发布的型号共用 `--notes`，
+上次发布的版本不同就分开跑。已发布版本的说明可以改：`--version <版本> --notes …`（不构建，包不变）。
 固件版本号（DIS Firmware Revision）是 `YYYYMMDD.HHMMSS-<短哈希>`，取提交时间，按文本比较即新旧；本目录有未提交改动时末尾加 `+`，这种构建服务器不收。
 
 ## 接线（sdmod）

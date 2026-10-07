@@ -1,7 +1,8 @@
 """Firmware packages for the BLE recorders, one shelf per model (LR-X1 = XIAO, LR-P1, LR-P2 and LR-P3 = ProMicro):
 lr_release.py uploads a build, the app asks for the newest one of its recorder's model and sends it over Bluetooth. Kept as
 DATA/firmware/<model>/<version>.zip, the .json beside it published last. A version is lr.sh's firmware revision,
-YYYYMMDD.HHMMSS-<commit> (the commit's time): a later one sorts later as text."""
+YYYYMMDD.HHMMSS-<commit> (the commit's time): a later one sorts later as text. Each carries notes for the people who
+own the recorder, listed with every version of the model on the app's firmware page; they can be replaced later."""
 import datetime as dt
 import hashlib
 import hmac
@@ -27,12 +28,20 @@ def check(model: str, version: str | None = None):
         raise HTTPException(400, "model LR-<letters/digits>, version YYYYMMDD.HHMMSS-<commit> from a clean tree")
 
 
-@router.post("/api/firmware")
-async def upload(request: Request, model: str, version: str, commit: str, built: str, notes: str = ""):
-    """One DFU package (`lr.sh pkg`) as the body; the model is the build's own (CONFIG_BT_DIS_MODEL), read by
-    lr_release.py from the build directory the package came from. A version is published once."""
+def allowed(request: Request, notes: str):
+    """Writes need the firmware token, and notes the people with the recorder can read: no issue numbers
+    (lr_release.py's docstring says how to write them)."""
     if not TOKEN or not hmac.compare_digest(request.headers.get("x-firmware-token", ""), TOKEN):
         raise HTTPException(403, "X-Firmware-Token required")
+    if not notes.strip() or re.search(r"#\d", notes):
+        raise HTTPException(400, "notes: what the people with the recorder notice, without issue numbers")
+
+
+@router.post("/api/firmware")
+async def upload(request: Request, model: str, version: str, commit: str, built: str, notes: str):
+    """One DFU package (`lr.sh pkg`) as the body; the model is the build's own (CONFIG_BT_DIS_MODEL), read by
+    lr_release.py from the build directory the package came from. A version is published once."""
+    allowed(request, notes)
     check(model, version)
     if not re.fullmatch(r"[0-9a-f]{40}", commit) or not commit.startswith(version.split("-")[1]):
         raise HTTPException(400, "commit: the full hash of the version's commit")
@@ -51,6 +60,26 @@ async def upload(request: Request, model: str, version: str, commit: str, built:
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{version}.zip").write_bytes(body)
     (d / f"{version}.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
+    return meta
+
+
+@router.get("/api/firmware")
+async def versions(model: str):
+    """A model's packages, newest first: the app's firmware page lists them with their notes."""
+    check(model)
+    return [json.loads(p.read_text()) for p in sorted((DIR / model).glob("*.json"), reverse=True)]
+
+
+@router.patch("/api/firmware/{model}/{version}")
+async def edit(request: Request, model: str, version: str, notes: str):
+    """New notes for a published version (lr_release.py --version); the package stays as it is."""
+    allowed(request, notes)
+    check(model, version)
+    p = DIR / model / f"{version}.json"
+    if not p.exists():
+        raise HTTPException(404, "no such firmware")
+    meta = json.loads(p.read_text()) | {"notes": notes}
+    p.write_text(json.dumps(meta, ensure_ascii=False, indent=1))
     return meta
 
 

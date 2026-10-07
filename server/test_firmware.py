@@ -1,4 +1,5 @@
-"""firmware.py: uploads need the firmware token and a clean version, each model has its own newest package."""
+"""firmware.py: uploads need the firmware token, a clean version and notes for people; each model has its own newest
+package and its own list of versions, whose notes can be replaced."""
 import asyncio
 import io
 import tempfile
@@ -14,6 +15,9 @@ import firmware
 C1, C2 = "a" * 40, "b" * 40
 
 
+NOTES = "开关要拨稳 0.5 秒才算数"
+
+
 def req(body: bytes, token: str) -> Request:
     async def receive():
         return {"type": "http.request", "body": body, "more_body": False}
@@ -27,8 +31,13 @@ def pkg() -> bytes:
     return b.getvalue()
 
 
-def up(model, version, commit, body=None, token="t"):
-    return asyncio.run(firmware.upload(req(pkg() if body is None else body, token), model, version, commit, "2026-10-04T00:00:00Z"))
+def up(model, version, commit, body=None, token="t", notes=NOTES):
+    return asyncio.run(firmware.upload(req(pkg() if body is None else body, token), model, version, commit,
+                                       "2026-10-04T00:00:00Z", notes))
+
+
+def edit(model, version, notes, token="t"):
+    return asyncio.run(firmware.edit(req(b"", token), model, version, notes))
 
 
 def status(f) -> int:
@@ -45,6 +54,9 @@ def test_firmware():
     assert status(lambda: up("../x", "20261004.010203-aaaaaaa", C1)) == 400
     assert status(lambda: up("LR-X1", "20261004.010203-aaaaaaa", C2)) == 400   # commit not the version's
     assert status(lambda: up("LR-X1", "20261004.010203-aaaaaaa", C1, b"not a zip")) == 400
+    assert status(lambda: up("LR-X1", "20261004.010203-aaaaaaa", C1, notes=" ")) == 400
+    assert status(lambda: up("LR-X1", "20261004.010203-aaaaaaa", C1, notes="开关防抖 (#160)")) == 400  # an issue number
+    assert asyncio.run(firmware.versions("LR-X1")) == []
     assert status(lambda: asyncio.run(firmware.latest("LR-X1"))) == 404
     up("LR-X1", "20261004.120000-bbbbbbb", C2)
     up("LR-X1", "20261004.010203-aaaaaaa", C1)  # uploaded later, older commit: not the newest
@@ -55,5 +67,14 @@ def test_firmware():
     assert asyncio.run(firmware.latest("LR-P1"))["version"] == "20261005.000000-aaaaaaa"
     assert Path(asyncio.run(firmware.download("LR-X1", m["version"])).path).read_bytes() == pkg()
     assert status(lambda: asyncio.run(firmware.download("LR-P1", m["version"]))) == 404  # not the other model's
+    vs = asyncio.run(firmware.versions("LR-X1"))  # newest first, each with its notes
+    assert [(v["version"], v["notes"]) for v in vs] == [("20261004.120000-bbbbbbb", NOTES), ("20261004.010203-aaaaaaa", NOTES)]
+    assert [v["version"] for v in asyncio.run(firmware.versions("LR-P1"))] == ["20261005.000000-aaaaaaa"]
+    assert edit("LR-X1", "20261004.010203-aaaaaaa", "灯的含义改了")["notes"] == "灯的含义改了"
+    assert asyncio.run(firmware.versions("LR-X1"))[1]["notes"] == "灯的含义改了"
+    assert asyncio.run(firmware.versions("LR-X1"))[1]["sha256"] == vs[1]["sha256"]  # the package itself unchanged
+    assert status(lambda: edit("LR-X1", "20261004.010203-aaaaaaa", "x", token="x")) == 403
+    assert status(lambda: edit("LR-X1", "20261004.010203-aaaaaaa", "见 #148")) == 400
+    assert status(lambda: edit("LR-X1", "20261009.000000-aaaaaaa", "x")) == 404
     firmware.TOKEN = ""
     assert status(lambda: up("LR-X1", "20261006.000000-aaaaaaa", C1, token="")) == 403  # no token set: no uploads
