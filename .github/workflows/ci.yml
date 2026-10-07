@@ -104,3 +104,4 @@ jobs:
           cc -w -I$d -o $d/sdhc_check test/sdhc_check.c && $d/sdhc_check  # the SD card's SPI waits (src/sdhc_spi.c, #105)
           cc -o $d/led_check test/led_check.c && $d/led_check  # the one-LED boards' flash codes (src/led_code.h)
           cc -o $d/power_check test/power_check.c && $d/power_check  # when a low battery turns it off (src/lr_power.h)
+          cc -o $d/switch_check test/switch_check.c && $d/switch_check  # LR-P3's switch debounce (src/lr_switch.h)

@@ -44,9 +44,11 @@
  *                   a bytes sent, b ms it took (bits 0-21) | bytes a DATA notification carries << 22
  *    27 READ_TIME   that READ's ms on the card (a: open, seek, fs_read) and in notify (b: sending, waiting for a TX
  *                   buffer); the rest of READ's ms is the SD mutex (recording's appends) and the open file's write-out
- *    28 SWITCH      LR-P3's slide switch (lr_switch.c): x 1 on / 0 off, a what follows: 0 recording, 1 System OFF,
- *                   2 up on USB, not recording, 3 a restart (switched while running or up on USB); the wake from
- *                   System OFF is the next BOOT's RESETREAS (OFF: the switch, VBUS: USB)
+ *    28 SWITCH      LR-P3's slide switch (lr_switch.c), each position held 0.5 s: x 1 on / 0 off, a what follows:
+ *                   0 recording, 1 System OFF (up on USB, the cable gone), 2 up on USB, not recording, 3 a restart
+ *                   (switched while running or up on USB). A boot that finds it off, or not on for 0.5 s within 3 s,
+ *                   goes to System OFF with no SWITCH: its BOOT is the only record. The wake from System OFF is the
+ *                   next BOOT's RESETREAS (OFF: the switch, VBUS: USB)
  *    29 POWER       power (lr_power.c): x battery mV / 20 (LR-P3: VDDH), a 0: once a minute on battery (LR-P3), 1: the
  *                   chip's power-fail warning (LR-P3: VDDH under 3.3 V or VDD under 2.8 V; x 0, not measured in the
  *                   interrupt), 2: low battery, recording ended, System OFF next until USB (or LR-P3's switch) wakes it
