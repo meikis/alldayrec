@@ -47,4 +47,9 @@
 			<NRF_PSEL(SPIM_MISO, 1, 0)>;
 	};
 };
-&spi2 { cs-gpios = <&gpio0 20 GPIO_ACTIVE_LOW>; };
+/* SPIM (EasyDMA): a block moves without an interrupt per byte (#105). Full-speed pins, the card's power switched at boot
+ * and reset over SPI before it mounts (sdcard.c): the 10-03 hang on the XIAO (lr_sd.overlay) did not show here. */
+&spi2 {
+	compatible = "nordic,nrf-spim";
+	cs-gpios = <&gpio0 20 GPIO_ACTIVE_LOW>;
+};

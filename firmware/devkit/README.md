@@ -81,7 +81,8 @@ uv run --no-project --with bleak python lr_listen.py --selftest
 
 ## 已知问题
 
-- SD 用 legacy SPI（`nordic,nrf-spi`）8 MHz：SPIM（EasyDMA）在焊好的模块上初始化挂死，原因未查
+- SD 卡的 SPI 协议用 `src/sdhc_spi.c`：NCS 2.7 驱动的副本，改了三处（#105）。数据命令的 R1 晚于第 2 个字节时，原来要睡 10 ms；每次多块读后 CMD12 的忙超出缓冲，原来要睡 30 ms；现在都改成先连续轮询。写卡后卡一直忙，原来会永远轮询，现在每次 10 s 超时报错。主机检查：`test/sdhc_check.c`
+- SD 总线 8 MHz：ProMicro（LR-P1/P2/P3）用 SPIM（EasyDMA）；XIAO（LR-X1）仍用 legacy SPI（`nordic,nrf-spi`，每字节一次中断）。10-03 SPIM 在 XIAO 焊好的模块上初始化挂死，当时还没有 #59 的 SD 复位；它的 SD 接在 D7–D10，是 low frequency I/O 引脚。之后没有在 XIAO 上复测
 - NCS 2.7 `card_ioctl()` 在 `DISK_IOCTL_CTRL_SYNC` 后缺 `break`，FatFs 每次 sync 都报 -EIO（数据其实写进去了）：新卡第一次开机 `mkdir LR` 因此报错、一分钟不写卡（#137）。`sdcard.c` 用链接器 `--wrap=sdmmc_ioctl` 把这个假错改成 0，升级到修好的 NCS 后删掉
 - 卡写失败或开机时没卡：流照常推（TIME 的 store 显示错误），每分钟重新挂载一次卡，成功后从新段继续写（开机时没卡的这次才计开机次数）
 - `'T'` 的帧号取的是对时那一刻正在编码的帧，这一帧的声音比它早约 0–100 ms（麦克风按 100 ms 一块交数据），时间系统性偏晚约 50 ms
