@@ -8,7 +8,8 @@
  * place (CONFIG_SPI_SDHC=n, CONFIG_LR_SDHC_SPI=y). Upstream main still has the sleeps (#105):
  * 1. A data command's R1 that comes after the second byte cost a 10 ms sleep: polled for the 8 bytes NCR allows first.
  * 2. Busy after CMD12 (every multi-block read) past the 21-byte command buffer cost a 30 ms sleep (1000 ticks):
- *    polled, then 1 ms sleeps. Writes' busy wait, which polled without a deadline, gets the same loop and its timeout.
+ *    polled for 50 ms, then 1 ms sleeps. Writes' busy wait, which polled without a deadline, gets the same loop and its
+ *    timeout.
  * 3. No 512-byte block of 0xFF in flash to clock reads with: nRF SPI and SPIM send their overrun character, 0xFF, when
  *    there is no TX buffer (upstream main does this too); SPIM could not DMA from flash without a RAM copy.
  * Before, on LR-P3-92D2: a 4 KB read took ~48 ms (~84 KB/s), an append of ~4 KB with its sync ~95 ms. */
@@ -126,11 +127,13 @@ static int sdhc_spi_wait_unbusy(const struct device *dev,
 	int ret;
 	uint8_t response;
 
-	/* LR: polled at first, then every 1 ms, until the deadline; interval_ticks is unused. Upstream slept interval_ticks
-	 * between polls: 30 ms for CMD12's busy, and for writes' 0 it polled forever (the timeout never went down) */
-	int64_t end = k_uptime_get() + timeout_ms;
+	/* LR: polled, yielding, for the first 50 ms, then every 1 ms, until the deadline; interval_ticks is unused. A block
+	 * programs in a few ms: a 1 ms sleep there woke ~4 ms late behind the codec (+40% card time per append, 92D2).
+	 * Upstream slept interval_ticks between polls: 30 ms for CMD12's busy, and for writes' 0 it polled forever (the
+	 * timeout never went down) */
+	int64_t start = k_uptime_get();
 
-	for (int i = 0; k_uptime_get() < end; i++) {
+	while (k_uptime_get() - start < timeout_ms) {
 		ret = sdhc_spi_rx(config->spi_dev, data->spi_cfg, &response, 1);
 		if (ret) {
 			return ret;
@@ -138,7 +141,9 @@ static int sdhc_spi_wait_unbusy(const struct device *dev,
 		if (response == 0xFF) {
 			return 0;
 		}
-		if (i >= 32) {
+		if (k_uptime_get() - start < 50) {
+			k_yield();
+		} else {
 			k_msleep(1);
 		}
 	}

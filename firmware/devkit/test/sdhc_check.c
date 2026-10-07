@@ -1,6 +1,6 @@
 // Host check of src/sdhc_spi.c's waits (#105) against a fake SD card on a fake 8 MHz SPI clock (1 us a byte): an R1
 // that comes late, a multi-block read with CMD12's busy, a write's busy, and a card that stays busy. Upstream slept
-// 10 + 30 ms per read and polled a stuck card forever; this fails on either.
+// 10 + 30 ms per read and polled a stuck card forever; this fails on either, and on a sleep inside a short busy.
 //   d=$(mktemp -d) && mkdir -p $d/zephyr/{drivers,logging,sys} && for h in drivers/sdhc drivers/gpio drivers/spi \
 //   logging/log sys/byteorder sys/crc; do touch $d/zephyr/$h.h; done && cc -w -I$d -o $d/sdhc_check \
 //   test/sdhc_check.c && $d/sdhc_check
@@ -82,6 +82,7 @@ static void tick(uint64_t us)
 }
 static void k_msleep(int ms) { slept += ms, tick(ms ? ms * 1000 : 1); }
 static int64_t k_uptime_get(void) { return now / 1000; }
+static void k_yield(void) {}
 static uint32_t k_ticks_to_ms_floor32(uint32_t t) { return t * 1000 / 32768; }
 static bool device_is_ready(const struct device *d) { return true; }
 static int gpio_pin_set_dt(const struct gpio_dt_spec *g, int v) { return 0; }
@@ -234,7 +235,7 @@ int main(void)
     assert(request(SD_READ_MULTIPLE_BLOCK, 2, buf, &us, &ms) == 0);
     assert(!memcmp(buf, blk, 512) && !memcmp(buf + 512, blk, 512));
     printf("read 2 blocks: %llu us, slept %llu ms\n", (unsigned long long) us, (unsigned long long) ms);
-    assert(ms <= 2 && us < 6000);
+    assert(ms == 0 && us < 4000);
 
     // one block written, 3 ms programming
     ncr = 1, prog_us = 3000;
@@ -243,7 +244,7 @@ int main(void)
     assert(request(SD_WRITE_SINGLE_BLOCK, 1, buf, &us, &ms) == 0);
     assert(!memcmp(got, buf, 512));
     printf("write 1 block: %llu us, slept %llu ms\n", (unsigned long long) us, (unsigned long long) ms);
-    assert(us < 6000);
+    assert(ms == 0 && us < 4000);  // polled through the 3 ms: a sleep there costs more than it is (codec, #105)
 
     // a card that stays busy after a write: an error after the data timeout (10 s) per try, 3 tries as card_write()
     // makes them (CONFIG_SD_DATA_RETRIES), not a poll forever
