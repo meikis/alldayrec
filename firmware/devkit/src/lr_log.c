@@ -171,7 +171,9 @@ int lr_log_init(void)
         flash_area_read(fcb.fap, FCB_ENTRY_FA_DATA_OFF(last) + last.fe_data_len - sizeof(r), &r, sizeof(r));
         seq += (last.fe_data_len - 4) / sizeof(r);
     }
-    if (ram.magic != MAGIC || ram.check != check() || ram.n > N) {
+    // a batch that ends before the flash does is not this run's: a build places ram elsewhere, so a later one can find
+    // an older run's batch, intact, where it left it; numbered on from there the log went back in seq and boot (10-07)
+    if (ram.magic != MAGIC || ram.check != check() || ram.n > N || ram.first + ram.n < seq) {
         ram.magic = MAGIC;
         // a log started afresh (erased above) is numbered on from a random point below 2^31, not from 0 again: a reader
         // keys records by seq, and the old log's ones are already out there (a warm reset keeps the RAM's numbering)
