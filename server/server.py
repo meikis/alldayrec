@@ -1041,7 +1041,16 @@ def device_status(device: str, st: dict) -> dict:
             "last_speech": st["last_speech"].isoformat(timespec="seconds") if st["last_speech"] else None,
             "refine": st["refine"], "conversation": st["conversation"], "drafting": st["drafting"], "draft": st["draft"],
             "draft_to": st["draft_to"].isoformat(timespec="seconds") if st["draft_to"] else None,
-            "latency_s": sorted(lat)[len(lat) // 2] if lat else None}
+            "latency_s": sorted(lat)[len(lat) // 2] if lat else None,
+            "arrival": audio.arrival(device), "sound": sound(device, received_to)}
+
+
+def sound(device: str, end: dt.datetime | None) -> dict | None:
+    """How the device's last 10 min of audio (before `end`, its newest) sounded: s of it, s in zero runs (the mic sent
+    nothing), full-scale samples (audio.health)."""
+    ms = int(end.timestamp() * 1000) if end else 0
+    m = audio.minutes(device, ms - 600_000, ms) if end else []
+    return {"s": round(sum(r["s"] for r in m), 1), "zero_s": round(sum(r["zero_s"] for r in m), 2), "full": sum(r["full"] for r in m)} if m else None
 
 
 def status() -> dict:
@@ -1132,8 +1141,11 @@ async def chunk(request: Request, device: str, start: int, n: int | None = None,
     reads a backlog off the recorder's card): finalization waits there for it, drafts go on (audio.hold); an upload
     without it lets go."""
     audio.hold(device, hold)  # before the piece is in: the queue must not hand it out ahead of the older audio
-    seconds = await asyncio.to_thread(audio.save, device, start, await request.body(), request.headers.get("content-type", ""), n)
-    if seconds is None:
+    body, kind = await request.body(), request.headers.get("content-type", "")
+    seconds = await asyncio.to_thread(audio.save, device, start, body, kind, n)
+    if seconds is None:  # the app drops it on a 400 (audio.save keeps its bytes in rejected/): say so, it is lost audio
+        log.warning("%s: piece at %s (%s, %d bytes) could not be decoded", device, dt.datetime.fromtimestamp(start / 1000), kind, len(body))
+        note(f"{device} 的一块音频（起于 {dt.datetime.fromtimestamp(start / 1000).strftime('%H:%M:%S')}）无法解码，客户端收到 400 会丢弃它；原始字节留在 recordings/rejected/", "error")
         raise HTTPException(400, "could not decode")
     state["chunks"] = {"device": device, "at": time.time()}
     late = "（早于这台设备已处理的位置，只存不转写）" if start <= audio.read_to.get(device, -1) else ""
@@ -1175,8 +1187,10 @@ async def device_log_upload(device: str, events: list[DeviceEvent]):
 
 @app.get("/api/device-log")
 async def device_log(device: str, since: str, until: str | None = None):
-    """A device's events and status reports in [since, until)."""
-    return {"events": db.device_log(device, since, until), "status": db.device_statuses(device, since, until)}
+    """A device's events, status reports and audio by the minute (audio.minutes) in [since, until)."""
+    ms = lambda t: int(dt.datetime.fromisoformat(t).timestamp() * 1000)
+    return {"events": db.device_log(device, since, until), "status": db.device_statuses(device, since, until),
+            "audio": audio.minutes(device, ms(since), ms(until) if until else 1 << 62)}
 
 
 @app.get("/api/upgrades")

@@ -60,6 +60,16 @@ const held = (d: DeviceStatus) => {
     eta = d.hw?.backlog_eta_s;
   return `定稿停在 ${at(d.hold!)}，等手机在后台补传卡里更早的录音${kb ? `（还有 ${(kb / 1024).toFixed(1)} MB${eta ? `，约 ${span(eta)}` : ""}）` : ""}，补完再接着定稿；初稿照常`;
 };
+// how late its newest audio came (a backlog blocking what is said now, #130), how its last 10 min sounded (#155)
+const arrived = (d: DeviceStatus) =>
+  d.arrival
+    ? `${d.arrival.lag_s < 120 ? `${Math.round(d.arrival.lag_s)} 秒` : span(d.arrival.lag_s)}（最新一块 ${new Date(d.arrival.at).toTimeString().slice(0, 5)} 收到）`
+    : "—";
+const noisy = (d: DeviceStatus) => !!d.sound && (d.sound.zero_s >= 1 || d.sound.full >= 50);
+const sound = (d: DeviceStatus) =>
+  d.sound
+    ? `${noisy(d) ? `全 0 ${d.sound.zero_s.toFixed(1)} 秒 · 满幅 ${d.sound.full} 次` : "正常"}（最近 ${Math.round(d.sound.s / 60)} 分钟音频）`
+    : "—";
 const eta = (d: DeviceStatus) => {
   if (!d.eta_s) return "—";
   const t = new Date(Date.now() + d.eta_s * 1000);
@@ -102,6 +112,9 @@ const eta = (d: DeviceStatus) => {
             ? `进行中，${d.conversation.start.slice(11, 16)} 起 · ${d.conversation.sentences} 句`
             : "无"
         }}</span>
+        <span>实时延迟</span
+        ><span :class="{ bad: (d.arrival?.lag_s ?? 0) > 300 }">{{ arrived(d) }}</span>
+        <span>录音质量</span><span :class="{ bad: noisy(d) }">{{ sound(d) }}</span>
         <template v-if="d.hw">
           <span>录音设备</span
           ><span>{{ [d.hw.model, d.hw.fw && "固件 " + d.hw.fw].filter(Boolean).join(" · ") }}</span>

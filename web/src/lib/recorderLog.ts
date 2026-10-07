@@ -15,7 +15,9 @@ export const BOOT = 1,
   FAULT = 2,
   DISCONNECT = 10,
   DFU = 21,
-  HEARTBEAT = 22;
+  HEARTBEAT = 22,
+  SD_WRITES = 25,
+  POWER = 29;
 
 const RESETREAS: [number, string][] = [
   [0, "复位键 RESETPIN"],
@@ -220,8 +222,13 @@ export function describe(r: Rec): Said {
   };
 }
 
-/** The battery mV a BOOT or HEARTBEAT record carries (0: not read). */
-export const millivolts = (r: Rec) => ([BOOT, HEARTBEAT].includes(r.code & ~UPTIME) ? r.x * 20 : 0);
+/** The battery mV a BOOT, HEARTBEAT or POWER record carries (0: not read, as in the power-fail warning). */
+export const millivolts = (r: Rec) =>
+  [BOOT, HEARTBEAT, POWER].includes(r.code & ~UPTIME) ? r.x * 20 : 0;
+
+/** The share of its 10 minutes the card spent on appends (%), by an SD_WRITES record; null for any other. */
+export const cardBusy = (r: Rec) =>
+  (r.code & ~UPTIME) === SD_WRITES ? Math.round((r.a & 0xfffff) / 600) / 10 : null;
 
 const span = (ms: number) =>
   ms < 60_000

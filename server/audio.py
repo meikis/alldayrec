@@ -54,6 +54,23 @@ def decode(body: bytes, aac: bool = False, n: int | None = None) -> np.ndarray |
     return unpad(x) if aac else x
 
 
+HUM = np.exp(-2j * np.pi * np.outer(np.arange(SR), np.arange(50, 251, 50)) / SR)  # a second's DFT at 50..250 Hz
+ZERO_RUN = SR // 100  # exact zeros this long (10 ms) in a row: the mic sent nothing (the recorder's high-pass turns a stuck input into 0)
+
+
+def health(x: np.ndarray) -> tuple[float, float, int, int]:
+    """How a piece sounds, measured as lr_listen.py does each second (no content: levels only): RMS and mains hum (the
+    50..250 Hz harmonics, each second's, averaged) in dBFS, ms in runs of exact zeros of 10 ms or more (no data from
+    the mic: a loose wire, #155), and full-scale samples (clipping)."""
+    f = x.astype(np.float64)
+    hum = sum((2 * np.abs(f[i:i + SR] @ HUM[:len(f[i:i + SR])]) ** 2).sum() / len(f[i:i + SR]) for i in range(0, len(f), SR))
+    edges = np.flatnonzero(np.diff(np.r_[0, x == 0, 0]))  # where each run of zeros starts and ends
+    runs = edges[1::2] - edges[::2]
+    dbfs = lambda ms: round(10 * np.log10(max(ms, 1e-3) / 32768 ** 2), 1)
+    return (dbfs(np.mean(f * f) if len(f) else 0), dbfs(hum / max(len(f), 1)), int(runs[runs >= ZERO_RUN].sum()) * 1000 // SR,
+            int(np.count_nonzero((x >= 32767) | (x <= -32767))))
+
+
 def hour_file(device: str, start_ms: int, ext: str) -> Path:
     """Where a piece starting at start_ms goes, relative to DIR: its device's file for that (local) hour."""
     t = dt.datetime.fromtimestamp(start_ms / 1000)
@@ -87,17 +104,22 @@ def save(device: str, start_ms: int, body: bytes, content_type: str, n: int | No
                                      (device, start_ms, len(body))).fetchone()
     if r := kept():
         return r[0]
-    x = decode(body, aac=content_type.split(";")[0] == "audio/aac", n=n)
-    if x is None:
-        return None
     ext = {"audio/ogg": "ogg", "audio/webm": "webm", "audio/aac": "aac"}.get(content_type.split(";")[0], "bin")
+    x = decode(body, aac=ext == "aac", n=n)
+    if x is None:  # the client drops it on the 400 that follows: its bytes stay here, for a look later (#155)
+        f = DIR / "rejected" / re.sub(r"[^\w.-]", "_", device) / f"{start_ms}.{ext}"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(body)
+        return None
     path = hour_file(device, start_ms, ext)
+    h = health(x)
     with _append:
         if r := kept():  # the same piece in two requests at once
             return r[0]
         pos = append(path, body)
-        db.conn().execute("INSERT OR REPLACE INTO pieces VALUES (?, ?, ?, ?, ?, ?, ?)",
-                          (device, start_ms, round(len(x) / SR, 3), str(path), pos, len(body), n))
+        db.conn().execute("INSERT OR REPLACE INTO pieces (device, start_ms, seconds, path, pos, size, n, received_ms, rms, hum, zero_ms, full) "
+                          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          (device, start_ms, round(len(x) / SR, 3), str(path), pos, len(body), n, int(time.time() * 1000), *h))
     return len(x) / SR
 
 
@@ -121,6 +143,33 @@ def backlog(device: str, after: dt.datetime | None) -> tuple[float, dt.datetime 
                                "FROM pieces WHERE device = ? AND start_ms + seconds * 1000 > ?", (ms, device, ms)).fetchone()
     last = db.conn().execute("SELECT max(start_ms + seconds * 1000) FROM pieces WHERE device = ?", (device,)).fetchone()[0]
     return round(s or 0.0, 1), dt.datetime.fromtimestamp(last / 1000) if last else None
+
+
+def minutes(device: str, lo_ms: int, hi_ms: int) -> list[dict]:
+    """How a device's audio starting in [lo_ms, hi_ms) sounded and arrived, a row per minute it has audio in (pieces
+    from before 10-07 have neither): its seconds; RMS and hum in dBFS (energy-weighted); s in zero runs and full-scale
+    samples (audio.health); lag_s: how long after its end the minute's median piece arrived."""
+    out = {}
+    for p in db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms >= ? AND start_ms < ? AND rms IS NOT NULL ORDER BY start_ms",
+                               (device, lo_ms, hi_ms)):
+        m = out.setdefault(p["start_ms"] // 60_000, {"s": 0.0, "rms": 0.0, "hum": 0.0, "zero_s": 0.0, "full": 0, "lag": []})
+        m["s"] += p["seconds"]
+        m["rms"] += 10 ** (p["rms"] / 10) * p["seconds"]
+        m["hum"] += 10 ** (p["hum"] / 10) * p["seconds"]
+        m["zero_s"] += p["zero_ms"] / 1000
+        m["full"] += p["full"]
+        if p["received_ms"]:
+            m["lag"].append((p["received_ms"] - p["start_ms"]) / 1000 - p["seconds"])
+    dbfs = lambda e, s: round(10 * np.log10(max(e / s, 1e-12)), 1) if s else None
+    return [{"t": dt.datetime.fromtimestamp(k * 60).isoformat(timespec="seconds"), "s": round(m["s"], 1), "rms": dbfs(m["rms"], m["s"]),
+             "hum": dbfs(m["hum"], m["s"]), "zero_s": round(m["zero_s"], 2), "full": m["full"],
+             "lag_s": round(sorted(m["lag"])[len(m["lag"]) // 2], 1) if m["lag"] else None} for k, m in out.items()]
+
+
+def arrival(device: str) -> dict | None:
+    """The device's newest audio: when it came (unix ms) and how long after its end (s): what is said now, how late."""
+    p = db.conn().execute("SELECT * FROM pieces WHERE device = ? ORDER BY start_ms DESC LIMIT 1", (device,)).fetchone()
+    return p and p["received_ms"] and {"at": p["received_ms"], "lag_s": round((p["received_ms"] - p["start_ms"]) / 1000 - p["seconds"], 1)}
 
 
 def pending(after: dict[str, dt.datetime | None]) -> list[str]:
@@ -229,10 +278,29 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     for m in (0, 1, 5):  # 10:00, 10:01, a gap, 10:05
         assert save("phone", T(m), tone(60), "audio/ogg") > 59
     assert save("phone", T(9), b"not audio", "audio/ogg") is None
+    assert (DIR / f"rejected/phone/{T(9)}.ogg").read_bytes() == b"not audio", "an undecodable piece's bytes are kept"
     assert 0 < save("phone", T(8), tone(0.02), "audio/ogg") < 0.1, "a 20 ms piece is audio too"
     db.conn().execute("DELETE FROM pieces WHERE start_ms = ?", (T(8),))
-    files = [p.relative_to(DIR).as_posix() for p in DIR.rglob("*.ogg")]
+    files = [p.relative_to(DIR).as_posix() for p in (DIR / "chunks").rglob("*.ogg")]
     assert files == ["chunks/phone/2026-10-02/10.ogg"], files
+    # how pieces sound (no content): ffmpeg's sine is at 1/8 of full scale (-21 dBFS RMS); 50 Hz is hum, 440 Hz is not
+    i = np.arange(2 * SR)
+    hum = (0.25 * 32767 * np.sin(2 * np.pi * 50 * i / SR)).astype(np.int16)
+    assert health(hum)[:2] == (-15.1, -15.1), health(hum)
+    assert health((0.25 * 32767 * np.sin(2 * np.pi * 440 * i / SR)).astype(np.int16))[1] < -60, "440 Hz is not hum"
+    broken = hum.copy()
+    broken[1000:1800], broken[5000:5100], broken[9000:9010], broken[9500] = 0, 0, 32767, -32768
+    assert health(broken)[2:] == (50, 11), "50 ms of zero runs >= 10 ms (the 6 ms one does not count), 11 full-scale samples"
+    assert health(np.zeros(1, np.int16)) == (-120.3, -120.3, 0, 0)
+    p = db.conn().execute("SELECT * FROM pieces WHERE start_ms = ?", (T(0),)).fetchone()
+    assert abs(p["rms"] + 21.1) < 0.3 and p["hum"] < -60 and p["zero_ms"] == p["full"] == 0, dict(p)
+    assert 0 <= time.time() * 1000 - p["received_ms"] < 60_000, "when it came"
+    m = minutes("phone", T(0), T(2))
+    assert [r["t"][11:16] for r in m] == ["10:00", "10:01"] and m[0]["s"] > 59 and abs(m[0]["rms"] + 21.1) < 0.3, m
+    assert m[0]["lag_s"] > 3600, "arrived long after (this test runs after 2026-10-02 10:01)"
+    db.conn().execute("UPDATE pieces SET rms = -40, hum = -40, zero_ms = 1500, full = 3, received_ms = start_ms + 61000 WHERE start_ms = ?", (T(1),))
+    assert minutes("phone", T(1), T(2))[0] | {"t": 0, "s": 0} == {"t": 0, "s": 0, "rms": -40.0, "hum": -40.0, "zero_s": 1.5, "full": 3, "lag_s": 1.0}
+    assert arrival("phone")["lag_s"] > 3600 and arrival("nobody") is None
     x = np.arange(16000, dtype=np.int16)
     assert len(unpad(x)) == 16000 - AAC_DELAY - AAC_FRAME // 2 and unpad(x)[0] == AAC_DELAY, "AAC: the encoder's delay and half a frame go"
     assert len(unpad(x[:3000])) == 3000, "too short to hold both: left alone"

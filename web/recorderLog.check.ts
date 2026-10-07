@@ -1,7 +1,7 @@
 // Check of src/lib/recorderLog.ts against lr_log.h's packed events (the same values as lr_sync.py's selftest), and
 // firmware updates in a line (the server's upgrades() as test_device_log.py has them):
 //   node --experimental-strip-types web/recorderLog.check.ts
-import { describe, upgradeText } from "./src/lib/recorderLog.ts";
+import { cardBusy, describe, millivolts, upgradeText } from "./src/lib/recorderLog.ts";
 
 const said = (code: number, x: number, a: number, b: number) =>
   describe({ boot: 1, t: 100, code, x, a, b }).text;
@@ -58,4 +58,10 @@ check(
   }),
   "28758c4 → 28758c4（USB），用时 1 分 0 秒，重启后版本没变",
 );
+
+const rec = (code: number, x: number, a = 0) => ({ boot: 1, t: 100, code, x, a, b: 0 });
+check(String([1, 22, 29].map((c) => millivolts(rec(c, 195)))), "3900,3900,3900"); // BOOT, HEARTBEAT, LR-P3's POWER
+check(String(millivolts(rec(29, 0, 1))), "0"); // the power-fail warning: not measured
+check(String(cardBusy(rec(25, 0, 84_000 | (713 << 20)))), "14"); // 84 s of 10 min (LR-P1, 10-05)
+check(String(cardBusy(rec(22, 195))), "null");
 console.log("recorderLog check ok");

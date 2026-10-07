@@ -124,6 +124,8 @@ export interface DeviceStatus {
   refine?: { at: string; ms: number; error?: string; backlog_s?: number } | null;
   conversation?: { start: string; sentences: number } | null;
   hw?: RecorderStatus | null; // a BLE recorder, as its phone last read it
+  arrival?: { at: number; lag_s: number } | null; // its newest audio: when it came (unix ms), how long after its end
+  sound?: { s: number; zero_s: number; full: number } | null; // its last 10 min of audio: s of it, s in zero runs, full-scale samples
 }
 
 export const CHARGE = { battery: "用电池", charging: "充电中", full: "已充满" };
@@ -151,6 +153,17 @@ export interface DeviceEvent {
 export interface DeviceLog {
   events: DeviceEvent[];
   status: RecorderStatus[];
+  audio: AudioMinute[];
+}
+// a minute of a device's audio, how it sounded and arrived (the server's audio.health() of each piece; no content)
+export interface AudioMinute {
+  t: string; // the minute
+  s: number; // seconds of audio in it
+  rms: number; // dBFS
+  hum: number; // dBFS: mains hum, 50..250 Hz
+  zero_s: number; // in runs of exact zeros >= 10 ms: the mic sent nothing
+  full: number; // full-scale samples: clipping
+  lag_s: number | null; // how long after its end it arrived (null: before 10-07)
 }
 
 // GET /api/upgrades: a device's firmware updates, an app's "dfu" events joined with the recorder's DFU and BOOT records

@@ -36,8 +36,11 @@ CREATE TABLE IF NOT EXISTS name_hints (conv TEXT PRIMARY KEY, body TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS profiles (name TEXT PRIMARY KEY, body TEXT NOT NULL);  -- profiles.py: a named person's profile, every line with its sources
 CREATE TABLE IF NOT EXISTS pieces (           -- uploaded audio pieces, the ingest queue; size bytes at pos of path (the
     device TEXT NOT NULL, start_ms INTEGER NOT NULL, seconds REAL NOT NULL, path TEXT NOT NULL,  -- hour file, relative
-    pos INTEGER, size INTEGER, n INTEGER, PRIMARY KEY (start_ms, device));                      -- to the recordings dir;
-                                                                                                -- n: samples the client wrote)
+    pos INTEGER, size INTEGER, n INTEGER,                                                       -- to the recordings dir;
+    received_ms INTEGER, rms REAL, hum REAL, zero_ms INTEGER, full INTEGER,                     -- n: samples the client wrote;
+    PRIMARY KEY (start_ms, device));                                                            -- received_ms: when it came
+                                                                                                -- (NULL before 10-07);
+                                                                                                -- rms..full: audio.health()
 CREATE INDEX IF NOT EXISTS pieces_device ON pieces(device, start_ms);  -- each device's stream and backlog
 CREATE TABLE IF NOT EXISTS timelines (conversation TEXT PRIMARY KEY, body TEXT NOT NULL);  -- the live analysis as it stood at the close
 CREATE TABLE IF NOT EXISTS feedback (conv TEXT NOT NULL, at TEXT NOT NULL, text TEXT NOT NULL);  -- what the owner says a summary got wrong, read back in batches
@@ -68,6 +71,9 @@ def open_db(path: Path):
         conn().execute("ALTER TABLE pieces ADD COLUMN size INTEGER")
     if "n" not in {r[1] for r in conn().execute("PRAGMA table_info(pieces)")}:  # 10-04: iPhone pieces say how many samples they hold
         conn().execute("ALTER TABLE pieces ADD COLUMN n INTEGER")
+    if "received_ms" not in {r[1] for r in conn().execute("PRAGMA table_info(pieces)")}:  # 10-07: when each came, how it sounds (#155)
+        for col in ("received_ms INTEGER", "rms REAL", "hum REAL", "zero_ms INTEGER", "full INTEGER"):
+            conn().execute(f"ALTER TABLE pieces ADD COLUMN {col}")
 
 
 def conn() -> sqlite3.Connection:

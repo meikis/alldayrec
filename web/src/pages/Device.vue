@@ -2,13 +2,21 @@
 import { computed, ref, watch } from "vue";
 import AppHeader from "../components/AppHeader.vue";
 import LineChart from "../components/LineChart.vue";
-import { CHARGE, get, type DeviceEvent, type DeviceLog, type Upgrade } from "../lib/api";
+import {
+  CHARGE,
+  get,
+  type AudioMinute,
+  type DeviceEvent,
+  type DeviceLog,
+  type Upgrade,
+} from "../lib/api";
 import {
   BOOT,
   DFU,
   DISCONNECT,
   FAULT,
   UPTIME,
+  cardBusy,
   describe,
   millivolts,
   upgradeText,
@@ -16,8 +24,9 @@ import {
   type Said,
 } from "../lib/recorderLog";
 
-// One device's history: its battery (the mV its recorder logs every 10 min, the % its phone reads every minute) and
-// what happened, the recorder's own event log and the app's, newest first, with each firmware update in a line.
+// One device's history: its battery (the mV its recorder logs every 10 min, the % its phone reads every minute), how
+// its audio sounded and arrived (a point a minute, the server's measure of each piece: levels only, #155), and what
+// happened, the recorder's own event log and the app's, newest first, with each firmware update in a line.
 const props = defineProps<{ name: string }>();
 const RANGES: [string, number][] = [
   ["6 小时", 6],
@@ -115,6 +124,39 @@ const marks = computed(() =>
     .filter((m) => NAMES[m.code])
     .map((m) => ({ t: m.t, label: NAMES[m.code], strong: m.code !== DISCONNECT })),
 );
+// what the audio card shows: a measure of each minute's audio, or the card's write load (SD_WRITES, every 10 min)
+const MEASURES: [string, string, (m: AudioMinute) => number | null][] = [
+  ["全 0", "s/分钟", (m) => m.zero_s], // runs of exact zeros >= 10 ms: the mic sent nothing
+  ["满幅", "次/分钟", (m) => m.full],
+  ["电平", "dBFS", (m) => m.rms],
+  ["哼声", "dBFS", (m) => m.hum], // mains hum, 50..250 Hz
+  ["到达延迟", "s", (m) => m.lag_s], // its end to the server's receiving it
+];
+const measure = ref(0); // MEASURES.length: the card's write load
+const points = (ps: { t: number; v: number | null }[]) =>
+  ps.filter((p): p is { t: number; v: number } => p.v != null).sort((a, b) => a.t - b.t);
+const heard = computed(() =>
+  measure.value < MEASURES.length
+    ? points(
+        (log.value?.audio ?? []).map((m) => ({
+          t: Date.parse(m.t),
+          v: MEASURES[measure.value][2](m),
+        })),
+      )
+    : points(dated.value.map((e) => ({ t: Date.parse(e.at!), v: cardBusy(rec(e)) }))),
+);
+const sound = computed(() => {
+  const a = log.value?.audio ?? [];
+  const lags = a.flatMap((m) => (m.lag_s == null ? [] : [m.lag_s])).sort((x, y) => x - y);
+  return {
+    minutes: a.length,
+    zero: Math.round(a.reduce((s, m) => s + m.zero_s, 0) * 10) / 10,
+    zeroMinutes: a.filter((m) => m.zero_s > 0).length,
+    full: a.reduce((s, m) => s + m.full, 0),
+    lag: lags.length ? [lags[lags.length >> 1], lags[lags.length - 1]] : null,
+  };
+});
+const secs = (s: number) => (s < 120 ? `${Math.round(s)} 秒` : `${Math.round(s / 60)} 分钟`);
 const when = (at: string) => (hours.value >= 24 ? `${at.slice(5, 10)} ` : "") + at.slice(11, 19);
 </script>
 
@@ -138,7 +180,8 @@ const when = (at: string) => (hours.value >= 24 ? `${at.slice(5, 10)} ` : "") + 
     <template v-else>
       <section class="card">
         <div class="head">
-          <b>电池电压</b><span class="muted">mV，录音设备每 10 分钟记一次</span>
+          <b>电池电压</b
+          ><span class="muted">mV，录音设备每 10 分钟记一次（LR-P3 用电池时每分钟）</span>
         </div>
         <LineChart
           v-if="mv.length"
@@ -173,6 +216,44 @@ const when = (at: string) => (hours.value >= 24 ? `${at.slice(5, 10)} ` : "") + 
           :marks="marks"
         />
         <div v-else class="muted">这段时间手机没有上报电量</div>
+      </section>
+      <section class="card">
+        <div class="head">
+          <b>录音</b>
+          <span class="ranges">
+            <button
+              v-for="([l], i) in [...MEASURES, ['写卡忙']]"
+              :key="i"
+              :class="['tag', { on: measure === i }]"
+              @click="measure = i"
+            >
+              {{ l }}
+            </button>
+          </span>
+        </div>
+        <div v-if="sound.minutes" class="muted">
+          {{ sound.minutes }} 分钟有音频：<span :class="{ bad: sound.zero >= 1 }"
+            >全 0 共 {{ sound.zero }} 秒（{{ sound.zeroMinutes }} 分钟有）</span
+          >，满幅 {{ sound.full }} 次<template v-if="sound.lag"
+            >；到达延迟中位 {{ secs(sound.lag[0]) }}，最长 {{ secs(sound.lag[1]) }}</template
+          >
+        </div>
+        <LineChart
+          v-if="heard.length"
+          :points="heard"
+          :lo="lo"
+          :hi="hi"
+          :unit="measure < MEASURES.length ? MEASURES[measure][1] : '%'"
+          :gap="measure < MEASURES.length ? 3 * 60000 : 30 * 60000"
+          :marks="marks"
+        />
+        <div v-else class="muted">
+          {{
+            measure < MEASURES.length
+              ? "这段时间没有测过的音频（10-07 之前上传的还没补算）"
+              : "这段时间没有写卡统计（SD_WRITES，录音设备每 10 分钟记一次）"
+          }}
+        </div>
       </section>
       <section class="card">
         <div class="head">
@@ -211,6 +292,7 @@ h2 {
 }
 .ranges {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 .card {
