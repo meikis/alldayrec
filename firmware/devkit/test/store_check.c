@@ -72,7 +72,8 @@ static void sys_put_le64(uint64_t v, uint8_t *b) { sys_put_le32(v, b); sys_put_l
 static uint16_t sys_get_le16(const uint8_t *b) { return b[0] | b[1] << 8; }
 static uint32_t sys_get_le32(const uint8_t *b) { return sys_get_le16(b) | (uint32_t) sys_get_le16(b + 2) << 16; }
 static uint64_t sys_get_le64(const uint8_t *b) { return sys_get_le32(b) | (uint64_t) sys_get_le32(b + 4) << 32; }
-static int k_mutex_lock(struct k_mutex *m, int t) { return 0; }
+static bool card_held;  // someone holds the SD mutex for good (a card stuck in a write)
+static int k_mutex_lock(struct k_mutex *m, int t) { return card_held ? -EAGAIN : 0; }
 static int k_mutex_unlock(struct k_mutex *m) { return 0; }
 static int k_msgq_put(int *q, void *c, int t) { return 0; }
 static int k_msgq_get(int *q, void *c, int t) { return -1; }
@@ -417,6 +418,12 @@ int main(void)
     assert(logged[1].code == LR_READ_TIME && logged[1].a == reads * 7 && logged[1].b == sends * 2);
     send_file(&the_conn, 1 << 16, card_len[0]);  // nothing to send: no event
     assert(n_logged == 2);
+    // a reset while the card is stuck in a write: the shutdown gives up on the SD mutex and says so, the reset goes on
+    card_held = true;
+    n_logged = 0;
+    lr_store_shutdown();
+    assert(n_logged == 1 && logged[0].code == LR_APPEND_ERR && logged[0].x == 2 && (int32_t) logged[0].a == -EDEADLK);
+    card_held = false;
     printf("store_check ok: %u + %u + %u B on the card\n", card_len[0], card_len[1], card_len[2]);
     return 0;
 }

@@ -62,7 +62,8 @@ void lr_store_frame(uint32_t frame_no, const uint8_t *data, uint16_t len, bool a
 /* USB unplugged: take the card back if it was lent (usb.c). */
 void lr_store_lend(bool on);
 
-/* Before a reset: write out the open record and unmount. A card reset mid-command stays dead until power-off. */
+/* Before a reset: write out the open record and unmount. A card reset mid-command stays dead until power-off. A card
+ * stuck in a write is left as it is after 5 s: the reset goes ahead (APPEND_ERR x 2, -EDEADLK). */
 void lr_store_shutdown(void);
 /* The card takes the stream: false with no card, a full one, a failed write, or lent to USB (the one-LED status) */
 bool lr_store_ok(void);

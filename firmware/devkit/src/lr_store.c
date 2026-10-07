@@ -885,7 +885,13 @@ struct k_thread store_thread_data;  // lr_log.c watches its stack
 
 void lr_store_shutdown(void)
 {
-    k_mutex_lock(&write_sdcard_mutex, K_FOREVER);  // kept: nothing writes the card after this
+    // kept: nothing writes the card after this. Not forever: a card stuck in a write holds the mutex for good (BDAE
+    // 10-08: no card write for 10+ min, the watchdog fed all the while), and every way to restart comes through here
+    // (switch, 1200 bps touch, BLE DFU, low battery); past 5 s the restart goes ahead without the card's last records
+    if (k_mutex_lock(&write_sdcard_mutex, K_SECONDS(5))) {
+        lr_log(LR_APPEND_ERR, 2, -EDEADLK, 0);
+        return;
+    }
     if (!store_err) {
         k_mutex_lock(&stream_mtx, K_FOREVER);
         flush();
