@@ -794,6 +794,11 @@ void lr_store_shutdown(void)
     }
 }
 
+bool lr_store_ok(void)
+{
+    return !store_err;
+}
+
 void lr_store_lend(bool on)
 {
     if (!on) {

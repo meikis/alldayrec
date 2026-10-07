@@ -64,5 +64,7 @@ void lr_store_lend(bool on);
 
 /* Before a reset: write out the open record and unmount. A card reset mid-command stays dead until power-off. */
 void lr_store_shutdown(void);
+/* The card takes the stream: false with no card, a full one, a failed write, or lent to USB (the one-LED status) */
+bool lr_store_ok(void);
 
 #endif

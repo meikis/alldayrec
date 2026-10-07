@@ -12,6 +12,7 @@
 #include <hal/nrf_power.h>
 #include <zephyr/kernel.h>
 
+#include "led.h"
 #include "lr_log.h"
 #include "lr_power.h"
 #include "wdog_facade.h"
@@ -22,6 +23,7 @@
 
 static bool last;  // lr_switch_debounce's state, from boot on
 static int n;
+extern bool is_off;  // main.c's status flashes stop while it goes down
 
 static bool on(void)
 {
@@ -59,6 +61,14 @@ static void poll(struct k_work *w)
     if (lr_switch_debounce(on(), &last, &n) != 0) {
         k_work_reschedule(k_work_delayable_from_work(w), K_MSEC(LR_SWITCH_POLL_MS));
         return;
+    }
+    is_off = true;
+    k_msleep(500);  // a status flash under way ends first
+    for (int i = 0; i < 3; i++) {  // switched off: 3 quick flashes (led2: P0.15), then down
+        set_led_blue(true);
+        k_msleep(100);
+        set_led_blue(false);
+        k_msleep(100);
     }
     lr_power_stop();
     restart(false, LR_SWITCH_RESTART);
