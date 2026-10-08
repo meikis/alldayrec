@@ -181,6 +181,18 @@ const chargeText = {'battery': '用电池', 'charging': '充电中', 'full': '�
   };
 }
 
+/// What a recorder's scan response says of its power and card, for the add-recorder list (firmware #155 F4: after the
+/// state byte, whose bits 3-4 are the charge, the battery mV / 20 and the card's errno); '' from an older firmware.
+String advText(Map d) {
+  final state = d['state'] as int, mv = d['mv'] as int? ?? -1, card = d['card'] as int? ?? -1;
+  if (state < 0 || mv < 0) return '';
+  final charge = ['battery', 'charging', 'full'].elementAtOrNull(state >> 3 & 3);
+  return [
+    if (charge == 'battery' && mv > 0) '电池 ${(mv / 1000).toStringAsFixed(2)} V' else ?chargeText[charge],
+    switch (card) { 0 => '卡正常', 28 => '卡满', 16 => 'U 盘中', 19 || 116 => '没插卡', _ => '卡出错' },
+  ].join(' · ');
+}
+
 /// A BLE recorder's battery and card in a few words.
 String hwLine(Map? hw) {
   if (hw == null || hw.isEmpty) return '';
@@ -1370,7 +1382,7 @@ class _AddRecorderPageState extends State<AddRecorderPage> {
           Flexible(child: Text(d['name'])),
           if (d['nearest']) Padding(padding: const EdgeInsets.only(left: 8), child: Badge(label: const Text('最近'), backgroundColor: cs.primary)),
         ]),
-        subtitle: Text(d['gone'] ? what : '$what · $near'),
+        subtitle: Text(d['gone'] ? what : [what, near, advText(d)].where((s) => s.isNotEmpty).join(' · ')),
         trailing: action,
       ),
     );

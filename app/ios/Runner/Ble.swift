@@ -37,6 +37,13 @@ enum Ble {
     return Int(d[d.startIndex + 2])
   }
 
+  /// The two bytes after it (firmware #155 F4): the battery, mV / 20, and the card, the store's errno; -1: an older
+  /// firmware, or no scan response in this advertisement.
+  static func extra(_ adv: [String: Any], _ i: Int) -> Int {
+    guard let d = adv[CBAdvertisementDataManufacturerDataKey] as? Data, d.count > 2 + i, d.prefix(2) == Data([0xFF, 0xFF]) else { return -1 }
+    return Int(d[d.startIndex + 2 + i])
+  }
+
   static func u32(_ b: [UInt8], _ at: Int) -> Int64 { Int64(Store.le(b, at, 4)) }
 
   /// What the recorder runs on, from its status read (firmware lr_power.h, byte 47): "battery", "charging" (a board that
@@ -85,7 +92,7 @@ final class Inbox<T> {
 
 /// The add-recorder page's list: the recorders around and the state each advertises.
 final class Nearby: NSObject, CBCentralManagerDelegate {
-  private struct Seen { let name: String, rssi: Int, state: Int, busy: Bool, at: Date }
+  private struct Seen { let name: String, rssi: Int, state: Int, mv: Int, card: Int, busy: Bool, at: Date }
   private var seen: [UUID: Seen] = [:]  // on q
   private let q = DispatchQueue(label: "nearby")
   private var central: CBCentralManager?
@@ -106,8 +113,9 @@ final class Nearby: NSObject, CBCentralManagerDelegate {
     let st = Ble.state(a)
     // a non-connectable advertisement is a recorder connected to another phone, scan response or not
     let busy = (a[CBAdvertisementDataIsConnectable] as? Bool).map { !$0 } ?? old?.busy ?? false
+    let mv = Ble.extra(a, 1), card = Ble.extra(a, 2)
     seen[p.identifier] = Seen(name: name, rssi: rssi.intValue == 127 ? old?.rssi ?? -100 : rssi.intValue, state: st >= 0 ? st : old?.state ?? -1,
-                              busy: busy, at: Date())
+                              mv: mv >= 0 ? mv * 20 : old?.mv ?? -1, card: card >= 0 ? card : old?.card ?? -1, busy: busy, at: Date())
   }
 
   func stop() { q.sync { if central?.state == .poweredOn { central?.stopScan() }; central = nil } }
@@ -117,7 +125,8 @@ final class Nearby: NSObject, CBCentralManagerDelegate {
   func list() -> [[String: Any]] {
     q.sync {
       seen.filter { -$0.value.at.timeIntervalSinceNow < 5 && (Ble.isFull($0.value.name) || $0.value.busy) }.sorted { $0.value.rssi > $1.value.rssi }
-        .map { ["name": $0.value.name, "address": $0.key.uuidString, "rssi": $0.value.rssi, "state": $0.value.state, "busy": $0.value.busy] }
+        .map { ["name": $0.value.name, "address": $0.key.uuidString, "rssi": $0.value.rssi, "state": $0.value.state, "mv": $0.value.mv,
+                "card": $0.value.card, "busy": $0.value.busy] }
     }
   }
 }

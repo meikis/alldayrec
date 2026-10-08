@@ -83,6 +83,9 @@ object Ble {
     const val CONNECTED = 2
     const val PAUSED = 4
     fun state(r: ScanResult) = r.scanRecord?.getManufacturerSpecificData(0xFFFF)?.firstOrNull()?.toInt()?.and(0xff) ?: -1
+    /** The two bytes after it (firmware #155 F4): the battery, mV / 20, and the card, the store's errno; -1: an older
+     *  firmware, or no scan response in this result. */
+    fun extra(r: ScanResult, i: Int) = r.scanRecord?.getManufacturerSpecificData(0xFFFF)?.getOrNull(i)?.toInt()?.and(0xff) ?: -1
 
     /** What the recorder runs on, from its status read (firmware lr_power.h, byte 47): "battery", "charging" (a board
      *  that cannot read its charger says so whenever it is on USB), "full"; null: an older firmware. */
@@ -99,7 +102,7 @@ object Ble {
 /** The add-recorder page's list: the recorders around and the state each advertises. */
 @SuppressLint("MissingPermission")
 class Nearby(ctx: Context) {
-    private class Seen(val address: String, val rssi: Int, val state: Int, val busy: Boolean, val at: Long)
+    private class Seen(val address: String, val rssi: Int, val state: Int, val mv: Int, val card: Int, val busy: Boolean, val at: Long)
     private val seen = java.util.concurrent.ConcurrentHashMap<String, Seen>()
     private val scanner = ctx.getSystemService(BluetoothManager::class.java).adapter.bluetoothLeScanner
     private val cb = object : ScanCallback() {
@@ -108,7 +111,9 @@ class Nearby(ctx: Context) {
             // the state byte is in the scan response: a result without one keeps the last known; a non-connectable
             // advertisement is a recorder connected to another phone, scan response or not
             val st = Ble.state(r).takeIf { it >= 0 } ?: seen[name]?.state ?: -1
-            seen[name] = Seen(r.device.address, r.rssi, st, !r.isConnectable, System.currentTimeMillis())
+            val mv = Ble.extra(r, 1).takeIf { it >= 0 }?.times(20) ?: seen[name]?.mv ?: -1
+            val card = Ble.extra(r, 2).takeIf { it >= 0 } ?: seen[name]?.card ?: -1
+            seen[name] = Seen(r.device.address, r.rssi, st, mv, card, !r.isConnectable, System.currentTimeMillis())
         }
     }
 
@@ -119,7 +124,7 @@ class Nearby(ctx: Context) {
 
     /** Seen in the last 5 s, nearest first. */
     fun list() = seen.entries.filter { System.currentTimeMillis() - it.value.at < 5000 }.sortedByDescending { it.value.rssi }
-        .map { (n, s) -> mapOf("name" to n, "address" to s.address, "rssi" to s.rssi, "state" to s.state, "busy" to s.busy) }
+        .map { (n, s) -> mapOf("name" to n, "address" to s.address, "rssi" to s.rssi, "state" to s.state, "mv" to s.mv, "card" to s.card, "busy" to s.busy) }
 }
 
 /** Finds the recorder by scanning for its service (always: the board's address is random static, and a device made
