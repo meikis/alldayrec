@@ -273,6 +273,14 @@ class Mirror(private val dir: File) {
         s.closed && s.finished && s.pieces.none { File(out, "$it.ogg").exists() || File(out, "$it.part").exists() }
     }.keys.toList()
 
+    /** None of the pieces it cut that start before [until] is still in [out] waiting to go up. With [until] where LIVE
+     *  began and pieces() run just before, the backlog is all up and the server's hold may go (#130). 10-08: the hold
+     *  went 1-3 s early, before the last READ's bytes were cut, and while the backlog's last minute (between the hold and
+     *  where LIVE began) was still queued; those pieces came in behind the server's queue. */
+    fun up(out: File, until: Long): Boolean = files.values.none { s ->
+        s.pieces.any { n -> (n.substringBefore("@").toLongOrNull() ?: Long.MAX_VALUE) < until && (File(out, "$n.ogg").exists() || File(out, "$n.part").exists()) }
+    }
+
     /** A file the card has deleted: gone from the mirror too (its 'T' records stay for the rest of the boot). */
     fun drop(f: Long) {
         bin(f).delete()

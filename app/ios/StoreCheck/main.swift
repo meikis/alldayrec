@@ -70,6 +70,25 @@ do {
   check(m2.have(f), 0, "dropped")
 }
 
+// the hold goes once the backlog is all up (#130): the last READ's bytes cut into pieces first, and all of it up to where
+// LIVE began, not to the hold a minute before (10-08: let go 1-3 s early, the backlog's last minute queued);
+// StoreTest.backlogUp's case
+do {
+  let dir = tmp(), out = tmp(), undated = tmp()
+  let f: Int64 = 1 << 16, g: Int64 = 1 << 16 | 1  // the backlog file, and the one LIVE goes on in
+  let backlog = t(0, 1_000_000) + a(0, 10) + a(10, 10)  // 200 ms from 1_000_000
+  let m = Mirror(dir)
+  m.listed([f: Int64(backlog.count)], open: g)
+  check(try m.put(f, 0, backlog), nil, "READ to its end")
+  let live: Int64 = 1_000_200, hold = live - 60_000  // holdAhead
+  check(m.up(out, before: live), true, "its bytes not cut yet: up, so cut first")
+  check(try m.pieces(out, undated, tag: "LR-P3-BDAE", liveFrames: 15, boot: 1), 1, "the backlog's piece")
+  check(m.up(out, before: live), false, "its piece is queued, after the hold, before LIVE began")
+  check(m.up(out, before: hold), true, "up to the hold only: it would go now")
+  clear(out)  // the uploader took it
+  check(m.up(out, before: live), true, "all up")
+}
+
 // what is said now sent ahead of a backlog still on the card (#130): where its first piece starts, before it is made
 do {
   let dir = tmp(), out = tmp(), undated = tmp()

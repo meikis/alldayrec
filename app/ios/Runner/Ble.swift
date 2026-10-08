@@ -519,7 +519,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
               readLog(p)
               try clean(p, m)
             }
-            unhold(m)
+            try unhold(m)
             lastStatus = Date()
             Ble.log("status: battery \(hw["battery"] ?? "-")% card \(hw["store"] ?? "-") free \(hw["free_kb"] ?? "-") KB")
           }
@@ -734,7 +734,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       syncNote = "\(Ble.hhmm()) 补传录音设备的录音 \(caught / 1024) KB"
       if caught > 0 { DeviceLog.app(tag ?? "", "sync", "补传 \(caught / 1024) KB，用时 \(Int(-t0.timeIntervalSinceNow)) s") }
       caught = 0; caughtSince = nil; ahead = -1
-      unhold(m)
+      try unhold(m)
     }
   }
 
@@ -849,14 +849,18 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   /// may still move by the clock's drift). Set before that piece exists, so no upload has it without the hold.
   private func holdAhead(_ m: Mirror) {
     guard ahead >= 0, let tag, Recorder.hold(tag) == nil, let at = m.nextStart(from: ahead) else { return }
-    prefs.set(at - 60_000, forKey: "hold:\(tag)")
-    Ble.log("hold \(tag) at \(at - 60_000): the backlog goes up after what is said now")
+    prefs.set(at - Self.holdMarginMs, forKey: "hold:\(tag)")
+    Ble.log("hold \(tag) at \(at - Self.holdMarginMs): the backlog goes up after what is said now")
   }
 
-  /// No backlog left, and none of its pieces waiting to go up: the server may finalize past the hold.
-  private func unhold(_ m: Mirror) {
-    guard let tag, let h = Recorder.hold(tag), behind(m) == 0,
-          !Uploader.files(chunks).contains(where: { Uploader.piece($0).map { $0.device == tag && $0.start < h } ?? false }) else { return }
+  private static let holdMarginMs: Int64 = 60_000  // the hold before where LIVE began: the clock's drift
+
+  /// No backlog left, and none of its pieces waiting to go up: the server may finalize past the hold. The last READ's
+  /// bytes are cut first, and the backlog runs up to where LIVE began, the hold plus its margin (Mirror.up).
+  private func unhold(_ m: Mirror) throws {
+    guard let tag, let h = Recorder.hold(tag), behind(m) == 0 else { return }
+    try pieces(m)
+    guard m.up(chunks, before: h + Self.holdMarginMs) else { return }
     prefs.removeObject(forKey: "hold:\(tag)")
     Ble.log("hold \(tag) let go")
   }

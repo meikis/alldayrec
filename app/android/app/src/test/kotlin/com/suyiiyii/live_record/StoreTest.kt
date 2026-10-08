@@ -1,7 +1,9 @@
 package com.suyiiyii.live_record
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.nio.ByteBuffer
@@ -53,6 +55,24 @@ class StoreTest {
         assertEquals(listOf("1999950@LR-P1-BDAE.ogg"), names(out))
         m2.drop(f)
         assertEquals(0L, m2.have(f))
+    }
+
+    /** The hold goes once the backlog is all up (#130): the last READ's bytes cut into pieces first, and all of it up to
+     *  where LIVE began, not to the hold a minute before (10-08: let go 1-3 s early, the backlog's last minute queued). */
+    @Test fun backlogUp() {
+        val dir = tmp(); val out = tmp(); val undated = tmp()
+        val f = 1L shl 16; val g = 1L shl 16 or 1  // the backlog file, and the one LIVE goes on in
+        val backlog = t(0, 1_000_000) + a(0, 10) + a(10, 10)  // 200 ms from 1_000_000
+        val m = Mirror(dir)
+        m.listed(mapOf(f to backlog.size.toLong()), g)
+        assertNull(m.put(f, 0, backlog))  // READ to its end
+        val live = 1_000_200L; val hold = live - 60_000  // holdAhead
+        assertTrue("its bytes not cut yet: up, so cut first", m.up(out, live))
+        assertEquals(1, m.pieces(out, undated, "LR-P3-BDAE", 15, 1))
+        assertFalse("its piece is queued, after the hold, before LIVE began", m.up(out, live))
+        assertTrue("up to the hold only: it would go now", m.up(out, hold))
+        out.listFiles()!!.forEach { it.delete() }  // the uploader took it
+        assertTrue(m.up(out, live))
     }
 
     /** What is said now sent ahead of a backlog still on the card (#130): where its first piece starts, before it is made. */

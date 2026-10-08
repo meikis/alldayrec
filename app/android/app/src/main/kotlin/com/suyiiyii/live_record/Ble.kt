@@ -737,18 +737,22 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
     private fun holdAhead(m: Mirror) {
         if (ahead < 0 || mirrorName.isEmpty() || prefs.contains("hold:$mirrorName")) return
         val at = m.nextStart(ahead) ?: return
-        prefs.edit().putLong("hold:$mirrorName", at - 60_000).apply()
-        Log.i("live-record", "ble hold $mirrorName at ${at - 60_000}: the backlog goes up after what is said now")
+        prefs.edit().putLong("hold:$mirrorName", at - HOLD_MARGIN_MS).apply()
+        Log.i("live-record", "ble hold $mirrorName at ${at - HOLD_MARGIN_MS}: the backlog goes up after what is said now")
     }
 
-    /** No backlog left, and none of its pieces waiting to go up: the server may finalize past the hold. */
+    /** No backlog left, and none of its pieces waiting to go up: the server may finalize past the hold. The last READ's
+     *  bytes are cut first, and the backlog runs up to where LIVE began, the hold plus its margin (Mirror.up). */
     private fun unhold(m: Mirror) {
         val h = prefs.getLong("hold:$mirrorName", -1)
-        if (h < 0 || behind(m) > 0 || Uploader.queue(chunks).any { Uploader.deviceOf(it) == mirrorName && Uploader.startMs(it) < h }) return
+        if (h < 0 || behind(m) > 0) return
+        pieces(m)
+        if (!m.up(chunks, h + HOLD_MARGIN_MS)) return
         prefs.edit().remove("hold:$mirrorName").apply()
         Log.i("live-record", "ble hold $mirrorName let go")
     }
 
+    private val HOLD_MARGIN_MS = 60_000L  // the hold before where LIVE began: the clock's drift
     private var mirrorName = ""  // the session's: the board's name as pieces carry it, its boot now
     private var boot = 0
 

@@ -329,6 +329,19 @@ final class Mirror {
     }
   }
 
+  /// None of the pieces it cut that start before `until` is still in `out` waiting to go up. With `until` where LIVE
+  /// began and pieces() run just before, the backlog is all up and the server's hold may go (#130). 10-08: the hold went
+  /// 1-3 s early, before the last READ's bytes were cut, and while the backlog's last minute (between the hold and where
+  /// LIVE began) was still queued; those pieces came in behind the server's queue.
+  func up(_ out: URL, before until: Int64) -> Bool {
+    !files.values.contains { s in
+      s.pieces.contains { n in
+        (Int64(n.prefix { $0 != "@" }) ?? .max) < until
+          && ["ogg", "part"].contains { fm.fileExists(atPath: out.appendingPathComponent("\(n).\($0)").path) }
+      }
+    }
+  }
+
   /// A file the card has deleted: gone from the mirror too (its 'T' records stay for the rest of the boot).
   func drop(_ f: Int64) {
     try? fm.removeItem(at: bin(f))
