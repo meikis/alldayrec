@@ -15,8 +15,9 @@ lvl = lambda v: 10 * np.log10(np.mean(v.astype(np.float64) ** 2))
 
 
 def encode(*opts: str) -> list[bytes]:
-    """4 s of quiet pink noise (a room, about -55 dBFS) through one libopus encoder: its audio packets."""
-    ogg = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "anoisesrc=d=4:c=pink:r=16000:a=0.003", "-c:a", "libopus",
+    """4 s of quiet pink noise (a room, about -55 dBFS; a fixed seed: the same noise every run) through one libopus
+    encoder: its audio packets."""
+    ogg = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "anoisesrc=d=4:c=pink:r=16000:a=0.003:seed=1", "-c:a", "libopus",
                           *opts, "-f", "ogg", "pipe:1"], capture_output=True, check=True).stdout
     return audio.packets(ogg)[2:]  # OpusHead, OpusTags
 
@@ -29,12 +30,15 @@ def test_join(tmp_path):
     assert audio.save("LR-P3-test", T, a, "audio/ogg") == audio.save("LR-P3-test", T + 2000, b, "audio/ogg") == 2.0
     row = lambda t: db.conn().execute("SELECT * FROM pieces WHERE start_ms = ?", (t,)).fetchone()
     x = audio.samples(row(T + 2000))
-    assert len(x) == 200 * 160, len(x)
-    head, mid = lvl(x[:640]), lvl(x[8000:24000])  # its first 40 ms, its middle second
-    assert abs(head - mid) < 2, f"the join: first 40 ms {head - mid:+.1f} dB against the middle"
-    assert abs(row(T + 2000)["rms"] - row(T)["rms"]) < 1, "the stored level is the piece's, not its start's"
+    # against the one stream the encoder made (both pieces through one decoder), not against the noise's own level: a
+    # 40 ms stretch of noise is itself 2-3 dB louder or quieter than the next, which made a level check flaky (10-08)
+    one = audio.decode(audio.ogg(rec[:400]))[200 * 160:]
+    assert len(x) == len(one) == 200 * 160, (len(x), len(one))
+    assert abs(lvl(x[:640]) - lvl(one[:640])) < 1, f"the join: first 40 ms {lvl(x[:640]) - lvl(one[:640]):+.1f} dB against one stream"
+    assert np.abs(x[1280:].astype(np.int32) - one[1280:]).max() <= 2, "past the 80 ms the decoder heard first, the same samples as one stream"
+    assert row(T + 2000)["rms"] == audio.health(x)[0], "the stored level is of the piece as it plays"
     cold = audio.decode(b)
-    assert lvl(cold[:640]) - mid > 6, "on its own the same piece starts loud (what the check above guards against)"
+    assert lvl(cold[:640]) - lvl(one[:640]) > 6, "on its own the same piece starts loud (what the check above guards against)"
     # after a gap (a lost frame, another recording): nothing to go on from, decoded as before
     assert audio.save("LR-P3-test", T + 4010, b, "audio/ogg") == 2.0
     assert np.array_equal(audio.samples(row(T + 4010)), cold)
