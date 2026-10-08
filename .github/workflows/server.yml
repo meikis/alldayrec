@@ -1,0 +1,27 @@
+name: server
+on:
+  pull_request:  # only on PRs: main gets what a green PR ran
+    paths: ['server/**', '.github/workflows/server.yml']
+
+concurrency:  # a new push to a PR cancels its run still going
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10  # ~2.5 min, at most 6 so far
+    defaults:
+      run:
+        working-directory: server
+    env:  # server.py refuses to import without these; the tests never reach the model or the services
+      VAD_MODEL_DIR: unused
+      LIVE_DATA: unused
+      ASR_UPLOAD_BRIDGE_URL: unused
+      ASR_SERVICE_URL: unused
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends ffmpeg  # the tests encode Opus and AAC pieces
+      - uses: astral-sh/setup-uv@v10.2.0  # this action publishes no major-version tag
+      - run: uv sync  # not --locked: uv.lock names a private mirror, uv re-resolves the same versions on PyPI
+      - run: uv run --with pytest pytest -q

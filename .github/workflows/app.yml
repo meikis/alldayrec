@@ -1,0 +1,27 @@
+name: app
+on:
+  pull_request:  # only on PRs: main gets what a green PR ran
+    paths: ['app/**', '.github/workflows/app.yml']
+
+concurrency:  # a new push to a PR cancels its run still going
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10  # ~1.5 min, at most 4 so far
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.5  # Dart 3.13.4, as pubspec.yaml asks; a new stable's lints come in by bumping this
+          cache: true
+      - run: flutter analyze
+      - run: flutter test  # test/: the add-recorder list's order (mergeNearby)
+      # the iPhone's BLE record stream (Store.swift: mirror, 'T' dating, Ogg), event log (DeviceLog.swift), firmware update
+      # checks (Dfu.swift) and listening (Listen.swift): Foundation only
+      - run: swiftc -o /tmp/storecheck ios/Runner/Store.swift ios/Runner/DeviceLog.swift ios/Runner/Dfu.swift ios/Runner/Listen.swift ios/StoreCheck/main.swift && /tmp/storecheck
