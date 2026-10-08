@@ -22,11 +22,13 @@ static int16_t _buffer_0[MIC_BUFFER_SAMPLES];
 static int16_t _buffer_1[MIC_BUFFER_SAMPLES];
 static volatile uint8_t _next_buffer_index = 0;
 static volatile mix_handler _callback = NULL;
+uint32_t pdm_errors;  // lr_log.c's HEALTH: counted here, cleared there every 10 minutes
 
 static void pdm_irq_handler(nrfx_pdm_evt_t const *event)
 {
     // Ignore error (how to handle?)
     if (event->error) {
+        pdm_errors++;
         LOG_ERR("PDM error: %d", event->error);
         return;
     }

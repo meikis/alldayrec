@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "hpf.h"
+#include "mic_health.h"
 #include "utils.h"
 #ifdef CODEC_OPUS
 #include "lib/opus-1.2.1/opus.h"
@@ -47,6 +48,7 @@ int codec_receive_pcm(int16_t *data, size_t len) // this gets called after mic d
 
 int16_t codec_input_samples[CODEC_PACKAGE_SAMPLES];
 static struct hpf hpf[2];
+struct mic_health mic_health;  // lr_log.c logs it every 10 minutes (HEALTH)
 uint8_t codec_output_bytes[CODEC_OUTPUT_MAX_BYTES];
 K_THREAD_STACK_DEFINE(codec_stack, 32000);
 struct k_thread codec_thread;  // lr_log.c watches its stack
@@ -80,7 +82,9 @@ void codec_entry()
         ring_buf_get(&codec_ring_buf, (uint8_t *) codec_input_samples, CODEC_PACKAGE_SAMPLES * 2);
 
         // High-pass here, not in the PDM interrupt: the BLE stream and the SD store both take what this encodes
+        mic_health_raw(&mic_health, codec_input_samples, CODEC_PACKAGE_SAMPLES);
         hpf_run(hpf, codec_input_samples, CODEC_PACKAGE_SAMPLES);
+        mic_health_out(&mic_health, codec_input_samples, CODEC_PACKAGE_SAMPLES);
 
         // Run Codec
         output_size = execute_codec();

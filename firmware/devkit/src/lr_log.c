@@ -8,11 +8,16 @@
 #include <zephyr/random/random.h>
 #include <zephyr/storage/flash_map.h>
 
+#include <mpsl_temp.h>
+
 #include "lib/battery/battery.h"
+#include "mic_health.h"
 
 extern uint32_t transport_frame_no;  // transport.c: the codec's frames since boot, the audio's clock
 extern uint32_t free_kb, dropped;    // lr_store.c
 extern struct k_thread codec_thread, pusher_thread, store_thread_data;
+extern struct mic_health mic_health;  // codec.c
+extern uint32_t pdm_errors;           // mic.c
 
 #define N 160  // records the RAM batch holds: 2.5 KB
 #define MAGIC 0x4C524C47
@@ -128,7 +133,7 @@ static uint16_t unused_stack(struct k_thread *t)
     return t && t->stack_info.size && !k_thread_stack_space_get(t, &n) ? MIN(n, 0xFFFE) : 0xFFFF;
 }
 
-/* Every 5 minutes the batch goes to flash, every 10 a heartbeat comes first */
+/* Every 5 minutes the batch goes to flash, every 10 a heartbeat (and the stacks, the mic's health) comes first */
 static void tick(struct k_work *w)
 {
     static uint32_t ticks;
@@ -136,6 +141,11 @@ static void tick(struct k_work *w)
         lr_log(LR_HEARTBEAT, battery_20mv(), free_kb, dropped);
         lr_log(LR_STACKS, 0, (uint32_t) unused_stack(&codec_thread) << 16 | unused_stack(&pusher_thread),
                (uint32_t) unused_stack(&store_thread_data) << 16 | unused_stack(bt_rx));
+        // the die temperature, in quarter degrees (MPSL owns the TEMP peripheral)
+        lr_log(LR_HEALTH, (int8_t) (mpsl_temperature_get() / 4), mic_health_a(&mic_health, pdm_errors),
+               mic_health_b(&mic_health));
+        mic_health = (struct mic_health){0};
+        pdm_errors = 0;
     }
     flush();
     k_work_reschedule(k_work_delayable_from_work(w), K_MINUTES(5));

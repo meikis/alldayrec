@@ -106,3 +106,4 @@ jobs:
           cc -o $d/led_check test/led_check.c && $d/led_check  # the one-LED boards' flash codes (src/led_code.h)
           cc -o $d/power_check test/power_check.c && $d/power_check  # when a low battery turns it off (src/lr_power.h)
           cc -o $d/switch_check test/switch_check.c && $d/switch_check  # LR-P3's switch debounce (src/lr_switch.h)
+          cc -o $d/health_check test/health_check.c && $d/health_check  # the mic's HEALTH counts (src/mic_health.h)
