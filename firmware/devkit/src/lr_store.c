@@ -472,6 +472,7 @@ struct live_rec {
     uint16_t len;
 } __packed;
 static uint32_t live_lost, live_lost_bytes;  // records left out of LIVE in a row: logged once one goes again
+static uint32_t live_cut, live_cut_bytes;    // queued records the link lost: logged once the queue is empty
 
 /* n bytes into a queue (LIVE's, the card's), claimed only: the record goes out whole at ring_buf_put_finish */
 static void rb_claim(struct ring_buf *rb, const void *d, uint32_t n)
@@ -507,41 +508,6 @@ static void live(const uint8_t *b, uint32_t len, uint32_t offset)
     }
 }
 
-/* The queued records to the phone that follows, split to the MTU. A record for a link that went is dropped, and a
- * notify that fails (the link going) drops the rest of its record: a gap the phone fills with READ. */
-static void live_send(void)
-{
-    static uint8_t p[8 + 512];
-    struct live_rec h;
-    while (ring_buf_get(&live_rb, (uint8_t *) &h, sizeof(h)) == sizeof(h)) {
-        struct bt_conn *conn = get_current_connection();
-        if (!conn || !bt_gatt_is_subscribed(conn, LIVE_ATTR, BT_GATT_CCC_NOTIFY)) {
-            ring_buf_get(&live_rb, NULL, h.len);
-            continue;
-        }
-        conn = bt_conn_ref(conn);
-        uint16_t room = MIN(bt_gatt_get_mtu(conn) - 3 - 8, sizeof(p) - 8);
-        bool ok = true;
-        for (uint32_t i = 0; i < h.len; i += room) {
-            uint16_t m = MIN(room, h.len - i);
-            ring_buf_get(&live_rb, p + 8, m);  // taken either way: the queue goes on with the next record
-            sys_put_le32(h.file, p);
-            sys_put_le32(h.offset + i, p + 4);
-            ok = ok && !bt_gatt_notify(conn, LIVE_ATTR, p, 8 + m);
-        }
-        bt_conn_unref(conn);
-    }
-}
-
-static void live_thread(void)
-{
-    for (;;) {
-        k_sem_take(&live_sem, K_FOREVER);
-        live_send();
-    }
-}
-K_THREAD_DEFINE(live_tid, 2048, live_thread, NULL, NULL, NULL, K_PRIO_PREEMPT(8), 0, 0);  // between the pusher (7) and the store (9): LIVE before READ's DATA
-
 /* Notify until it fits in the TX buffers; false once the link is gone. */
 static bool notify(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *data, uint16_t len)
 {
@@ -553,6 +519,50 @@ static bool notify(struct bt_conn *conn, const struct bt_gatt_attr *attr, const 
         k_sleep(K_MSEC(1));
     }
 }
+
+/* The queued records to the phone that follows, split to the MTU, each notify waiting for a TX buffer (#170). Only the
+ * link loses a record: one for a link that went (or a phone that unsubscribed) is dropped, and a notify that fails
+ * drops the rest of its record; LIVE_LOST x 1 counts them once the queue is empty. A gap the phone fills with READ. */
+static void live_send(void)
+{
+    static uint8_t p[8 + 512];
+    struct live_rec h;
+    while (ring_buf_get(&live_rb, (uint8_t *) &h, sizeof(h)) == sizeof(h)) {
+        struct bt_conn *conn = get_current_connection();
+        bool ok = conn && bt_gatt_is_subscribed(conn, LIVE_ATTR, BT_GATT_CCC_NOTIFY);
+        if (ok) {
+            conn = bt_conn_ref(conn);
+            uint16_t room = MIN(bt_gatt_get_mtu(conn) - 3 - 8, sizeof(p) - 8);
+            for (uint32_t i = 0; i < h.len; i += room) {
+                uint16_t m = MIN(room, h.len - i);
+                ring_buf_get(&live_rb, p + 8, m);  // taken either way: the queue goes on with the next record
+                sys_put_le32(h.file, p);
+                sys_put_le32(h.offset + i, p + 4);
+                ok = ok && notify(conn, LIVE_ATTR, p, 8 + m);
+            }
+            bt_conn_unref(conn);
+        } else {
+            ring_buf_get(&live_rb, NULL, h.len);
+        }
+        if (!ok) {
+            live_cut++;
+            live_cut_bytes += h.len;
+        }
+    }
+    if (live_cut) {
+        lr_log(LR_LIVE_LOST, 1, live_cut, live_cut_bytes);
+        live_cut = live_cut_bytes = 0;
+    }
+}
+
+static void live_thread(void)
+{
+    for (;;) {
+        k_sem_take(&live_sem, K_FOREVER);
+        live_send();
+    }
+}
+K_THREAD_DEFINE(live_tid, 2048, live_thread, NULL, NULL, NULL, K_PRIO_PREEMPT(8), 0, 0);  // between the pusher (7) and the store (9): LIVE before READ's DATA
 
 static void reply(struct bt_conn *conn, uint8_t op, uint32_t a, uint32_t b, uint8_t blen)
 {

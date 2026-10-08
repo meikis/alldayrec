@@ -208,7 +208,12 @@ const EVENTS: Record<number, [string, string, (r: Rec) => string]> = {
         `电量过低（${r.x * 20} mV）：停止录音，关机（System OFF），插 USB 或拨一下开关唤醒`,
       ][r.a] ?? `${r.a}`,
   ],
-  30: ["LIVE_LOST", "实时漏发", (r) => `${r.a} 条记录（${r.b} B）没能实时发出（蓝牙卡住），卡上照存，手机从卡里补`],
+  30: [
+    "LIVE_LOST",
+    "实时漏发",
+    (r) =>
+      `${r.a} 条记录（${r.b} B）没能实时发出（${r.x ? "蓝牙断开" : "蓝牙卡住"}），卡上照存，手机从卡里补`,
+  ],
   31: ["HEALTH", "麦克风和芯片（10 分钟）", health],
   32: ["CARD_ID", "存储卡型号", cardId],
   33: ["CARD_SIZE", "存储卡容量", cardSize],

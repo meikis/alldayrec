@@ -35,6 +35,8 @@ check(said(34, 4, 2 | (5 << 16), 3 | (1 << 16)), "CRC 错 2 次，超时 5 次�
 const level = (code: number, a: number) => describe({ boot: 1, t: 100, code, x: 30, a, b: 0 });
 check(String([level(31, 0).routine, level(31, 0).level]), "true,"); // a quiet 10 minutes: hidden
 check(String([level(31, 230).routine, level(31, 230).level]), "false,warn"); // all-zero frames: shown
+check(said(30, 0, 12, 4800), "12 条记录（4800 B）没能实时发出（蓝牙卡住），卡上照存，手机从卡里补");
+check(said(30, 1, 3, 1100), "3 条记录（1100 B）没能实时发出（蓝牙断开），卡上照存，手机从卡里补");
 const up = {
   at: "",
   app: true,

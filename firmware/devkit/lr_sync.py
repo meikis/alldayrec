@@ -357,7 +357,8 @@ EVENTS = {
     29: ("POWER", lambda x, a, b: {0: f"on battery, VDDH {x * 20} mV",
                                    1: "power-fail warning: VDDH under 3.3 V or VDD under 2.8 V",
                                    2: f"low battery ({x * 20} mV): recording ended, System OFF until USB or the switch"}.get(a, str(a))),
-    30: ("LIVE_LOST", lambda x, a, b: f"{a} records ({b} B) left out of LIVE (link stalled), on the card all the same"),
+    30: ("LIVE_LOST", lambda x, a, b: f"{a} records ({b} B) left out of LIVE ({'link lost' if x else 'link stalled'}),"
+                                      " on the card all the same"),
     31: ("HEALTH", health),
     32: ("CARD_ID", card_id),
     33: ("CARD_SIZE", card_size),
@@ -454,7 +455,8 @@ def selftest():
     assert EVENTS[28][1](0, 1, 0) == "off: System OFF" and EVENTS[28][1](1, 9, 0) == "on: 9"
     assert EVENTS[29][1](204, 0, 0) == "on battery, VDDH 4080 mV"
     assert EVENTS[29][1](165, 2, 0).startswith("low battery (3300 mV)")
-    assert EVENTS[30][0] == "LIVE_LOST" and EVENTS[30][1](0, 12, 4800).startswith("12 records (4800 B)")
+    assert EVENTS[30][0] == "LIVE_LOST" and EVENTS[30][1](0, 12, 4800).startswith("12 records (4800 B) left out of LIVE (link stalled)")
+    assert EVENTS[30][1](1, 3, 1100).startswith("3 records (1100 B) left out of LIVE (link lost)")
     assert EVENTS[26][1](12, 409600, 10000 | 491 << 22) == \
         "400.0 KB in 10.0 s (40.0 KB/s), 491 B a packet, interval 15 ms"
     assert EVENTS[27][1](0, 3000, 6500) == "card 3000 ms, notify 6500 ms"

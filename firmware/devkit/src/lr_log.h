@@ -52,8 +52,10 @@
  *    29 POWER       power (lr_power.c): x battery mV / 20 (LR-P3: VDDH), a 0: once a minute on battery (LR-P3), 1: the
  *                   chip's power-fail warning (LR-P3: VDDH under 3.3 V or VDD under 2.8 V; x 0, not measured in the
  *                   interrupt), 2: low battery, recording ended, System OFF next until USB (or LR-P3's switch) wakes it
- *    30 LIVE_LOST   a records, b bytes left out of LIVE in a row (its queue full: the link stalled), by the next one
- *                   that goes; on the card all the same, the phone READs them (#133)
+ *    30 LIVE_LOST   a records, b bytes left out of LIVE; on the card all the same, the phone READs them. x 0: in a
+ *                   row, its queue full (the link stalled), by the next one that goes (#133); x 1: queued, then lost
+ *                   to the link (gone, or the phone unsubscribed; a record cut short counts whole), once the queue is
+ *                   empty (#170)
  *    31 HEALTH      the mic and the chip over the last 10 minutes, with HEARTBEAT: x die temperature (°C, signed),
  *                   a ms of all-zero 10 ms frames from the mic (bits 0-19) | PDM errors << 20, b samples at full scale
  *                   (bits 0-23) | the loudest sample after the high-pass >> 7 << 24 (255: full scale); zeros and full

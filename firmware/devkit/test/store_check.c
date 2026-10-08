@@ -1,6 +1,7 @@
 // Host check of the record stream in src/lr_store.c: what a following phone gets (LIVE) and what the card gets are the
 // same bytes at the same file and offset, through batches, 'T' records, frame gaps and a card that stops taking writes;
-// the timing events (SD_WRITES, READ, READ_TIME) on a fake clock; LIVE behind a stalled link (#133).
+// the timing events (SD_WRITES, READ, READ_TIME) on a fake clock; LIVE behind a stalled link (#133), a notify with no TX
+// buffer and a link lost with records queued (#170).
 //   d=$(mktemp -d) && mkdir -p $d/zephyr/{bluetooth,fs,sys,logging,drivers,random} && for h in bluetooth/conn \
 //   bluetooth/gatt bluetooth/uuid fs/fs kernel logging/log sys/byteorder sys/ring_buffer drivers/sensor random/random; do
 //   touch $d/zephyr/$h.h; done && cc -O1 -w -I$d -o $d/store_check test/store_check.c && $d/store_check
@@ -167,6 +168,8 @@ static uint8_t phone[FILES][1 << 16];
 static uint32_t phone_len[FILES];
 static const struct bt_gatt_attr *data_attr, *ctrl_attr;  // READ's: DATA offset:u32 bytes..., CTRL replies
 static uint32_t data_next;                                // the offset the next DATA notification must have
+static int live_nomem;     // LIVE notifies refused for want of a TX buffer (-ENOMEM) before one goes (#170)
+static int live_gone = -1; // LIVE notifies that go before the link is lost (-ENOTCONN from then on); -1: never
 static int bt_gatt_notify(struct bt_conn *c, const struct bt_gatt_attr *a, const void *data, uint16_t len)
 {
     const uint8_t *p = data;
@@ -180,6 +183,14 @@ static int bt_gatt_notify(struct bt_conn *c, const struct bt_gatt_attr *a, const
         now_ms += notify_ms;
         return 0;
     }
+    if (live_nomem) {
+        live_nomem--;
+        return -ENOMEM;
+    }
+    if (!live_gone) {
+        return -ENOTCONN;
+    }
+    live_gone -= live_gone > 0;
     uint32_t file = sys_get_le32(p) & 0xffff, off = sys_get_le32(p + 4);
     assert(file < FILES);
     assert(off == phone_len[file] || (holes_ok && off > phone_len[file]));  // no holes while the phone follows
@@ -350,9 +361,40 @@ int main(void)
     assert(a == a0 + 400 + 100);  // every frame on the card
     holes_ok = false;
 
+    // no TX buffer for a while (-ENOMEM, #170): LIVE waits for one, nothing is left out, nothing logged
+    n_logged = 0;
+    uint32_t at = seg_size;
+    live_nomem = 25;
+    frames(3333, 50);
+    flush();
+    assert(live_nomem == 0 && n_logged == 0 && card_len[2] == phone_len[2]);
+    assert(memcmp(card[2] + at, phone[2] + at, card_len[2] - at) == 0);
+
+    // the link lost with records queued: the one it cut short and those after it go out of LIVE, counted once the
+    // queue is empty (LIVE_LOST x 1, a record cut short counts whole); the card has them all, the phone sees a hole
+    at = seg_size;
+    stalled = true;     // three records wait in LIVE's queue
+    frames(3383, 31);
+    uint32_t queued = seg_size - at;
+    stalled = false;
+    live_gone = 1;      // one notify goes, then the link is gone
+    live_send();
+    assert(n_logged == 1 && logged[0].code == LR_LIVE_LOST && logged[0].x == 1);
+    assert(logged[0].a == 3 && logged[0].b == queued && phone_len[2] < at + queued);
+    live_gone = -1;     // the phone is back
+    holes_ok = true;
+    frames(3414, 19);
+    flush();
+    assert(n_logged == 1 && card_len[2] == phone_len[2]);  // LIVE goes on past the hole, the same bytes as the card
+    assert(memcmp(card[2] + at + queued, phone[2] + at + queued, card_len[2] - at - queued) == 0);
+    a = t = 0;
+    parse(card[2], card_len[2], &a, &t);
+    assert(a == a0 + 400 + 100 + 50 + 31 + 19);  // every frame on the card
+    holes_ok = false;
+
     // nobody follows: the card alone, same records
     subscribed = false;
-    frames(3333, 100);
+    frames(3433, 100);
     flush();
     assert(card_len[2] > phone_len[2]);
 
@@ -365,14 +407,14 @@ int main(void)
     uint16_t sg = seg;
     uint32_t dropped0 = dropped;
     card_stuck = true;
-    frames(3433, 1000);  // 10 s: more than the queue holds
+    frames(3533, 1000);  // 10 s: more than the queue holds
     assert(seg == sg && card_behind && card_len[sg] == 0 && dropped == dropped0);
     assert(n_logged == 1 && logged[0].code == LR_APPEND_ERR && logged[0].x == 1 && (int32_t) logged[0].a == -EAGAIN);
     card_stuck = false;
     card_drain();  // the write returns: the queue goes onto the card
     uint32_t kept = card_len[sg];
     assert(kept >= CARD_QUEUE / 2 && kept < phone_len[sg] && memcmp(card[sg], phone[sg], kept) == 0);
-    frames(4433, 500);
+    frames(4533, 500);
     flush();
     assert(seg == sg + 1 && card_len[sg] == kept && !card_behind);
     assert(card_len[seg] == phone_len[seg] && memcmp(card[seg], phone[seg], card_len[seg]) == 0);
