@@ -378,6 +378,8 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
   func peripheral(_ p: CBPeripheral, didUpdateNotificationStateFor c: CBCharacteristic, error: Error?) { done(error) }
 
+  func peripheral(_ p: CBPeripheral, didReadRSSI rssi: NSNumber, error: Error?) { done(error, Data([UInt8(bitPattern: rssi.int8Value)])) }
+
   /// Notifications (LIVE, CTRL, DATA) and read responses (the rest) come here alike, in the order they arrived.
   func peripheral(_ p: CBPeripheral, didUpdateValueFor c: CBCharacteristic, error: Error?) {
     let v = c.value ?? Data()
@@ -536,13 +538,14 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     let s = Status(boot: Int(Store.le(t, 0, 2)), frame: Ble.u32(t, 2), store: Int(Int16(truncatingIfNeeded: Store.le(t, 6, 2))))
     noCard = s.store < 0 && Ble.u32(t, 12) == 0
     let left = syncTotalKb - syncDoneKb, rate = caughtSince.map { Double(caught) / max(1, -$0.timeIntervalSinceNow) } ?? 0
+    let dbm = try rssi(p)
     var h: [String: Any] = ["name": name, "store": s.store, "free_kb": Ble.u32(t, 8), "total_kb": Ble.u32(t, 12),
                             // a backlog read in the background (#130): what is left, and when it is done at this pace
                             "backlog_kb": left, "backlog_eta_s": rate > 0 && left > 0 ? Int(Double(left * 1024) / rate) : NSNull(),
                             // optional: macOS cannot publish 180F, so the Mac's fake recorder (app/ios/e2e) has none
                             "battery": (try? read(p, Ble.bas, Ble.battery))?.first.map { Int($0) } ?? NSNull(),
-                            "app_mb": Recorder.footprintMB(),  // this app's own memory, to see it grow from the server (#109)
                             "live_gaps": liveGaps,  // holes in LIVE the card could not fill this session (follow())
+                            "rssi": dbm ?? NSNull(),
                             "charge": Ble.charge(t) ?? NSNull()]
     if t.count >= 47 {
       let left = Int64(Int32(truncatingIfNeeded: Store.le(t, 43, 4)))
@@ -557,6 +560,11 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     DispatchQueue.main.async { Dfu.back(h["fw"] as? String) }  // the first status after an update, for its log
     report(Ble.tag(name), h.filter { $0.key != "name" })
     return s
+  }
+
+  /// The link's signal in dBm (#155 A4: a timeout drop from distance, the case's effect); nil: iOS had none.
+  private func rssi(_ c: Conn) throws -> Int? {
+    do { return Int(Int8(bitPattern: try op(c, "rssi") { c.p.readRSSI() }.first ?? 0)) } catch is Gone { throw Gone() } catch { return nil }
   }
 
   /// Pause the recording for `s` seconds (0: go on now); the recorder keeps the time itself.

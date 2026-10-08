@@ -2,6 +2,10 @@ package com.suyiiyii.live_record
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.BatteryManager
+import android.os.Build
+import android.os.Debug
+import android.os.PowerManager
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
@@ -33,10 +37,15 @@ object DeviceLog {
     private lateinit var src: String           // this install's app events: "app:<id made at the first start>"
     private var lastSeq = 0L                   // an app event's seq: its time in ms, kept increasing (also across restarts)
     private val steps = StringBuilder()        // the connection's steps so far, for its connect event
+    private lateinit var ctx: Context
+    @Volatile var version = "?"                // this build, 1.4.6+21: in every app event and status (#155 A1)
+        private set
 
     fun start(ctx: Context) {
         synchronized(lock) {
             if (::file.isInitialized) return
+            this.ctx = ctx.applicationContext
+            version = ctx.packageManager.getPackageInfo(ctx.packageName, 0).let { "${it.versionName}+${it.longVersionCode}" }
             file = File(ctx.filesDir, "devlog.jsonl")
             prefs = ctx.getSharedPreferences("recorder", Context.MODE_PRIVATE)
             // src + seq is the server's key: another phone, or this one reinstalled, never writes over these events
@@ -124,7 +133,22 @@ object DeviceLog {
         if (!::file.isInitialized) return
         val now = System.currentTimeMillis()
         val seq = synchronized(lock) { maxOf(now, lastSeq + 1).also { lastSeq = it; prefs.edit().putLong("logSeq", it).apply() } }
-        add(listOf(event(device, src, seq, now, JSONObject(fields).put("kind", kind).put("text", text).apply { if (level != null) put("level", level) })))
+        add(listOf(event(device, src, seq, now, JSONObject(fields).put("kind", kind).put("text", text).put("app", version)
+            .apply { if (level != null) put("level", level) })))
+    }
+
+    /** The phone, for the status sent with its recorder's (#155 A1, A3): this build, the system, the model as the
+     *  maker names it (never the name the person gave the phone), its battery and whether it saves power or runs hot
+     *  (the system slows or stops apps then), and this app's memory. */
+    fun phone(): Map<String, Any?> {
+        val bm = ctx.getSystemService(BatteryManager::class.java)
+        val pm = ctx.getSystemService(PowerManager::class.java)
+        return mapOf("app" to version, "os" to "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+            "phone" to "${Build.MANUFACTURER} ${Build.MODEL}",
+            "phone_battery" to bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY), "phone_charging" to bm.isCharging,
+            "low_power" to pm.isPowerSaveMode,
+            "thermal" to listOf("none", "light", "moderate", "severe", "critical", "emergency", "shutdown").getOrNull(pm.currentThermalStatus),
+            "app_mb" to Debug.getPss() / 1024)  // proportional set size, as iOS's phys_footprint counts against the app
     }
 
     /** A step of connecting (BleLink.step), kept for the connect event. */

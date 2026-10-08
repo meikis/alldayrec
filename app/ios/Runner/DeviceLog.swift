@@ -21,6 +21,8 @@ enum DeviceLog {
   private static var src = ""    // this install's app events: "app:<id made at the first start>"
   private static var lastSeq: Int64 = 0  // an app event's seq: its time in ms, kept increasing (also across restarts)
   private static var steps: [String] = []  // the connection's steps so far, for its connect event
+  /// This build, 1.4.6+21: in every app event and status (#155 A1).
+  static let version = "\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "?")+\(Bundle.main.infoDictionary?["CFBundleVersion"] ?? "?")"
 
   static func start(dir: URL, prefs p: UserDefaults) {
     lock.lock()
@@ -105,7 +107,7 @@ enum DeviceLog {
     let seq = lastSeq
     prefs.set(seq, forKey: "logSeq")
     lock.unlock()
-    var data = fields.merging(["kind": kind, "text": text]) { $1 }
+    var data = fields.merging(["kind": kind, "text": text, "app": version]) { $1 }
     if let level { data["level"] = level }
     add([event(device, src, seq, now, data)])
   }

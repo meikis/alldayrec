@@ -268,6 +268,24 @@ enum Recorder {
   /// Where the server's finalization waits for a recorder's backlog (BleLink.holdAhead), nil: it does not.
   static func hold(_ tag: String) -> Int64? { (defaults.object(forKey: "hold:\(tag)") as? NSNumber)?.int64Value }
 
+  /// The phone, for the status sent with its recorder's (#155 A1, A3): this build, the system, the model identifier
+  /// (iPhone18,1; never the name the person gave the phone), its battery and whether it saves power or runs hot (iOS
+  /// slows or ends apps then), and this app's memory (#109). Off the main thread (UIDevice is read on it).
+  static func phone() -> [String: Any] {
+    var u = utsname()
+    uname(&u)
+    let machine = withUnsafeBytes(of: &u.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+    let (level, battery) = DispatchQueue.main.sync {
+      UIDevice.current.isBatteryMonitoringEnabled = true
+      return (UIDevice.current.batteryLevel, UIDevice.current.batteryState)
+    }
+    let p = ProcessInfo.processInfo, v = p.operatingSystemVersion
+    return ["app": DeviceLog.version, "os": "iOS \(v.majorVersion).\(v.minorVersion).\(v.patchVersion)", "phone": machine,
+            "phone_battery": level >= 0 ? Int((level * 100).rounded()) : NSNull(),
+            "phone_charging": battery == .unknown ? NSNull() : battery != .unplugged, "low_power": p.isLowPowerModeEnabled,
+            "thermal": ["nominal", "fair", "serious", "critical"][min(p.thermalState.rawValue, 3)], "app_mb": footprintMB()]
+  }
+
   /// This process's memory as iOS counts it against the app's limit (phys_footprint), in MB.
   static func footprintMB() -> Int {
     var info = task_vm_info_data_t()
@@ -435,7 +453,9 @@ final class Uploader: Thread {
   private(set) var sent = 0
   var note: String?
   private let dir: URL
-  private var fails = 0
+  @Shared private var fails = 0      // in a row, and since when (unix ms)
+  private var failedAt: Int64 = 0
+  @Shared private var okAt: Int64 = 0  // the last upload the server took (unix ms; 0: none since the launch)
 
   init(dir: URL) { self.dir = dir }
 
@@ -489,14 +509,26 @@ final class Uploader: Thread {
       switch code {
       case 200:
         b.forEach(keep); sent += b.count; note = nil
-        if fails > 0 { DeviceLog.app(p.device ?? device, "upload_ok", "上传恢复（之前连续失败 \(fails) 次）") }
+        okAt = Recorder.now()
+        if fails > 0 {
+          let s = (okAt - failedAt) / 1000
+          DeviceLog.app(p.device ?? device, "upload_ok", "上传恢复（之前连续失败 \(fails) 次，\(s < 120 ? "\(s) 秒" : "\(s / 60) 分钟")）",
+                        fields: ["fails": fails, "ms": okAt - failedAt])
+        }
         fails = 0
-      case 400: b.forEach { try? FileManager.default.removeItem(at: $0) }; note = "服务端无法解码一块，已丢弃"
+      case 400:  // the server keeps the bytes (recordings/rejected/); this phone says it lost them
+        let bytes = b.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+        DeviceLog.app(p.device ?? device, "upload_rejected", "服务端无法解码 \(b.count) 块（起于 \(Recorder.clock(p.start))，\(bytes / 1024) KB），已丢弃",
+                      level: "error", fields: ["start": p.start, "pieces": b.count, "bytes": bytes])
+        b.forEach { try? FileManager.default.removeItem(at: $0) }; note = "服务端无法解码一块，已丢弃"
       default: throw URLError(.badServerResponse, userInfo: [NSLocalizedDescriptionKey: "HTTP \(code)"])
       }
     } catch {
       fails += 1
-      if fails == 1 { DeviceLog.app(p.device ?? device, "upload_fail", "上传失败：\(DeviceLog.why(error, server: server))", level: "error") }
+      if fails == 1 {
+        failedAt = Recorder.now()
+        DeviceLog.app(p.device ?? device, "upload_fail", "上传失败：\(DeviceLog.why(error, server: server))", level: "error")
+      }
       note = "上传失败 \(error.localizedDescription)"
       Thread.sleep(forTimeInterval: 5 * Double(min(fails, 6)))
     }
@@ -506,11 +538,22 @@ final class Uploader: Thread {
     do { _ = try post("\(server)/api/chunks/end?device=\(enc(ble ?? device))&t=\(atMs)", Data(), nil) } catch { note = "结束信号失败 \(error.localizedDescription)" }
   }
 
-  /// What the phone last read from its BLE recorder, for the server's progress page; best effort, off this thread.
+  /// What the phone last read from its BLE recorder, for the server's progress page, with the phone's own state and this
+  /// recorder's upload queue (#155); best effort, off this thread.
   func report(_ device: String, _ hw: [String: Any]) {
     Thread.detachNewThread { [self] in
-      _ = try? post("\(server)/api/device-status?device=\(enc(device))", (try? JSONSerialization.data(withJSONObject: hw)) ?? Data(), "application/json")
+      let body = hw.merging(Recorder.phone()) { a, _ in a }.merging(queued(device)) { a, _ in a }
+      _ = try? post("\(server)/api/device-status?device=\(enc(device))", (try? JSONSerialization.data(withJSONObject: body)) ?? Data(), "application/json")
     }
+  }
+
+  /// `device`'s pieces waiting (how many, KB, the oldest's age in s) and how uploads go: failures in a row, s since the
+  /// last one the server took (nil: none since the launch).
+  func queued(_ device: String) -> [String: Any] {
+    let q = Uploader.files(dir).filter { Uploader.piece($0)?.device == device }, now = Recorder.now()
+    let bytes = q.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+    return ["queue_n": q.count, "queue_kb": bytes / 1024, "queue_age_s": q.first.flatMap { Uploader.piece($0).map { (now - $0.start) / 1000 } } ?? NSNull(),
+            "upload_fails": fails, "upload_ok_s": okAt > 0 ? (now - okAt) / 1000 : NSNull()]
   }
 
   private func keep(_ f: URL) {

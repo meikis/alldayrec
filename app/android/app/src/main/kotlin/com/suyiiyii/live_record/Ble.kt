@@ -495,7 +495,8 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             "charge" to Ble.charge(raw),
             // a backlog read in the background (#130): what is left, and when it is done at this pace
             "backlog_kb" to left, "backlog_eta_s" to if (rate > 0 && left > 0) (left * 1024 / rate).toLong() else null,
-            "live_gaps" to liveGaps)  // holes in LIVE the card could not fill this session (follow())
+            "live_gaps" to liveGaps,  // holes in LIVE the card could not fill this session (follow())
+            "rssi" to rssi(g))
         if (t.limit() >= 47) pausedUntil = t.getInt(43).toLong().let { if (it > 0) System.currentTimeMillis() + it * 1000 else 0L }
         for ((k, c) in listOf("model" to Ble.MODEL, "fw" to Ble.FW_REV))
             h[k] = hw[k] ?: try { String(read(g, Ble.DIS, c)) } catch (e: Exception) { null }
@@ -505,6 +506,9 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         report(Ble.tag(name), h - "name")
         return s
     }
+
+    /** The link's signal in dBm (#155 A4: a timeout drop from distance, the case's effect); null: the stack had none. */
+    private fun rssi(g: BluetoothGatt): Int? = try { op("rssi") { g.readRemoteRssi() }[0].toInt() } catch (e: Gone) { throw e } catch (e: Exception) { null }
 
     //
     // What the mirror lacks, READ alongside LIVE (#130). At most one READ at a time; the board ends one at any other
@@ -791,6 +795,8 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) = done(status)
 
         override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) = done(status)
+
+        override fun onReadRemoteRssi(g: BluetoothGatt, rssi: Int, status: Int) = done(status, byteArrayOf(rssi.toByte()))
 
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
             when (c.uuid) {

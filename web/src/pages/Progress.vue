@@ -4,8 +4,13 @@ import AppHeader from "../components/AppHeader.vue";
 import Listen from "../components/Listen.vue";
 import {
   CHARGE,
+  build,
   get,
   holdLeft,
+  hot,
+  phoneLine,
+  phoneState,
+  queueLine,
   type Calls,
   type CallSum,
   type DeviceStatus,
@@ -93,6 +98,17 @@ watch(
       ups.value[device] = (await get<Upgrade[]>("/api/upgrades", { device, since })).at(-1);
   },
 );
+// an app older than the newest build any phone runs or /app.apk has (both platforms share the build number): the
+// iPhone that stayed on 1.3.0 for days (#155)
+const apk = ref(0);
+onMounted(async () => {
+  apk.value = await get<{ versionCode: number }>("/api/app/latest").then(
+    (a) => a.versionCode,
+    () => 0, // no APK on this server
+  );
+});
+const newest = computed(() => Math.max(apk.value, ...devices.value.map((d) => build(d.hw?.app))));
+const outdated = (d: DeviceStatus) => !!d.hw?.app && build(d.hw.app) < newest.value;
 const at = (iso: string | null) => (iso ? `${iso.slice(5, 10)} ${iso.slice(11, 16)}` : "—");
 function span(s: number) {
   const m = Math.round(s / 60);
@@ -186,6 +202,19 @@ const eta = (d: DeviceStatus) => {
               .join(" · ") || "—"
           }}</span>
           <span>存储卡</span><span :class="{ bad: d.hw.store }">{{ card(d.hw) }}</span>
+          <template v-if="d.hw.rssi != null"
+            ><span>信号</span><span>{{ d.hw.rssi }} dBm</span></template
+          >
+          <template v-if="d.hw.app">
+            <span>手机</span
+            ><span :class="{ bad: outdated(d) }"
+              >{{ phoneLine(d.hw)
+              }}{{ outdated(d) ? `（不是最新，最新 build ${newest}）` : "" }}</span
+            >
+            <span>手机状态</span
+            ><span :class="{ bad: hot(d.hw) }">{{ phoneState(d.hw) || "—" }}</span> <span>上传</span
+            ><span :class="{ bad: d.hw.upload_fails }">{{ queueLine(d.hw) }}</span>
+          </template>
           <span>上报于</span><span>{{ at(d.hw.at) }}</span>
         </template>
         <template v-if="ups[d.device]">

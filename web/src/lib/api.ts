@@ -144,7 +144,64 @@ export interface RecorderStatus {
   total_kb?: number;
   backlog_kb?: number; // left on the card for the phone to read in the background (#130)
   backlog_eta_s?: number; // at the phone's own reading rate
+  rssi?: number | null; // the link's signal, dBm (#155 A4)
+  // its phone (#155, App 1.4.6 on): the build (1.4.6+21), system, model identifier; its battery, power saving and heat
+  // (the system slows or ends apps then), the app's memory; this recorder's pieces waiting to go up and how uploads go
+  app?: string;
+  os?: string;
+  phone?: string;
+  phone_battery?: number | null;
+  phone_charging?: boolean | null;
+  low_power?: boolean;
+  thermal?: string | null; // Android none..shutdown, iOS nominal..critical
+  app_mb?: number;
+  queue_n?: number;
+  queue_kb?: number;
+  queue_age_s?: number | null; // its oldest piece's start, s before `at`
+  upload_fails?: number; // in a row
+  upload_ok_s?: number | null; // the last upload the server took, s before `at` (null: none since the app started)
 }
+
+// the system's heat levels that slow or end apps, both platforms' words
+const THERMAL: Record<string, string> = {
+  light: "微热",
+  fair: "微热",
+  moderate: "发热",
+  serious: "发热",
+  severe: "过热",
+  critical: "过热",
+  emergency: "过热",
+  shutdown: "过热",
+};
+export const build = (app?: string) => Number(app?.split("+")[1] ?? 0);
+const clock = (h: RecorderStatus, s: number) =>
+  new Date(Date.parse(h.at) - s * 1000).toTimeString().slice(0, 8);
+// its phone as it said with the status: the build, system and model; battery, power saving, heat and the app's memory
+export const phoneLine = (h: RecorderStatus) =>
+  [`App ${h.app}`, h.os, h.phone].filter(Boolean).join(" · ");
+export const phoneState = (h: RecorderStatus) =>
+  [
+    h.phone_battery != null &&
+      `手机电量 ${h.phone_battery}%${h.phone_charging ? "（充电中）" : ""}`,
+    h.low_power && "省电模式",
+    h.thermal && THERMAL[h.thermal],
+    h.app_mb != null && `App 内存 ${h.app_mb} MB`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+export const hot = (h: RecorderStatus) => !!h.low_power || !!(h.thermal && THERMAL[h.thermal]);
+// the recorder's pieces still on the phone and how uploads go, at the status's time; a piece waiting over 2 min is a
+// backlog, as the app's notification says it (RecorderService.BACKLOG_MS)
+export const queueLine = (h: RecorderStatus) =>
+  [
+    h.queue_n && (h.queue_age_s ?? 0) > 120
+      ? `待传 ${h.queue_n} 块（${((h.queue_kb ?? 0) / 1024).toFixed(1)} MB），最早一块 ${clock(h, h.queue_age_s ?? 0)} 录的`
+      : "无积压",
+    h.upload_fails && `连续失败 ${h.upload_fails} 次`,
+    h.upload_ok_s != null && `上次成功 ${clock(h, h.upload_ok_s)}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
 // GET /api/device-log: a device's events and the status reports its phones sent, in a time range
 export interface DeviceEvent {
@@ -313,7 +370,10 @@ export interface LabelSuggestions {
   merge: { from: string; to: string; score?: number; name?: string }[];
   like: { who: string; name: string; score: number }[]; // voice near a named speaker
   elsewhere: { who: string; name: string; convs: number }[]; // its voice was called so in other conversations
-  clips: Record<string, { clip?: string | null; clip_start?: string | null; clip_end?: string | null }>;
+  clips: Record<
+    string,
+    { clip?: string | null; clip_start?: string | null; clip_end?: string | null }
+  >;
 }
 
 // a profile line with the evidence it came from (a conversation, a todo in it, a row that mentions the person)

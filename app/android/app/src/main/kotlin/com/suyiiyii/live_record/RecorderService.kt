@@ -243,7 +243,9 @@ class Uploader(private val prefs: android.content.SharedPreferences, private val
     @Volatile var running = true
     @Volatile var sent = 0
     @Volatile var note: String? = null
-    private var fails = 0
+    @Volatile private var fails = 0      // in a row, and since when (wall ms)
+    private var failedAt = 0L
+    @Volatile private var okAt = 0L      // the last upload the server took (wall ms; 0: none since the start)
 
     companion object {
         const val MAX_BATCH = 30        // pieces in one request
@@ -292,26 +294,48 @@ class Uploader(private val prefs: android.content.SharedPreferences, private val
                 when {
                     code == 200 -> {
                         b.forEach(::keep); sent += b.size; note = null
-                        if (fails > 0) DeviceLog.app(deviceOf(b[0]).ifEmpty { device }, "upload_ok", "上传恢复（之前连续失败 $fails 次）")
+                        okAt = System.currentTimeMillis()
+                        if (fails > 0) {
+                            val s = (okAt - failedAt) / 1000
+                            DeviceLog.app(deviceOf(b[0]).ifEmpty { device }, "upload_ok", "上传恢复（之前连续失败 $fails 次，${if (s < 120) "$s 秒" else "${s / 60} 分钟"}）",
+                                fields = mapOf("fails" to fails, "ms" to okAt - failedAt))
+                        }
                         fails = 0
                     }
-                    code == 400 -> { b.forEach { it.delete() }; note = "服务端无法解码一块，已丢弃" }
+                    code == 400 -> {  // the server keeps the bytes (recordings/rejected/); this phone says it lost them
+                        val bytes = b.sumOf { it.length() }
+                        DeviceLog.app(deviceOf(b[0]).ifEmpty { device }, "upload_rejected", "服务端无法解码 ${b.size} 块" +
+                            "（起于 ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(startMs(b[0])))}，${bytes / 1024} KB），已丢弃",
+                            "error", mapOf("start" to startMs(b[0]), "pieces" to b.size, "bytes" to bytes))
+                        b.forEach { it.delete() }; note = "服务端无法解码一块，已丢弃"
+                    }
                     else -> throw Exception("HTTP $code")
                 }
             } catch (e: Exception) {
                 Log.w("live-record", "upload failed (${fails + 1}): ${e.message}")
-                fails++
-                if (fails == 1) DeviceLog.app(deviceOf(b[0]).ifEmpty { device }, "upload_fail", "上传失败：${e.message}", "error")
+                if (++fails == 1) {
+                    failedAt = System.currentTimeMillis()
+                    DeviceLog.app(deviceOf(b[0]).ifEmpty { device }, "upload_fail", "上传失败：${e.message}", "error")
+                }
                 note = "上传失败 ${e.message}"
                 sleep(5000L * minOf(fails, 6))
             }
         }
     }
 
-    /** What the phone last read from its BLE recorder, for the server's progress page; best effort, off this thread. */
+    /** What the phone last read from its BLE recorder, for the server's progress page, with the phone's own state and
+     *  this recorder's upload queue (#155); best effort, off this thread. */
     fun report(device: String, hw: Map<String, Any?>) = Thread {
-        try { post("$server/api/device-status?device=${enc(device)}", org.json.JSONObject(hw).toString().toByteArray(), "application/json") } catch (_: Exception) {}
+        try { post("$server/api/device-status?device=${enc(device)}", org.json.JSONObject(hw + DeviceLog.phone() + queued(device)).toString().toByteArray(), "application/json") } catch (_: Exception) {}
     }.start()
+
+    /** `device`'s pieces waiting (how many, KB, the oldest's age in s) and how uploads go: failures in a row, s since the
+     *  last one the server took (null: none since the app started). */
+    fun queued(device: String, now: Long = System.currentTimeMillis()): Map<String, Any?> {
+        val q = queue(dir).filter { deviceOf(it) == device }
+        return mapOf("queue_n" to q.size, "queue_kb" to q.sumOf { it.length() } / 1024, "queue_age_s" to q.firstOrNull()?.let { (now - startMs(it)) / 1000 },
+                     "upload_fails" to fails, "upload_ok_s" to okAt.takeIf { it > 0 }?.let { (now - it) / 1000 })
+    }
 
     fun end(atMs: Long, bleName: String? = null) {
         try { post("$server/api/chunks/end?device=${enc(bleName ?: device)}&t=$atMs", ByteArray(0), null) } catch (e: Exception) { note = "结束信号失败 ${e.message}" }

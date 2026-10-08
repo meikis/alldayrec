@@ -5,9 +5,14 @@ import LineChart from "../components/LineChart.vue";
 import {
   CHARGE,
   get,
+  hot,
+  phoneLine,
+  phoneState,
+  queueLine,
   type AudioMinute,
   type DeviceEvent,
   type DeviceLog,
+  type RecorderStatus,
   type Upgrade,
 } from "../lib/api";
 import {
@@ -156,6 +161,24 @@ const sound = computed(() => {
     lag: lags.length ? [lags[lags.length >> 1], lags[lags.length - 1]] : null,
   };
 });
+// its phone and the link, from the status its phone sends every minute (#155 App 1.4.6 on): the newest one says what
+// the phone runs and how its uploads go, the chart one measure over time
+const PHONE: [string, string, (s: RecorderStatus) => number | null | undefined][] = [
+  ["信号", "dBm", (s) => s.rssi],
+  ["待传", "块", (s) => s.queue_n],
+  ["手机电量", "%", (s) => s.phone_battery],
+  ["App 内存", "MB", (s) => s.app_mb],
+];
+const phoneMeasure = ref(0);
+const phone = computed(() => (log.value?.status ?? []).filter((s) => s.app).pop());
+const phonePoints = computed(() =>
+  points(
+    (log.value?.status ?? []).map((s) => ({
+      t: Date.parse(s.at),
+      v: PHONE[phoneMeasure.value][2](s) ?? null,
+    })),
+  ),
+);
 const secs = (s: number) => (s < 120 ? `${Math.round(s)} 秒` : `${Math.round(s / 60)} 分钟`);
 const when = (at: string) => (hours.value >= 24 ? `${at.slice(5, 10)} ` : "") + at.slice(11, 19);
 </script>
@@ -254,6 +277,37 @@ const when = (at: string) => (hours.value >= 24 ? `${at.slice(5, 10)} ` : "") + 
               : "这段时间没有写卡统计（SD_WRITES，录音设备每 10 分钟记一次）"
           }}
         </div>
+      </section>
+      <section class="card">
+        <div class="head">
+          <b>手机和连接</b>
+          <span class="ranges">
+            <button
+              v-for="([l], i) in PHONE"
+              :key="i"
+              :class="['tag', { on: phoneMeasure === i }]"
+              @click="phoneMeasure = i"
+            >
+              {{ l }}
+            </button>
+          </span>
+        </div>
+        <div v-if="phone" class="muted">
+          {{ phoneLine(phone) }}（{{ when(phone.at) }}）<br /><span :class="{ bad: hot(phone) }">{{
+            phoneState(phone)
+          }}</span>
+          · <span :class="{ bad: phone.upload_fails }">{{ queueLine(phone) }}</span>
+        </div>
+        <LineChart
+          v-if="phonePoints.length"
+          :points="phonePoints"
+          :lo="lo"
+          :hi="hi"
+          :unit="PHONE[phoneMeasure][1]"
+          :gap="10 * 60000"
+          :marks="marks"
+        />
+        <div v-else class="muted">这段时间手机没有上报（App 1.4.6 起才有）</div>
       </section>
       <section class="card">
         <div class="head">
