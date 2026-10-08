@@ -54,6 +54,19 @@
  *                   interrupt), 2: low battery, recording ended, System OFF next until USB (or LR-P3's switch) wakes it
  *    30 LIVE_LOST   a records, b bytes left out of LIVE in a row (its queue full: the link stalled), by the next one
  *                   that goes; on the card all the same, the phone READs them (#133)
+ *    31 HEALTH      the mic and the chip over the last 10 minutes, with HEARTBEAT: x die temperature (°C, signed),
+ *                   a ms of all-zero 10 ms frames from the mic (bits 0-19) | PDM errors << 20, b samples at full scale
+ *                   (bits 0-23) | the loudest sample after the high-pass >> 7 << 24 (255: full scale); zeros and full
+ *                   scale are counted before the high-pass; every field saturates (#155 F1)
+ *    32 CARD_ID     the card's CID at each mount (no serial number): x manufacturer ID, a product name characters 1-4
+ *                   (the first in bits 0-7), b its 5th | OEM ID << 8 (two characters, the first in bits 8-15) |
+ *                   product revision << 24 (BCD n.m) (#155 F2)
+ *    33 CARD_SIZE   with CARD_ID: x CSD structure (0: SDSC, 1: SDHC/SDXC), a 512 B sectors, b manufacture date from the
+ *                   CID (years since 2000 << 4 | month)
+ *    34 SD_ERRORS   the SD driver's failed tries in the last 10 minutes, with SD_WRITES, only when there were any: x
+ *                   transfers tried again, a CRC errors (bits 0-15) | timeouts << 16 (no answer, or busy past its
+ *                   deadline), b of those timeouts the busy ones (bits 0-15) | other errors << 16 (an error token or
+ *                   R1); every field saturates (#155 F3)
  *
  * Each record has a sequence number, one more than the last, across boots: a reader asks for those from the last
  * it has. Records gather in RAM (__noinit: a crash or watchdog reset keeps them for the next boot) and go to flash
@@ -66,7 +79,7 @@ enum {
     LR_BOOT = 1, LR_FAULT, LR_MOUNT, LR_STORE, LR_SLOW, LR_APPEND_ERR, LR_CARD_FULL, LR_USB_DISK, LR_CONNECT,
     LR_DISCONNECT, LR_PARAM, LR_MTU, LR_PHY, LR_TIME, LR_SECURITY, LR_PAIRED, LR_PAIR_FAIL, LR_FORGET, LR_DROPPED,
     LR_SEGMENT, LR_DFU, LR_HEARTBEAT, LR_STACKS, LR_SD_RESET, LR_SD_WRITES, LR_READ, LR_READ_TIME, LR_SWITCH,
-    LR_POWER, LR_LIVE_LOST,
+    LR_POWER, LR_LIVE_LOST, LR_HEALTH, LR_CARD_ID, LR_CARD_SIZE, LR_SD_ERRORS,
     LR_UPTIME = 0x80,
 };
 

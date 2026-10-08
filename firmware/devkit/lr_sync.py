@@ -10,6 +10,7 @@ when undated) from the card; the open file stays. `log` prints the recorder's ev
 import asyncio
 import ctypes
 import errno
+import math
 import random
 import urllib.request
 import datetime as dt
@@ -287,6 +288,35 @@ def sd_writes(x, a, b):
             f"under 20 ms {n[0]}, 20-49 ms {n[1]}, 50-200 ms {n[2]}, over 200 ms {n[3]}")
 
 
+def i8(v):
+    return v - 256 if v > 127 else v
+
+
+def peak(p):
+    return f"{20 * math.log10(p / 256):.0f} dBFS" if p else "under -48 dBFS"
+
+
+def health(x, a, b):
+    return (f"{i8(x)} °C, mic all zero {a & 0xFFFFF} ms, {a >> 20} PDM errors, {b & 0xFFFFFF} samples at full scale, "
+            f"loudest {peak(b >> 24)}")
+
+
+def card_id(x, a, b):
+    name = (struct.pack("<I", a) + bytes([b & 0xFF])).decode("ascii", "replace")
+    oem = bytes([b >> 8 & 0xFF, b >> 16 & 0xFF]).decode("ascii", "replace")
+    return f"manufacturer 0x{x:02x}, OEM {oem!r}, product {name!r} rev {b >> 28}.{b >> 24 & 0xF}"
+
+
+def card_size(x, a, b):
+    return (f"{'SDHC/SDXC' if x else 'SDSC'}, {a * 512 / 1e9:.2f} GB ({a} sectors), "
+            f"made {2000 + (b >> 4)}-{b & 0xF:02d}")
+
+
+def sd_errors(x, a, b):
+    return (f"{a & 0xFFFF} CRC errors, {a >> 16} timeouts ({b & 0xFFFF} busy), {b >> 16} other errors, "
+            f"{x} transfers tried again")
+
+
 def read_done(x, a, b):
     ms = b & 0x3FFFFF
     return (f"{a / 1024:.1f} KB in {ms / 1000:.1f} s ({a / 1024 / max(ms, 1) * 1000:.1f} KB/s), "
@@ -328,6 +358,10 @@ EVENTS = {
                                    1: "power-fail warning: VDDH under 3.3 V or VDD under 2.8 V",
                                    2: f"low battery ({x * 20} mV): recording ended, System OFF until USB or the switch"}.get(a, str(a))),
     30: ("LIVE_LOST", lambda x, a, b: f"{a} records ({b} B) left out of LIVE (link stalled), on the card all the same"),
+    31: ("HEALTH", health),
+    32: ("CARD_ID", card_id),
+    33: ("CARD_SIZE", card_size),
+    34: ("SD_ERRORS", sd_errors),
 }
 
 
@@ -424,6 +458,14 @@ def selftest():
     assert EVENTS[26][1](12, 409600, 10000 | 491 << 22) == \
         "400.0 KB in 10.0 s (40.0 KB/s), 491 B a packet, interval 15 ms"
     assert EVENTS[27][1](0, 3000, 6500) == "card 3000 ms, notify 6500 ms"
+    assert EVENTS[31][1](0xF6, 230 | 3 << 20, 17 | 128 << 24) == \
+        "-10 °C, mic all zero 230 ms, 3 PDM errors, 17 samples at full scale, loudest -6 dBFS"
+    assert EVENTS[31][1](31, 0, 0).endswith("loudest under -48 dBFS")
+    assert EVENTS[32][1](0x03, int.from_bytes(b"SC32", "little"), ord("G") | ord("S") << 8 | ord("D") << 16 | 0x80 << 24) == \
+        "manufacturer 0x03, OEM 'SD', product 'SC32G' rev 8.0"
+    assert EVENTS[33][1](1, 62333952, 23 << 4 | 7) == "SDHC/SDXC, 31.91 GB (62333952 sectors), made 2023-07"
+    assert EVENTS[34][1](4, 2 | 5 << 16, 3 | 1 << 16) == \
+        "2 CRC errors, 5 timeouts (3 busy), 1 other errors, 4 transfers tried again"
     print("selftest ok")
 
 

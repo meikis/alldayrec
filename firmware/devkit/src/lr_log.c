@@ -97,7 +97,7 @@ void lr_log(uint8_t code, uint8_t x, uint32_t a, uint32_t b)
     }
     uint16_t n = ram.n;
     k_spin_unlock(&lock, k);
-    if (n >= N / 2 || BIT(code) & URGENT) {
+    if (n >= N / 2 || (code < 32 && BIT(code) & URGENT)) {  // a 32-bit mask: codes past 31 are not urgent
         k_work_submit(&flush_work);  // flash waits for radio slots: not on the caller's thread
     }
 }

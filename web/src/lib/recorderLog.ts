@@ -101,6 +101,27 @@ function sdWrites(r: Rec) {
     `<20 ms ${n[0]}，20–49 ms ${n[1]}，50–200 ms ${n[2]}，>200 ms ${n[3]}`
   );
 }
+const peak = (p: number) => (p ? `${Math.round(20 * Math.log10(p / 256))} dBFS` : "低于 -48 dBFS");
+const ascii = (...c: number[]) => String.fromCharCode(...c.map((v) => v & 0xff));
+function health(r: Rec) {
+  const zero = r.a & 0xfffff,
+    pdm = r.a >>> 20,
+    full = r.b & 0xffffff;
+  return (
+    `芯片 ${(r.x << 24) >> 24} °C，麦克风全 0 ${zero} ms，PDM 错误 ${pdm} 次，满幅样本 ${full} 个，` +
+    `最响 ${peak(r.b >>> 24)}`
+  );
+}
+function cardId(r: Rec) {
+  const name = ascii(r.a, r.a >>> 8, r.a >>> 16, r.a >>> 24, r.b);
+  return `厂商 0x${hex(r.x, 2)}，OEM ${ascii(r.b >>> 8, r.b >>> 16)}，型号 ${name}，版本 ${r.b >>> 28}.${(r.b >>> 24) & 0xf}`;
+}
+const cardSize = (r: Rec) =>
+  `${r.x ? "SDHC/SDXC" : "SDSC"}，${((r.a * 512) / 1e9).toFixed(2)} GB（${r.a} 扇区），` +
+  `${2000 + (r.b >>> 4)} 年 ${r.b & 0xf} 月生产`;
+const sdErrors = (r: Rec) =>
+  `CRC 错 ${r.a & 0xffff} 次，超时 ${r.a >>> 16} 次（其中忙 ${r.b & 0xffff} 次），其他错 ${r.b >>> 16} 次，` +
+  `重试 ${r.x} 次`;
 function readDone(r: Rec) {
   const ms = r.b & 0x3fffff;
   return (
@@ -188,9 +209,13 @@ const EVENTS: Record<number, [string, string, (r: Rec) => string]> = {
       ][r.a] ?? `${r.a}`,
   ],
   30: ["LIVE_LOST", "实时漏发", (r) => `${r.a} 条记录（${r.b} B）没能实时发出（蓝牙卡住），卡上照存，手机从卡里补`],
+  31: ["HEALTH", "麦克风和芯片（10 分钟）", health],
+  32: ["CARD_ID", "存储卡型号", cardId],
+  33: ["CARD_SIZE", "存储卡容量", cardSize],
+  34: ["SD_ERRORS", "存储卡驱动出错（10 分钟）", sdErrors],
 };
 // every few minutes or every connection: hidden unless asked for
-const ROUTINE = new Set([9, 11, 12, 13, 14, 15, 20, 22, 23, 25]);
+const ROUTINE = new Set([9, 11, 12, 13, 14, 15, 20, 22, 23, 25, 32, 33]);
 
 export interface Said {
   name: string;
@@ -217,13 +242,15 @@ export function describe(r: Rec): Said {
     (code === 24 && r.b !== 1) ||
     (code === 29 && r.a !== 0) || // the power-fail warning, a low battery's System OFF
     (code === BOOT && (r.a & 0b1010) !== 0); // the last boot ended by the watchdog or a lockup
-  const warn = [BOOT, DISCONNECT, DFU, 5, 8, 18, 30].includes(code);
+  const warn =
+    [BOOT, DISCONNECT, DFU, 5, 8, 18, 30, 34].includes(code) ||
+    (code === 31 && (r.a & 0xfffff) + (r.a >>> 20) > 0); // the mic gave all-zero frames, or PDM errors
   return {
     name,
     label,
     text: fmt(r) + (r.code & UPTIME ? `（开机后 ${(r.t / 1000).toFixed(1)} s）` : ""),
     level: bad ? "bad" : warn ? "warn" : "",
-    routine: ROUTINE.has(code) || (code === 29 && !r.a),
+    routine: ROUTINE.has(code) || (code === 29 && !r.a) || (code === 31 && !warn),
   };
 }
 

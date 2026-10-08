@@ -21,6 +21,20 @@ check(
   "400.0 KB，用时 10.0 s（40.0 KB/s），每包 491 B，连接间隔 15 ms",
 );
 check(said(27, 0, 3000, 6500), "读卡 3000 ms，蓝牙发送 6500 ms");
+check(
+  said(31, 0xf6, 230 | (3 << 20), (17 | (128 << 24)) >>> 0),
+  "芯片 -10 °C，麦克风全 0 230 ms，PDM 错误 3 次，满幅样本 17 个，最响 -6 dBFS",
+);
+check(said(31, 31, 0, 0), "芯片 31 °C，麦克风全 0 0 ms，PDM 错误 0 次，满幅样本 0 个，最响 低于 -48 dBFS");
+check(
+  said(32, 3, 0x32334353, (0x47 | (0x53 << 8) | (0x44 << 16) | (0x80 << 24)) >>> 0),
+  "厂商 0x03，OEM SD，型号 SC32G，版本 8.0",
+);
+check(said(33, 1, 62333952, (23 << 4) | 7), "SDHC/SDXC，31.91 GB（62333952 扇区），2023 年 7 月生产");
+check(said(34, 4, 2 | (5 << 16), 3 | (1 << 16)), "CRC 错 2 次，超时 5 次（其中忙 3 次），其他错 1 次，重试 4 次");
+const level = (code: number, a: number) => describe({ boot: 1, t: 100, code, x: 30, a, b: 0 });
+check(String([level(31, 0).routine, level(31, 0).level]), "true,"); // a quiet 10 minutes: hidden
+check(String([level(31, 230).routine, level(31, 230).level]), "false,warn"); // all-zero frames: shown
 const up = {
   at: "",
   app: true,
