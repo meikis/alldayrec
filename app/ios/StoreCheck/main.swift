@@ -215,6 +215,26 @@ do {
   check(DeviceLog.why(own, server: ""), "x（\"\" NSURLErrorDomain -1000）", "no address")
 }
 
+// #155: the queue kept while sends fail loses its oldest files first, never the newest (DeviceLogTest.trim's case); a
+// MetricKit crash as the crashed thread's first frames, binary+offset
+do {
+  let d = tmp()
+  let q = (1...4).map { i -> URL in let u = d.appendingPathComponent("devlog-\(i).send"); try! Data(count: 400).write(to: u); return u }
+  check(DeviceLog.trim(q, cap: 1600), 0, "under the cap: nothing goes")
+  check(DeviceLog.trim(q, cap: 1000), 800, "the two oldest go")
+  check(q.map { FileManager.default.fileExists(atPath: $0.path) }, [false, false, true, true], "oldest first")
+  check(DeviceLog.trim(Array(q.dropFirst(2)), cap: 0), 400, "the newest stays, whatever the cap")
+  let tree = """
+    {"callStackPerThread": true, "callStacks": [
+      {"threadAttributed": false, "callStackRootFrames": [{"binaryName": "libsystem_kernel.dylib", "offsetIntoBinaryTextSegment": 1}]},
+      {"threadAttributed": true, "callStackRootFrames": [{"binaryName": "libswiftCore.dylib", "offsetIntoBinaryTextSegment": 4660, "subFrames": [
+        {"binaryName": "Runner", "offsetIntoBinaryTextSegment": 74565, "subFrames": [{"binaryName": "Runner", "offsetIntoBinaryTextSegment": 9}]}]}]}]}
+    """
+  check(DeviceLog.frames(Data(tree.utf8)), ["libswiftCore.dylib+4660", "Runner+74565", "Runner+9"], "the crashed thread's frames")
+  check(DeviceLog.frames(Data(tree.utf8), max: 2), ["libswiftCore.dylib+4660", "Runner+74565"], "at most n")
+  check(DeviceLog.frames(Data("{}".utf8)), [], "no tree")
+}
+
 // listening on the phone (Listen.swift), lr_listen.py's selftest with a stand-in codec (a frame's "Opus" is its index:
 // the decoder gives back those 160 samples exactly). 3 s: hum (50 Hz at -12 dBFS + 150 Hz at -24 dBFS), from 1.2 s
 // 50 ms of nothing from the mic, from 2.3 s 20 ms clipped. Frames 1000.. in 'A' records of 10, a 'T' (frame 1030 was

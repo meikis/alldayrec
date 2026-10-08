@@ -27,10 +27,6 @@ import java.nio.ByteBuffer
 class MainActivity : FlutterActivity() {
     private var nearby: Nearby? = null  // the add-recorder page's scan, while it is open
 
-    /** Runtime permissions the BLE recorder needs: scanning and connecting (location before Android 12). */
-    private fun blePermissions() = if (Build.VERSION.SDK_INT >= 31) listOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
-                                   else listOf(Manifest.permission.ACCESS_FINE_LOCATION)
-
     private fun granted(p: String) = checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
 
     private val update get() = File(cacheDir, "update.apk")  // the app's own update, downloaded by update.dart
@@ -38,13 +34,14 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(engine: FlutterEngine) {
         super.configureFlutterEngine(engine)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)  // the page is meant to be watched
+        DeviceLog.start(this, "打开界面")
         MethodChannel(engine.dartExecutor.binaryMessenger, "live_record/recorder").setMethodCallHandler { call, result ->
             when (call.method) {
                 "start" -> {
                     if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
                         requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
                     if (call.argument<String>("source") == "ble") {
-                        val need = blePermissions().filterNot(::granted)
+                        val need = Ble.permissions.filterNot(::granted)
                         if (need.isNotEmpty()) {
                             requestPermissions(need.toTypedArray(), 2)
                             return@setMethodCallHandler result.error("permission", "允许蓝牙权限后再点开始", null)
@@ -61,6 +58,7 @@ class MainActivity : FlutterActivity() {
                 "stop" -> { startService(Intent(this, RecorderService::class.java).setAction("stop")); result.success(null) }
                 "foreground" -> {
                     val on = call.argument<Boolean>("on")!!
+                    if (on != RecorderService.foregroundApp) DeviceLog.app(DeviceLog.mine(), if (on) "foreground" else "background", if (on) "App 回到前台" else "App 进了后台")
                     RecorderService.foregroundApp = on
                     RecorderService.slicer?.foreground = on
                     result.success(null)
@@ -77,6 +75,10 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
                 "status" -> result.success(RecorderService.status(File(filesDir, "chunks")))
+                "error" -> {  // an error the Flutter side did not catch (#155 A7): its type and first frames, no message
+                    DeviceLog.app(DeviceLog.mine(), "app_error", "界面出错：${call.argument<String>("type")} ${call.argument<String>("stack")}", "error")
+                    result.success(null)
+                }
                 "deviceName" -> result.success(Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME) ?: Build.MODEL)  // the name in the system settings
                 "recorder" -> {  // the bound BLE recorder, what it last said, and how a firmware update goes
                     val p = getSharedPreferences("recorder", MODE_PRIVATE)
@@ -85,13 +87,13 @@ class MainActivity : FlutterActivity() {
                         "kicked" to p.getBoolean("bleKicked", false)))
                 }
                 "permissions" -> result.success(mapOf(  // what adding a recorder asks for, and what is granted
-                    "bluetooth" to blePermissions().all(::granted),
+                    "bluetooth" to Ble.permissions.all(::granted),
                     "notifications" to (Build.VERSION.SDK_INT < 33 || granted(Manifest.permission.POST_NOTIFICATIONS)),
                     "battery" to getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName),
                     "bluetoothOn" to getSystemService(BluetoothManager::class.java).adapter.isEnabled))
                 "askPermission" -> {
                     when (call.argument<String>("which")) {
-                        "bluetooth" -> requestPermissions(blePermissions().toTypedArray(), 2)
+                        "bluetooth" -> requestPermissions(Ble.permissions.toTypedArray(), 2)
                         "notifications" -> if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
                         // the link lives in the background all day: without this, the system stops it
                         "battery" -> startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
@@ -100,7 +102,7 @@ class MainActivity : FlutterActivity() {
                 }
                 "scan" -> {  // the add-recorder page opens (true) or closes
                     nearby?.stop(); nearby = null
-                    if (call.argument<Boolean>("on")!! && blePermissions().all(::granted)) nearby = Nearby(this).also { it.start() }
+                    if (call.argument<Boolean>("on")!! && Ble.permissions.all(::granted)) nearby = Nearby(this).also { it.start() }
                     result.success(null)
                 }
                 "nearby" -> result.success(nearby?.list() ?: emptyList<Map<String, Any>>())

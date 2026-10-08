@@ -1,7 +1,9 @@
 package com.suyiiyii.live_record
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -43,5 +45,26 @@ class DeviceLogTest {
         assertEquals(5007L, DeviceLog.cursor(recs, 5007))                   // all there
         assertEquals(5002L, DeviceLog.cursor(recs.filter { it.seq != 5002L }, 5007))  // a notify lost: read again from it
         assertEquals(5007L, DeviceLog.cursor(emptyList(), 5007))            // nothing new
+    }
+
+    /** A queue past the cap loses its oldest files first, never the newest; under it nothing goes (#155 A9). */
+    @Test fun trim() {
+        val dir = kotlin.io.path.createTempDirectory().toFile()
+        val q = (1..4).map { File(dir, "devlog-$it.send").apply { writeBytes(ByteArray(400)) } }
+        assertEquals(0L, DeviceLog.trim(q, 1600))
+        assertEquals(800L, DeviceLog.trim(q, 1000))
+        assertEquals(listOf(false, false, true, true), q.map { it.exists() })
+        assertEquals(400L, DeviceLog.trim(q.drop(2), 0))  // the newest stays, whatever the cap
+        assertTrue(q[3].exists())
+        dir.deleteRecursively()
+    }
+
+    /** A crash as classes and frames, its cause after it; the message (it may carry data) left out (#155 A7). */
+    @Test fun trace() {
+        val e = IllegalStateException("secret", java.io.IOException("also secret"))
+        val t = DeviceLog.trace(e)
+        assertTrue(t, t.startsWith("java.lang.IllegalStateException DeviceLogTest.trace:"))
+        assertTrue(t, " ← java.io.IOException DeviceLogTest.trace:" in t)
+        assertTrue(t, "secret" !in t)
     }
 }

@@ -100,7 +100,7 @@ class RecorderService : Service() {
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
             .createNotificationChannel(NotificationChannel(CHANNEL, "录音中", NotificationManager.IMPORTANCE_LOW))
         registerReceiver(screen, IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON) })
-        DeviceLog.start(this)
+        DeviceLog.start(this, "录音服务启动")
         Thread {
             while (alive) {
                 try { refresh() } catch (e: Exception) { Log.w("live-record", "notification: $e") }
@@ -130,6 +130,7 @@ class RecorderService : Service() {
         } else if (slicer == null && prefs.getBoolean("active", false) && prefs.getInt("pid", 0) != Process.myPid()) {
             interruptedAt = System.currentTimeMillis()
             Log.w("live-record", "restarted after being killed")
+            DeviceLog.app(DeviceLog.mine(), "restart", "被系统结束后自动恢复录音", "warn")
         }
         if (intent?.extras != null) {
             prefs.edit().apply {

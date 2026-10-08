@@ -1,7 +1,10 @@
 package com.suyiiyii.live_record
 
+import android.Manifest
+import android.app.ActivityManager
 import android.content.Context
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Debug
@@ -41,7 +44,10 @@ object DeviceLog {
     @Volatile var version = "?"                // this build, 1.4.6+21: in every app event and status (#155 A1)
         private set
 
-    fun start(ctx: Context) {
+    /** Once per process, by whichever starts first (`by`: the service, or the UI): the queue and its sender, and what
+     *  the app says of itself (#155 A2, A7, A8): this start, why the process before it ended, a crash handler, what it
+     *  is allowed to do. */
+    fun start(ctx: Context, by: String) {
         synchronized(lock) {
             if (::file.isInitialized) return
             this.ctx = ctx.applicationContext
@@ -52,9 +58,16 @@ object DeviceLog {
             src = prefs.getString("logSrc", null) ?: "app:${java.util.UUID.randomUUID()}".also { prefs.edit().putString("logSrc", it).apply() }
             lastSeq = prefs.getLong("logSeq", 0)
         }
+        crashes()
+        app(mine(), "launch", "App 启动（$by）")
+        exits()
+        permissions()
         Thread { while (true) { try { send() } catch (e: Exception) { Log.w("live-record", "devlog send: $e") }; Thread.sleep(30_000) } }
             .apply { isDaemon = true; name = "devlog" }.start()
     }
+
+    /** Whose page the app's own events go on: the bound recorder's, else the phone's (its microphone's audio name). */
+    fun mine() = prefs.getString("bleName", null)?.let(Ble::tag) ?: prefs.getString("device", null)?.takeIf { it.isNotEmpty() } ?: "phone"
 
     //
     // The recorder's log
@@ -129,11 +142,11 @@ object DeviceLog {
 
     /** One of the app's events, filed under the device it is about (a recorder's name, or the phone's for its upload);
      *  `fields` go into its data beside kind and text, for the server to read. */
-    fun app(device: String, kind: String, text: String, level: String? = null, fields: Map<String, Any?> = emptyMap()) {
+    fun app(device: String, kind: String, text: String, level: String? = null, fields: Map<String, Any?> = emptyMap(), at: Long? = null) {
         if (!::file.isInitialized) return
         val now = System.currentTimeMillis()
         val seq = synchronized(lock) { maxOf(now, lastSeq + 1).also { lastSeq = it; prefs.edit().putLong("logSeq", it).apply() } }
-        add(listOf(event(device, src, seq, now, JSONObject(fields).put("kind", kind).put("text", text).put("app", version)
+        add(listOf(event(device, src, seq, at ?: now, JSONObject(fields).put("kind", kind).put("text", text).put("app", version)
             .apply { if (level != null) put("level", level) })))
     }
 
@@ -149,6 +162,60 @@ object DeviceLog {
             "low_power" to pm.isPowerSaveMode,
             "thermal" to listOf("none", "light", "moderate", "severe", "critical", "emergency", "shutdown").getOrNull(pm.currentThermalStatus),
             "app_mb" to Debug.getPss() / 1024)  // proportional set size, as iOS's phys_footprint counts against the app
+            .also { permissions() }  // with each status: a change while the app runs
+    }
+
+    /** Why the app's processes before this one ended (Android 11+; not the WebView's sandboxed ones), each once, at the
+     *  time it ended (#155 A2): low memory, a crash, an ANR, stopped by the person or for using too much, an update. */
+    private fun exits() {
+        if (Build.VERSION.SDK_INT < 30) return
+        val seen = prefs.getLong("exitSeen", 0)
+        val got = ctx.getSystemService(ActivityManager::class.java).getHistoricalProcessExitReasons(null, 0, 16)
+            .filter { it.timestamp > seen && it.processName == ctx.packageName }.sortedBy { it.timestamp }
+        for (x in got) {
+            val (why, level) = EXITS[x.reason] ?: ("其他原因 ${x.reason}" to "warn")
+            app(mine(), "exit", "App 进程结束：$why" + (x.description?.takeIf { it.isNotBlank() }?.let { "（${it.take(120)}）" } ?: ""), level,
+                mapOf("reason" to x.reason, "importance" to x.importance, "pss_kb" to x.pss, "rss_kb" to x.rss), at = x.timestamp)
+        }
+        got.lastOrNull()?.let { prefs.edit().putLong("exitSeen", it.timestamp).apply() }
+    }
+
+    private val EXITS = mapOf(  // ApplicationExitInfo.REASON_*: what it says, how bad
+        1 to ("自己退出" to null), 2 to ("被信号结束" to "warn"), 3 to ("内存不足，被系统结束" to "error"), 4 to ("崩溃" to "error"),
+        5 to ("原生代码崩溃" to "error"), 6 to ("无响应（ANR）" to "error"), 7 to ("启动失败" to "error"), 8 to ("权限变了" to "warn"),
+        9 to ("耗电或占资源过多，被系统结束" to "error"), 10 to ("被强行停止" to "warn"), 11 to ("被停用" to "warn"),
+        12 to ("依赖的进程结束了" to "warn"), 13 to ("系统的其他原因" to "warn"), 14 to ("被冻结后结束" to "warn"),
+        15 to ("应用状态变了" to null), 16 to ("应用更新" to null))
+
+    /** An exception nothing caught goes into the queue before the process dies (#155 A7; the file is written at once),
+     *  then the system's own handler runs. */
+    private fun crashes() {
+        val next = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try { app(mine(), "crash", "未捕获的异常（线程 ${t.name}）：${trace(e)}", "error") } catch (_: Throwable) {}
+            next?.uncaughtException(t, e)
+        }
+    }
+
+    /** An exception as its classes and first frames (class.method:line), with its causes; no message: it may carry data. */
+    fun trace(e: Throwable): String = generateSequence(e) { it.cause }.take(3).joinToString(" ← ") { x ->
+        x.javaClass.name + " " + x.stackTrace.take(4).joinToString(" < ") { "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" }
+    }
+
+    /** What the app may do, logged when it changes and the first time (#155 A8): without Bluetooth nothing connects;
+     *  without notifications the foreground service is hidden; without the battery exemption, or with the background
+     *  restricted, the system stops the link. */
+    private fun permissions() {
+        val ok = { p: String -> ctx.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED }
+        val ble = Ble.permissions.all(ok)
+        val notify = Build.VERSION.SDK_INT < 33 || ok(Manifest.permission.POST_NOTIFICATIONS)
+        val battery = ctx.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(ctx.packageName)
+        val bg = !ctx.getSystemService(ActivityManager::class.java).isBackgroundRestricted
+        val line = listOf(if (ble) "蓝牙权限 有" else "蓝牙权限 无", if (notify) "通知权限 有" else "通知权限 无",
+                          if (battery) "电池优化 已豁免" else "电池优化 未豁免", if (bg) "后台 不受限" else "后台 受限").joinToString(" · ")
+        if (line == prefs.getString("perms", null)) return
+        prefs.edit().putString("perms", line).apply()
+        app(mine(), "permissions", "权限：$line", if (ble && notify && battery && bg) null else "warn")
     }
 
     /** A step of connecting (BleLink.step), kept for the connect event. */
@@ -185,7 +252,9 @@ object DeviceLog {
     private fun send() {
         val server = prefs.getString("server", null)?.takeIf { it.isNotEmpty() } ?: return
         synchronized(lock) { if (file.exists()) file.renameTo(File(file.parentFile, "devlog-${System.currentTimeMillis()}.send")) }
-        for (f in file.parentFile!!.listFiles { x -> x.name.endsWith(".send") }!!.sortedBy { it.name }) {
+        val queued = { file.parentFile!!.listFiles { x -> x.name.endsWith(".send") }!!.sortedBy { it.name } }
+        trim(queued(), CAP).takeIf { it > 0 }?.let { app(mine(), "log_dropped", "离线太久，待发的日志超过 ${CAP shr 20} MB，丢掉最早的 ${it / 1024} KB", "warn") }
+        for (f in queued()) {
             val byDevice = f.readLines().filter(String::isNotBlank).map(::JSONObject).groupBy { it.remove("device") as String }
             var kept = false
             for ((device, events) in byDevice) {
@@ -197,6 +266,19 @@ object DeviceLog {
             if (kept) return
             f.delete()
         }
+    }
+
+    const val CAP = 10L shl 20  // the queue kept while sends fail (#155 A9): a recorder's log offline for weeks
+
+    /** The oldest files of the queue past `cap` bytes deleted, the newest always kept; how many bytes went. */
+    fun trim(files: List<File>, cap: Long): Long {
+        var total = files.sumOf { it.length() }
+        var gone = 0L
+        for (f in files.dropLast(1)) {
+            if (total <= cap) break
+            total -= f.length(); gone += f.length(); f.delete()
+        }
+        return gone
     }
 
     private fun post(url: String, body: ByteArray): Int = try {

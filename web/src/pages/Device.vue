@@ -75,7 +75,7 @@ function said(e: DeviceEvent): Said {
         .map(([k, v]) => `${k} ${JSON.stringify(v)}`)
         .join("，"),
     level: level === "error" ? "bad" : level === "warn" ? "warn" : "",
-    routine: false,
+    routine: kind === "foreground" || kind === "background", // the app in front or not, tens a day
   };
 }
 const rows = computed(() => {
@@ -391,6 +391,10 @@ h2 {
 .src,
 .detail {
   color: var(--muted);
+}
+.ev > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere; /* a crash's class and frames are one long word */
 }
 .ev.warn b {
   color: var(--warm);

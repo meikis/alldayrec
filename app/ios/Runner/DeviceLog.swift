@@ -8,6 +8,9 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+#if canImport(UIKit)
+import UIKit
+#endif
 
 enum DeviceLog {
   /// A record of the recorder's log: boot:u16 t:u32 code:u8 x:u8 a:u32 b:u32 (lr_log.h), and its seq.
@@ -93,13 +96,20 @@ enum DeviceLog {
 
   static func from(_ tag: String) -> Int64 { Int64(prefs.integer(forKey: "logNext:\(tag)")) }
 
+  /// Whose page the app's own events go on: the bound recorder's (its name as Ble.tag cleans it), else the phone's (its
+  /// microphone's audio name).
+  static func mine() -> String {
+    if let n = prefs.string(forKey: "bleName") { return n.replacingOccurrences(of: "[^A-Za-z0-9._-]", with: "_", options: .regularExpression) }
+    return prefs.string(forKey: "device").flatMap { $0.isEmpty ? nil : $0 } ?? "phone"
+  }
+
   //
   // The app's events
   //
 
   /// One of the app's events, filed under the device it is about (a recorder's name, or the phone's for its upload);
   /// `fields` go into its data beside kind and text, for the server to read.
-  static func app(_ device: String, _ kind: String, _ text: String, level: String? = nil, fields: [String: Any] = [:]) {
+  static func app(_ device: String, _ kind: String, _ text: String, level: String? = nil, fields: [String: Any] = [:], at: Int64? = nil) {
     lock.lock()
     guard file != nil else { lock.unlock(); return }
     let now = Int64(Date().timeIntervalSince1970 * 1000)
@@ -109,7 +119,21 @@ enum DeviceLog {
     lock.unlock()
     var data = fields.merging(["kind": kind, "text": text, "app": version]) { $1 }
     if let level { data["level"] = level }
-    add([event(device, src, seq, now, data)])
+    add([event(device, src, seq, at ?? now, data)])
+  }
+
+  /// The crashed thread's first frames in a MetricKit call stack tree (MXCallStackTree.jsonRepresentation()), as
+  /// binary+offset: a build's dSYM turns them into lines; no data (#155 A7).
+  static func frames(_ json: Data, max n: Int = 5) -> [String] {
+    guard let tree = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
+          let stacks = tree["callStacks"] as? [[String: Any]] else { return [] }
+    var frame = (stacks.first { $0["threadAttributed"] as? Bool == true } ?? stacks.first)?["callStackRootFrames"] as? [[String: Any]]
+    var out: [String] = []
+    while let f = frame?.first, out.count < n {
+      out.append("\(f["binaryName"] as? String ?? "?")+\(f["offsetIntoBinaryTextSegment"] as? Int ?? 0)")
+      frame = f["subFrames"] as? [[String: Any]]
+    }
+    return out
   }
 
   /// Why a request to `server` failed, for an upload_fail event: the system's words, the host (the address as typed
@@ -166,8 +190,10 @@ enum DeviceLog {
     lock.lock()
     try? fm.moveItem(at: f, to: dir.appendingPathComponent("devlog-\(Int64(Date().timeIntervalSince1970 * 1000)).send"))
     lock.unlock()
-    for name in ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).filter({ $0.hasSuffix(".send") }).sorted() {
-      let s = dir.appendingPathComponent(name)
+    let queued = { ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasSuffix(".send") }.sorted().map { dir.appendingPathComponent($0) } }
+    let gone = trim(queued(), cap: cap)
+    if gone > 0 { app(mine(), "log_dropped", "离线太久，待发的日志超过 \(cap >> 20) MB，丢掉最早的 \(gone / 1024) KB", level: "warn") }
+    for s in queued() {
       let events = ((try? String(contentsOf: s, encoding: .utf8)) ?? "").split(separator: "\n")
         .compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
       var kept = false
@@ -184,8 +210,28 @@ enum DeviceLog {
     }
   }
 
+  static let cap = 10 << 20  // the queue kept while sends fail (#155 A9): a recorder's log offline for weeks
+
+  /// The oldest files of the queue past `cap` bytes deleted, the newest always kept; how many bytes went.
+  static func trim(_ files: [URL], cap: Int) -> Int {
+    let size = { (f: URL) in (try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 }
+    var total = files.reduce(0) { $0 + size($1) }, gone = 0
+    for f in files.dropLast() where total > cap {
+      total -= size(f); gone += size(f)
+      try? FileManager.default.removeItem(at: f)
+    }
+    return gone
+  }
+
   private static func post(_ url: String, _ body: Data) -> Int {
     guard let u = URL(string: url) else { return -1 }
+    #if canImport(UIKit)
+    // the request finishes even if iOS would suspend the app meanwhile, as an upload's (#155 A9)
+    var task = UIBackgroundTaskIdentifier.invalid
+    let release = { DispatchQueue.main.async { if task != .invalid { UIApplication.shared.endBackgroundTask(task); task = .invalid } } }
+    task = UIApplication.shared.beginBackgroundTask(withName: "devlog", expirationHandler: release)
+    defer { release() }
+    #endif
     var r = URLRequest(url: u, timeoutInterval: 30)
     r.httpMethod = "POST"
     r.setValue("Bearer \(prefs.string(forKey: "token") ?? "")", forHTTPHeaderField: "Authorization")

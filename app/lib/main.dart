@@ -22,6 +22,15 @@ const recordingRed = Color(0xffc62828);
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // errors nothing caught go into the device log too (#155 A7); Flutter reports them as before
+  FlutterError.onError = (d) {
+    FlutterError.presentError(d);
+    Recorder.error(d.exception, d.stack);
+  };
+  WidgetsBinding.instance.platformDispatcher.onError = (e, s) {
+    Recorder.error(e, s);
+    return false;  // not handled here: the engine reports it as before
+  };
   runApp(MaterialApp(
     home: const Home(),
     debugShowCheckedModeBanner: false,
@@ -108,6 +117,14 @@ class Recorder {
   static Future<void> usbDisk(bool on) => _ch.invokeMethod('usbDisk', {'on': on});
   static Future<void> listen(bool on) => _ch.invokeMethod('listen', {'on': on});  // the recorder's sound played on this phone
   static bool hold = false;  // the link is taken down on purpose (unbind, firmware update): do not bring it back meanwhile
+  static final _errors = <String>{};
+
+  /// An error nothing caught, into the device log (native DeviceLog, kind app_error): each kind and place once a run.
+  static void error(Object e, StackTrace? s) {
+    final (type, frames) = errorSummary(e, s);
+    if (!_errors.add('$type ${frames.firstOrNull}')) return;
+    _ch.invokeMethod('error', {'type': type, 'stack': frames.join(' < ')}).catchError((_) => null);
+  }
 
   /// Takes the BLE link down, runs `f`, and lets it come back (the home page's ticker restarts it).
   static Future<void> withoutLink(Future<void> Function() f) async {
@@ -123,6 +140,13 @@ class Recorder {
     }
   }
 }
+
+/// An error as its type and first frames (function, file:line); no message: it may carry data (#155 A7).
+(String, List<String>) errorSummary(Object e, StackTrace? s, {int n = 5}) => (
+      '${e.runtimeType}',
+      (s?.toString() ?? '').split('\n').map((l) => l.replaceFirst(RegExp(r'^#\d+\s+'), '').trim())
+          .where((l) => l.isNotEmpty && l != '<asynchronous suspension>').take(n).toList(),
+    );
 
 /// The server stops waiting for the older audio on a recorder's card (its hold, #130) once this phone no longer has
 /// the recorder: unbound, or another bound in its place. The backlog will not come from here; without this the server

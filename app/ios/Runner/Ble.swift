@@ -161,6 +161,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   @Shared private var pairingFailed = false
   @Shared private var lastSeen: String?   // HH:mm the link last went down
   @Shared private var staleNote: String?  // iOS still has keys the recorder forgot: what the person has to do
+  @Shared private var bluetoothOff = false  // as last logged (#155 A2)
 
   init(chunks: URL, undated: URL, mirrors: URL, sliceS: @escaping () -> Int, report: @escaping (String, [String: Any]) -> Void) {
     self.chunks = chunks; self.undated = undated; self.mirrors = mirrors; self.sliceS = sliceS; self.report = report
@@ -209,10 +210,15 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     Ble.log("central state \(c.state.rawValue)")
     switch c.state {
     case .poweredOn:
+      if bluetoothOff { bluetoothOff = false; DeviceLog.app(DeviceLog.mine(), "bluetooth", "手机蓝牙开了", fields: ["on": true]) }
       if let p = peripheral, p.state == .connected { begin(p) }  // restored, connected
       else if let p = peripheral { connect(p, auto: true) }  // restored while waiting for it: the request again
       else { find() }
-    case .poweredOff, .resetting:  // the link goes without a callback
+    case .poweredOff, .resetting:  // the link goes without a callback: said here
+      if !bluetoothOff {
+        bluetoothOff = true
+        DeviceLog.app(DeviceLog.mine(), "bluetooth", "手机蓝牙关了" + (conn != nil ? "，连接随之断开" : ""), level: "warn", fields: ["on": false])
+      }
       conn = nil
       abort()
       peripheral = nil

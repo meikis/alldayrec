@@ -50,6 +50,10 @@ object Ble {
     val CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     const val TIME_EVERY_MS = 10 * 60_000L  // the phone's clock into the stream again: the board's drifts
 
+    /** Runtime permissions the BLE recorder needs: scanning and connecting (location before Android 12). */
+    val permissions = if (Build.VERSION.SDK_INT >= 31) listOf(android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_CONNECT)
+                      else listOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+
     /** What the Ogg muxer needs for 16 kHz mono Opus: OpusHead, codec delay, seek pre-roll. The muxer writes csd-0
      *  into the file as is, so `preSkip` (48 kHz samples, RFC 7845 §5.1) is what the decoder drops at the start. */
     fun opusFormat(preSkip: Int = 0): MediaFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 16000, 1).apply {
@@ -153,12 +157,17 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             when (i.getIntExtra(BluetoothAdapter.EXTRA_STATE, 0)) {
                 BluetoothAdapter.STATE_TURNING_OFF -> {
                     Log.i("live-record", "ble adapter off")
+                    // the link goes without a disconnect callback (gatt is gone first): said here (#155 A2)
+                    DeviceLog.app(DeviceLog.mine(), "bluetooth", "手机蓝牙关了" + if (gatt != null) "，连接随之断开" else "", "warn", mapOf("on" to false))
                     main.removeCallbacksAndMessages(null)
                     gatt?.let { abort(it) }
                     gatt?.close(); gatt = null
                     state = "蓝牙已关闭"
                 }
-                BluetoothAdapter.STATE_ON -> if (on && gatt == null) { Log.i("live-record", "ble adapter on"); main.removeCallbacksAndMessages(null); scan() }
+                BluetoothAdapter.STATE_ON -> {
+                    DeviceLog.app(DeviceLog.mine(), "bluetooth", "手机蓝牙开了", fields = mapOf("on" to true))
+                    if (on && gatt == null) { Log.i("live-record", "ble adapter on"); main.removeCallbacksAndMessages(null); scan() }
+                }
             }
         }
     }

@@ -6,6 +6,7 @@
 import AVFoundation
 import CoreBluetooth
 import Flutter
+import MetricKit
 import UIKit
 
 enum Recorder {
@@ -30,7 +31,9 @@ enum Recorder {
       case "start": result(start(a).map { FlutterError(code: "start", message: $0, details: nil) })
       case "stop": stop(); result(nil)
       case "foreground":
-        foregroundApp = a["on"] as? Bool ?? true
+        let on = a["on"] as? Bool ?? true
+        if on != foregroundApp { DeviceLog.app(DeviceLog.mine(), on ? "foreground" : "background", on ? "App 回到前台" : "App 进了后台") }
+        foregroundApp = on
         slicer?.foreground = foregroundApp
         if foregroundApp { slicer?.resume() }  // a recording the system stopped and did not give back (from the background iOS may refuse)
         result(nil)
@@ -39,6 +42,9 @@ enum Recorder {
         for k in ["foreground", "background"] { defaults.set(a[k] as? Int ?? 20, forKey: k) }
         result(nil)
       case "status": result(status())
+      case "error":  // an error the Flutter side did not catch (#155 A7): its type and first frames, no message
+        DeviceLog.app(DeviceLog.mine(), "app_error", "界面出错：\(a["type"] as? String ?? "?") \(a["stack"] as? String ?? "")", level: "error")
+        result(nil)
       case "deviceName": result(UIDevice.current.name)  // "iPhone" since iOS 16 without the user-assigned-device-name entitlement
       case "upload": if Uploader.pending(dir) > 0 { upload() }; result(nil)
       case "recorder":  // the bound BLE recorder, what it last said, and how a firmware update goes
@@ -211,7 +217,7 @@ enum Recorder {
   /// At launch (AppDelegate, before any UI: iOS may be relaunching the app in the background for the BLE recorder): a
   /// piece being written when the process died still decodes up to its last page; send what is left over. The BLE link
   /// comes back by itself: the recorder records anyway, and the link is always on (Android's sticky service).
-  static func launch() {
+  static func launch(_ options: [UIApplication.LaunchOptionsKey: Any]? = nil) {
     // app/ios/e2e/run.sh: settings in the launch environment (only devicectl or a debugger sets one); null removes a key
     if let j = ProcessInfo.processInfo.environment["LR_E2E"], let d = try? JSONSerialization.jsonObject(with: Data(j.utf8)) as? [String: Any] {
       for (k, v) in d {
@@ -226,6 +232,12 @@ enum Recorder {
     }
     DeviceLog.start(dir: dir.deletingLastPathComponent(), prefs: defaults)
     foregroundApp = UIApplication.shared.applicationState != .background
+    // what the app says of itself (#155 A2, A7, A8): this launch (in the background: iOS brought it back for the
+    // recorder, state restoration), how its processes ended and crashed (MetricKit, a day later), what it may do
+    DeviceLog.app(DeviceLog.mine(), "launch", foregroundApp ? "App 启动"
+                  : "App 启动（在后台被系统拉起\(options?[.bluetoothCentrals] != nil ? "：恢复蓝牙连接" : "")）")
+    MXMetricManager.shared.add(Metrics.shared)
+    permissions(UIApplication.shared.backgroundRefreshStatus)
     let fm = FileManager.default
     var last: Int64 = 0
     for f in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
@@ -246,6 +258,7 @@ enum Recorder {
     upload()
     if killed {
       uploader?.note = "上次录音被系统终止，未传的 \(Uploader.pending(dir)) 块正在补传，需要手动重新开始"
+      DeviceLog.app(DeviceLog.mine(), "killed", "上次用手机麦克风录音时被系统终止，没有自动恢复", level: "warn")
       if last > 0 { defaults.set(last, forKey: "endAt") }  // close the conversation the kill left open
     }
     endAfterQueue()  // unless a new recording takes over first
@@ -277,6 +290,7 @@ enum Recorder {
     let machine = withUnsafeBytes(of: &u.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
     let (level, battery) = DispatchQueue.main.sync {
       UIDevice.current.isBatteryMonitoringEnabled = true
+      permissions(UIApplication.shared.backgroundRefreshStatus)  // with each status: a change while the app runs
       return (UIDevice.current.batteryLevel, UIDevice.current.batteryState)
     }
     let p = ProcessInfo.processInfo, v = p.operatingSystemVersion
@@ -284,6 +298,17 @@ enum Recorder {
             "phone_battery": level >= 0 ? Int((level * 100).rounded()) : NSNull(),
             "phone_charging": battery == .unknown ? NSNull() : battery != .unplugged, "low_power": p.isLowPowerModeEnabled,
             "thermal": ["nominal", "fair", "serious", "critical"][min(p.thermalState.rawValue, 3)], "app_mb": footprintMB()]
+  }
+
+  /// What the app may do, logged when it changes and the first time (#155 A8): Bluetooth, without which nothing connects;
+  /// background app refresh (also off in Low Power Mode). On the main thread.
+  static func permissions(_ refresh: UIBackgroundRefreshStatus) {
+    let ble = CBManager.authorization
+    let line = [ble == .allowedAlways ? "蓝牙权限 有" : ble == .notDetermined ? "蓝牙权限 还没问" : "蓝牙权限 无",
+                refresh == .available ? "后台刷新 开" : "后台刷新 关"].joined(separator: " · ")
+    guard line != defaults.string(forKey: "perms") else { return }
+    defaults.set(line, forKey: "perms")
+    DeviceLog.app(DeviceLog.mine(), "permissions", "权限：\(line)", level: ble == .allowedAlways ? nil : "warn")
   }
 
   /// This process's memory as iOS counts it against the app's limit (phys_footprint), in MB.
@@ -592,4 +617,52 @@ final class Uploader: Thread {
   }
 
   private func enc(_ s: String) -> String { s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s }
+}
+
+/// What iOS reports of the app afterwards (MetricKit, #155 A2, A7): every day how its processes ended in front and in
+/// the background (the memory limit, memory pressure, the watchdog, a crash...), and on the next launch each crash (its
+/// kind, the reason iOS gave, the first frames as binary+offset), hang, CPU or disk-write overrun. No data.
+final class Metrics: NSObject, MXMetricManagerSubscriber {
+  static let shared = Metrics()
+
+  func didReceive(_ payloads: [MXMetricPayload]) {
+    for p in payloads {
+      guard let x = p.applicationExitMetrics else { continue }
+      let f = x.foregroundExitData, b = x.backgroundExitData
+      let fg = ["正常": f.cumulativeNormalAppExitCount, "内存超限": f.cumulativeMemoryResourceLimitExitCount, "看门狗": f.cumulativeAppWatchdogExitCount,
+                "非法访问": f.cumulativeBadAccessExitCount, "非法指令": f.cumulativeIllegalInstructionExitCount, "异常": f.cumulativeAbnormalExitCount]
+      let bg = ["正常": b.cumulativeNormalAppExitCount, "内存超限": b.cumulativeMemoryResourceLimitExitCount, "内存紧张": b.cumulativeMemoryPressureExitCount,
+                "CPU 超限": b.cumulativeCPUResourceLimitExitCount, "看门狗": b.cumulativeAppWatchdogExitCount, "非法访问": b.cumulativeBadAccessExitCount,
+                "非法指令": b.cumulativeIllegalInstructionExitCount, "异常": b.cumulativeAbnormalExitCount,
+                "挂起时占着文件": b.cumulativeSuspendedWithLockedFileExitCount, "后台任务超时": b.cumulativeBackgroundTaskAssertionTimeoutExitCount]
+      let said = { (c: [String: Int]) in c.filter { $0.value > 0 }.sorted { $0.key < $1.key }.map { "\($0.key) \($0.value)" }.joined(separator: "、") }
+      guard !(fg.values.allSatisfy { $0 == 0 } && bg.values.allSatisfy { $0 == 0 }) else { continue }
+      let bad = (fg.merging(bg) { $0 + $1 }).contains { $0.key != "正常" && $0.value > 0 }
+      DeviceLog.app(DeviceLog.mine(), "exits", "App 进程结束（过去一天）：前台 \(said(fg).isEmpty ? "无" : said(fg))；后台 \(said(bg).isEmpty ? "无" : said(bg))",
+                    level: bad ? "warn" : nil, fields: ["fg": fg.filter { $0.value > 0 }, "bg": bg.filter { $0.value > 0 }, "build": p.metaData?.applicationBuildVersion ?? NSNull()],
+                    at: Metrics.ms(p.timeStampEnd))
+    }
+  }
+
+  func didReceive(_ payloads: [MXDiagnosticPayload]) {
+    for p in payloads {
+      let at = Metrics.ms(p.timeStampEnd)
+      for c in p.crashDiagnostics ?? [] {
+        let frames = DeviceLog.frames(c.callStackTree.jsonRepresentation())
+        DeviceLog.app(DeviceLog.mine(), "crash", "崩溃：exception \(c.exceptionType?.intValue ?? -1) code \(c.exceptionCode?.intValue ?? -1) signal \(c.signal?.intValue ?? -1)" +
+                      (c.terminationReason.map { "，\($0.prefix(120))" } ?? "") + "；\(frames.joined(separator: " < "))", level: "error",
+                      fields: ["build": c.metaData.applicationBuildVersion, "frames": frames], at: at)
+      }
+      let hangs = p.hangDiagnostics ?? [], cpu = p.cpuExceptionDiagnostics ?? [], disk = p.diskWriteExceptionDiagnostics ?? []
+      guard !hangs.isEmpty || !cpu.isEmpty || !disk.isEmpty else { continue }
+      let longest = hangs.map { $0.hangDuration.converted(to: .seconds).value }.max() ?? 0
+      let wrote = disk.map { $0.totalWritesCaused.converted(to: .megabytes).value }.reduce(0, +)
+      DeviceLog.app(DeviceLog.mine(), "diagnostics", [hangs.isEmpty ? nil : "卡顿 \(hangs.count) 次（最长 \(String(format: "%.1f", longest)) 秒）",
+                                                      cpu.isEmpty ? nil : "CPU 超限 \(cpu.count) 次",
+                                                      disk.isEmpty ? nil : "写盘超限 \(disk.count) 次（\(Int(wrote)) MB）"].compactMap { $0 }.joined(separator: "，"),
+                    level: "warn", fields: ["hangs": hangs.count, "cpu": cpu.count, "disk": disk.count], at: at)
+    }
+  }
+
+  static func ms(_ d: Date) -> Int64 { Int64(d.timeIntervalSince1970 * 1000) }
 }
