@@ -13,6 +13,7 @@ import base64
 import concurrent.futures as cf
 import copy
 import datetime as dt
+import hashlib
 import hmac
 import json
 import logging
@@ -555,6 +556,67 @@ async def balance_loop():
         except Exception as e:
             log.warning("stepfun balance: %r", e)
         await asyncio.sleep(3600)
+
+
+VM_INGEST_URL = os.environ.get("VM_INGEST_URL", "")  # .../api/v1/import/prometheus: metrics_loop pushes there; empty: nothing
+INSTANCE = os.environ.get("LR_INSTANCE") or ("friend" if "friend" in str(DATA) else "main")  # every series' instance label
+STARTED = dt.datetime.now().isoformat()  # lr_calls_total counts from here: a restart resets it, as a counter may
+CHARGE = {"battery": 0, "charging": 1, "full": 2}  # a recorder's hw charge (firmware lr_power.h)
+
+
+def prom_line(name: str, labels: dict, v) -> str:
+    esc = lambda s: str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return name + "{" + ",".join(f'{k}="{esc(x)}"' for k, x in labels.items()) + "} " + repr(float(v))
+
+
+def metrics() -> str:
+    """This instance's numbers in Prometheus text (#155): status(), db.calls and db.balance. Devices by their LR-… name,
+    a phone (named by its owner) by a hash of it; never what was said, nor a name of anyone."""
+    s, now, out = status(), dt.datetime.now(), []
+
+    def m(name, v, **labels):
+        if v is not None:
+            out.append(prom_line(name, {"instance": INSTANCE, **labels}, v))
+    m("lr_up", 1, commit=s["commit"])
+    m("lr_summaries_pending", s["summaries_pending"])
+    for d in s["devices"]:
+        dev = d["device"] if d["device"].startswith("LR-") else "phone-" + hashlib.sha256(d["device"].encode()).hexdigest()[:8]
+        hw, snd, arr = d["hw"] or {}, d["sound"] or {}, d["arrival"] or {}
+        # the pipeline, its last 10 min of audio (sound), the recorder as its phone last read it (hw)
+        for name, v in (("behind_seconds", d["behind_s"]), ("latency_seconds", d["latency_s"]), ("queued_pieces", d["queued"]),
+                        ("backlog_seconds", d["left_s"]), ("hold_active", d["hold"] is not None), ("recording", d["recording"]),
+                        ("arrival_lag_seconds", arr.get("lag_s")), ("sound_seconds", snd.get("s")),
+                        ("sound_zero_seconds", snd.get("zero_s")), ("sound_full_samples", snd.get("full")),
+                        ("device_battery_percent", hw.get("battery")), ("device_charge", CHARGE.get(hw.get("charge"))),
+                        ("device_last_seen_seconds", hw.get("at") and (now - dt.datetime.fromisoformat(hw["at"])).total_seconds())):
+            m(f"lr_{name}", v, device=dev)
+        if hw.get("fw"):
+            m("lr_device_info", 1, device=dev, firmware=hw["fw"])
+    for c in db.calls(STARTED):
+        for result, n in {"ok": c["n"] - sum(c["failed"].values()), **c["failed"]}.items():  # failed: by HTTP code or class
+            m("lr_calls_total", n, kind=c["kind"], engine=c["engine"], result=result)
+        m("lr_call_audio_seconds_total", round(c["sent_h"] * 3600) or None, kind=c["kind"], engine=c["engine"])
+    for c in db.calls((now - dt.timedelta(hours=1)).isoformat()):
+        for q in ("50", "90"):
+            m("lr_call_latency_seconds", c[f"ms{q}"] and c[f"ms{q}"] / 1000, kind=c["kind"], engine=c["engine"], quantile=f"0.{q[0]}")
+    b = s["balance"] or {}
+    m("lr_stepfun_balance_cny", b.get("cny"))
+    m("lr_stepfun_days_left", b.get("days_left"))
+    return "\n".join(out) + "\n"
+
+
+async def metrics_loop():
+    """metrics() to VictoriaMetrics every minute (basic auth VM_INGEST_USER / VM_INGEST_PASSWORD); a failed push is a
+    warning, the next minute tries again."""
+    while True:
+        if VM_INGEST_URL:
+            try:
+                auth = base64.b64encode(f"{os.environ.get('VM_INGEST_USER', '')}:{os.environ.get('VM_INGEST_PASSWORD', '')}".encode()).decode()
+                body = metrics().encode()
+                await asyncio.to_thread(_http, VM_INGEST_URL, body, {"Authorization": f"Basic {auth}", "Content-Type": "text/plain"})
+            except Exception as e:
+                log.warning("metrics push: %s", failure(e))  # the class and code, never the URL or credentials
+        await asyncio.sleep(60)
 
 
 async def recap_loop():
@@ -1908,7 +1970,7 @@ def main():
     @app.on_event("startup")
     async def start():
         for name, coro in (("pipeline", pipelines()), ("status", status_loop()), ("summary", summary_worker()),
-                           ("voices", voices_loop()), *((("recap", recap_loop()),) if RECAP_AT else ()),
+                           ("voices", voices_loop()), ("metrics", metrics_loop()), *((("recap", recap_loop()),) if RECAP_AT else ()),
                            *((("balance", balance_loop()),) if os.environ.get("STEPFUN_API_KEY") else ())):
             asyncio.create_task(coro, name=name).add_done_callback(
                 lambda t, n=name: log.error("task %s ended: %r", n, t.exception()) if not t.cancelled() else None)
