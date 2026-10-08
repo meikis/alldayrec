@@ -9,7 +9,7 @@ concurrency:  # a new push to a PR cancels its run still going
 
 jobs:
   server:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}"]', vars.LR_RUNNER)) }}  # repo variable LR_RUNNER=lr-54: the self-hosted runner on .54
     timeout-minutes: 10  # ~2.5 min, at most 6 so far
     defaults:
       run:
@@ -20,8 +20,12 @@ jobs:
       ASR_UPLOAD_BRIDGE_URL: unused
       ASR_SERVICE_URL: unused
     steps:
-      - uses: actions/checkout@v7
-      - run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends ffmpeg  # the tests encode Opus and AAC pieces
-      - uses: astral-sh/setup-uv@v10.2.0  # this action publishes no major-version tag
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, the job's only action: a runner downloads every action its job names, skipped or not
+      - if: runner.environment == 'github-hosted'  # the tests encode Opus and AAC pieces; .54 has ffmpeg from apt
+        run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends ffmpeg
+      - if: runner.environment == 'github-hosted'
+        run: pipx install uv  # into /opt/pipx_bin, on the image's PATH
+      - if: runner.environment == 'self-hosted'
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"  # .54: uv in ci-runner's home
       - run: uv sync  # not --locked: uv.lock names a private mirror, uv re-resolves the same versions on PyPI
       - run: uv run --with pytest pytest -q

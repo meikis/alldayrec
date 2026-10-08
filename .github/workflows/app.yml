@@ -9,19 +9,19 @@ concurrency:  # a new push to a PR cancels its run still going
 
 jobs:
   app:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}"]', vars.LR_RUNNER)) }}  # repo variable LR_RUNNER=lr-54: the self-hosted runner on .54
     timeout-minutes: 10  # ~1.5 min, at most 4 so far
     defaults:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@v7
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: 3.47.5  # Dart 3.13.4, as pubspec.yaml asks; a new stable's lints come in by bumping this
-          cache: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, the job's only action: a runner downloads every action its job names, skipped or not
+      - if: runner.environment == 'github-hosted'  # Flutter 3.47.5: Dart 3.13.4, as pubspec.yaml asks; a new stable's lints come in by bumping this (here and on .54)
+        run: git clone -q --depth 1 -b 3.47.5 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter" && echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - if: runner.environment == 'self-hosted'  # .54: Flutter and Swift in ci-runner's home (the image has Swift)
+        run: echo "$HOME/sdk/flutter/bin" >> "$GITHUB_PATH" && echo "$HOME/sdk/swift/usr/bin" >> "$GITHUB_PATH"
       - run: flutter analyze
-      - run: flutter test  # test/: the add-recorder list's order (mergeNearby)
+      - run: flutter test -j 4  # test/: the add-recorder list's order (mergeNearby); -j 4: .54 has 48 cores, a test runner each would not fit its memory
       # the iPhone's BLE record stream (Store.swift: mirror, 'T' dating, Ogg), event log (DeviceLog.swift), firmware update
       # checks (Dfu.swift) and listening (Listen.swift): Foundation only
-      - run: swiftc -o /tmp/storecheck ios/Runner/Store.swift ios/Runner/DeviceLog.swift ios/Runner/Dfu.swift ios/Runner/Listen.swift ios/StoreCheck/main.swift && /tmp/storecheck
+      - run: swiftc -o "$RUNNER_TEMP/storecheck" ios/Runner/Store.swift ios/Runner/DeviceLog.swift ios/Runner/Dfu.swift ios/Runner/Listen.swift ios/StoreCheck/main.swift && "$RUNNER_TEMP/storecheck"  # RUNNER_TEMP: .54 is shared, another user may own /tmp/storecheck

@@ -10,13 +10,13 @@ concurrency:  # a new push to a PR cancels its run still going
 # host checks of the firmware's logic only; the boards' builds (lr.sh build) are made and flashed where they are tested
 jobs:
   firmware-check:  # the record stream and its timing events (test/store_check.c), and lr_sync.py's decoding of them
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}"]', vars.LR_RUNNER)) }}  # repo variable LR_RUNNER=lr-54: the self-hosted runner on .54
     timeout-minutes: 5
     defaults:
       run:
         working-directory: firmware/devkit
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, the job's only action: a runner downloads every action its job names, skipped or not
       - run: |  # the Zephyr headers lr_store.c includes, empty: the check defines what it uses
           d=$(mktemp -d) && mkdir -p $d/zephyr/{bluetooth,fs,sys,logging,drivers,random}
           for h in bluetooth/conn bluetooth/gatt bluetooth/uuid fs/fs kernel logging/log sys/byteorder sys/ring_buffer drivers/sensor random/random drivers/sdhc drivers/gpio drivers/spi sys/crc; do touch $d/zephyr/$h.h; done
@@ -26,5 +26,8 @@ jobs:
           cc -o $d/power_check test/power_check.c && $d/power_check  # when a low battery turns it off (src/lr_power.h)
           cc -o $d/switch_check test/switch_check.c && $d/switch_check  # LR-P3's switch debounce (src/lr_switch.h)
           cc -o $d/health_check test/health_check.c && $d/health_check  # the mic's HEALTH counts (src/mic_health.h)
-      - uses: astral-sh/setup-uv@v10.2.0  # this action publishes no major-version tag
+      - if: runner.environment == 'github-hosted'
+        run: pipx install uv  # into /opt/pipx_bin, on the image's PATH
+      - if: runner.environment == 'self-hosted'
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"  # .54: uv in ci-runner's home
       - run: uv run --no-project --with bleak python lr_sync.py --selftest  # the record stream, event log and Ogg as lr_sync.py reads them
