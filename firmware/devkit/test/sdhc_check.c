@@ -1,6 +1,7 @@
 // Host check of src/sdhc_spi.c's waits (#105) against a fake SD card on a fake 8 MHz SPI clock (1 us a byte): an R1
 // that comes late, a multi-block read with CMD12's busy, a write's busy, and a card that stays busy. Upstream slept
-// 10 + 30 ms per read and polled a stuck card forever; this fails on either, and on a sleep inside a short busy.
+// 10 + 30 ms per read and polled a stuck card forever; this fails on either, and on a sleep inside a short busy. Also the
+// CID it keeps and the failed tries it counts for the event log (#155 F2 F3).
 //   d=$(mktemp -d) && mkdir -p $d/zephyr/{drivers,logging,sys} && for h in drivers/sdhc drivers/gpio drivers/spi \
 //   logging/log sys/byteorder sys/crc; do touch $d/zephyr/$h.h; done && cc -w -I$d -o $d/sdhc_check \
 //   test/sdhc_check.c && $d/sdhc_check
@@ -40,7 +41,7 @@ enum { SD_SPI_R1PARAMETER_ERR = BIT(6), SD_SPI_R1ADDRESS_ERR = BIT(5), SD_SPI_R1
        SD_SPI_R1CMD_CRC_ERR = BIT(3), SD_SPI_R1ILLEGAL_CMD_ERR = BIT(2), SD_SPI_R1ERASE_RESET = BIT(1) };
 enum { SD_RSP_TYPE_R1 = 1, SD_SPI_RSP_TYPE_R1 = 1 << 4, SD_SPI_RSP_TYPE_R1b = 2 << 4, SD_SPI_RSP_TYPE_R2 = 3 << 4,
        SD_SPI_RSP_TYPE_R3 = 4 << 4, SD_SPI_RSP_TYPE_R4 = 5 << 4, SD_SPI_RSP_TYPE_R5 = 6 << 4, SD_SPI_RSP_TYPE_R7 = 7 << 4 };
-enum { SD_STOP_TRANSMISSION = 12, SD_SEND_STATUS = 13, SD_READ_SINGLE_BLOCK = 17, SD_READ_MULTIPLE_BLOCK = 18,
+enum { SD_SEND_CSD = 9, SD_SEND_CID = 10, SD_STOP_TRANSMISSION = 12, SD_SEND_STATUS = 13, SD_READ_SINGLE_BLOCK = 17, SD_READ_MULTIPLE_BLOCK = 18,
        SD_WRITE_SINGLE_BLOCK = 24, SD_WRITE_MULTIPLE_BLOCK = 25 };
 #define SD_SPI_CMD_SIZE 6
 #define SD_SPI_CMD_BODY_SIZE 5
@@ -98,15 +99,16 @@ static uint64_t held;                     // when the head's hold ends (0: not s
 static int ncr = 1;                       // 0xFF bytes before every R1
 static uint32_t nac_us, stop_us, prog_us; // read latency, busy after CMD12, busy programming a block
 static uint8_t blk[512], got[512];        // what reads return, what the last write sent
+static int crc_errs;                       // writes the card answers with a CRC error token first
 static uint8_t cmd[6];
 static int cmd_n, rx_n = -1;              // rx_n >= 0: taking a written block (token, 512 B, CRC)
 
 static void put(uint8_t b, uint32_t us) { out[out_n].b = b, out[out_n++].us = us; }
-static void put_block(void)
+static void put_block(int n)  // a data block: the first n bytes of blk
 {
-    uint16_t crc = crc16_itu_t(0, blk, 512);
+    uint16_t crc = crc16_itu_t(0, blk, n);
     put(0xFF, nac_us), put(SD_SPI_TOKEN_SINGLE, 0);
-    for (int i = 0; i < 512; i++) {
+    for (int i = 0; i < n; i++) {
         put(blk[i], 0);
     }
     put(crc >> 8, 0), put(crc, 0);
@@ -134,7 +136,8 @@ static uint8_t clock_byte(uint8_t mosi)
                 got[rx_n - 1] = mosi;
             }
             if (++rx_n == 515) {  // accepted, then busy programming
-                out_n = out_i = 0, put(SD_SPI_RESPONSE_ACCEPTED, 0), put(0, prog_us);
+                out_n = out_i = 0, put(crc_errs ? SD_SPI_RESPONSE_CRC_ERR : SD_SPI_RESPONSE_ACCEPTED, 0), put(0, prog_us);
+                crc_errs -= crc_errs > 0;
                 rx_n = cmd[0] == (0x40 | SD_WRITE_MULTIPLE_BLOCK) ? 0 : -1;
             }
         }
@@ -155,10 +158,12 @@ static uint8_t clock_byte(uint8_t mosi)
             if (c == SD_STOP_TRANSMISSION) {
                 put(0, stop_us);
             } else if (c == SD_READ_SINGLE_BLOCK) {
-                put_block();
+                put_block(512);
+            } else if (c == SD_SEND_CID || c == SD_SEND_CSD) {
+                put_block(16);
             } else if (c == SD_READ_MULTIPLE_BLOCK) {
                 for (int i = 0; i < 4; i++) {
-                    put_block();
+                    put_block(512);
                 }
             } else if (c == SD_WRITE_SINGLE_BLOCK || c == SD_WRITE_MULTIPLE_BLOCK) {
                 rx_n = 0;
@@ -205,6 +210,8 @@ static int spi_write(const struct device *d, const struct spi_config *c, const s
 static int spi_release(const struct device *d, const struct spi_config *c) { return 0; }
 
 #include "../src/sdhc_spi.c"
+uint8_t lr_sd_cid[16], lr_sd_csd[16];  // sdcard.c's
+uint32_t lr_sd_err[LR_SD_ERR_N];
 
 static struct sdhc_spi_config cfg = {.spi_max_freq = 8000000};
 static struct sdhc_spi_data data;
@@ -214,7 +221,8 @@ static int request(int op, uint32_t blocks, uint8_t *buf, uint64_t *us, uint64_t
 {
     struct sdhc_command c = {.opcode = op, .response_type = SD_RSP_TYPE_R1 | SD_SPI_RSP_TYPE_R1, .retries = 3,
                              .timeout_ms = 200};
-    struct sdhc_data d = {.block_size = 512, .blocks = blocks, .data = buf, .timeout_ms = 10000};
+    struct sdhc_data d = {.block_size = op == SD_SEND_CID || op == SD_SEND_CSD ? 16 : 512, .blocks = blocks,
+                          .data = buf, .timeout_ms = 10000};
     uint64_t t = now, s = slept;
     data.spi_cfg = &data.cfg_a;
     int r = sdhc_spi_request(&dev, &c, &d);
@@ -246,12 +254,25 @@ int main(void)
     printf("write 1 block: %llu us, slept %llu ms\n", (unsigned long long) us, (unsigned long long) ms);
     assert(ms == 0 && us < 4000);  // polled through the 3 ms: a sleep there costs more than it is (codec, #105)
 
+    // the CID as init reads it in SPI mode, kept for CARD_ID (#155 F2); nothing failed so far
+    assert(request(SD_SEND_CID, 1, buf, &us, &ms) == 0 && !memcmp(lr_sd_cid, blk, 16));
+    static const uint32_t none[LR_SD_ERR_N];
+    assert(!memcmp(lr_sd_err, none, sizeof(none)));
+
+    // a write the card takes with a CRC error token first: tried again (#155 F3)
+    prog_us = 0, crc_errs = 1;
+    assert(request(SD_WRITE_SINGLE_BLOCK, 1, buf, &us, &ms) == 0);
+    assert(lr_sd_err[LR_SD_CRC] == 1 && lr_sd_err[LR_SD_RETRIED] == 1 && lr_sd_err[LR_SD_TIMEOUT] == 0);
+    memset(lr_sd_err, 0, sizeof(lr_sd_err));
+
     // a card that stays busy after a write: an error after the data timeout (10 s) per try, 3 tries as card_write()
     // makes them (CONFIG_SD_DATA_RETRIES), not a poll forever
     prog_us = 100000000;
     int r = request(SD_WRITE_SINGLE_BLOCK, 1, buf, &us, &ms);
     printf("stuck card: %d after %llu ms\n", r, (unsigned long long) us / 1000);
     assert(r == -ETIMEDOUT && us >= 30000000 && us < 31000000);
+    assert(lr_sd_err[LR_SD_TIMEOUT] == 3 && lr_sd_err[LR_SD_BUSY] == 3 && lr_sd_err[LR_SD_RETRIED] == 2);
+    assert(lr_sd_err[LR_SD_CRC] == 0 && lr_sd_err[LR_SD_OTHER] == 0);
 
     printf("sdhc_check: ok\n");
     return 0;

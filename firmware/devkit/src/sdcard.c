@@ -12,6 +12,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sd/sdmmc.h>
 #include <zephyr/storage/disk_access.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/check.h>
 
 LOG_MODULE_REGISTER(sdcard, CONFIG_LOG_DEFAULT_LEVEL);
@@ -28,6 +29,19 @@ int __wrap_sdmmc_ioctl(struct sd_card *card, uint8_t cmd, void *buf)
 {
     int err = __real_sdmmc_ioctl(card, cmd, buf);
     return cmd == DISK_IOCTL_CTRL_SYNC && err == -ENOTSUP ? 0 : err;
+}
+
+uint8_t lr_sd_cid[16], lr_sd_csd[16];
+uint32_t lr_sd_err[LR_SD_ERR_N];
+
+/* Which card a board's trouble goes with (#155 F2): CID without its serial number, CSD's kind and size */
+static void log_card(void)
+{
+    const uint8_t *c = lr_sd_cid;
+    uint32_t sectors = 0;
+    disk_access_ioctl("SD", DISK_IOCTL_GET_SECTOR_COUNT, &sectors);
+    lr_log(LR_CARD_ID, c[0], sys_get_le32(c + 3), c[7] | c[1] << 8 | c[2] << 16 | (uint32_t) c[8] << 24);
+    lr_log(LR_CARD_SIZE, lr_sd_csd[0] >> 6, sectors, (c[13] & 0xF) << 8 | c[14]);
 }
 
 static struct fs_mount_t mount_point = {
@@ -124,6 +138,9 @@ int mount_sd_card(void)
         lr_log(LR_MOUNT, i + 1, err, 0);
     }
     sd_enabled = !err;
+    if (!err) {
+        log_card();
+    }
     return err;
 }
 
@@ -133,6 +150,7 @@ int mount_sd_card_once(void)
     int err = disk_access_init("SD") ?: fs_mount(&mount_point);
     if (!err) {
         lr_log(LR_MOUNT, 0, 0, 0);
+        log_card();
     }
     sd_enabled = !err;
     return err;

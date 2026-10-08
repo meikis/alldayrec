@@ -12,6 +12,7 @@
  *    timeout.
  * 3. No 512-byte block of 0xFF in flash to clock reads with: nRF SPI and SPIM send their overrun character, 0xFF, when
  *    there is no TX buffer (upstream main does this too); SPIM could not DMA from flash without a RAM copy.
+ * 4. The card's CID and CSD and the failed tries of data transfers go to the event log (sdcard.h, #155 F2 F3).
  * Before, on LR-P3-92D2: a 4 KB read took ~48 ms (~84 KB/s), an append of ~4 KB with its sync ~95 ms. */
 #define DT_DRV_COMPAT zephyr_sdhc_spi_slot
 
@@ -23,6 +24,8 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/sys/crc.h>
+
+#include "sdcard.h"
 
 LOG_MODULE_REGISTER(sdhc_spi, CONFIG_SDHC_LOG_LEVEL);
 
@@ -518,6 +521,7 @@ static int sdhc_spi_write_data(const struct device *dev, struct sdhc_data *data)
 		/* Wait for card to stop being busy */
 		ret = sdhc_spi_wait_unbusy(dev, data->timeout_ms, 0);
 		if (ret) {
+			lr_sd_err[LR_SD_BUSY] += ret == -ETIMEDOUT;  /* LR */
 			return ret;
 		}
 	}
@@ -532,10 +536,19 @@ static int sdhc_spi_write_data(const struct device *dev, struct sdhc_data *data)
 		/* Wait for card to stop being busy */
 		ret = sdhc_spi_wait_unbusy(dev, data->timeout_ms, 0);
 		if (ret) {
+			lr_sd_err[LR_SD_BUSY] += ret == -ETIMEDOUT;  /* LR */
 			return ret;
 		}
 	}
 	return 0;
+}
+
+/* LR: a failed try of a data transfer, counted for the event log by its error */
+static void lr_sd_failed(int ret)
+{
+	if (ret) {
+		lr_sd_err[ret == -EILSEQ ? LR_SD_CRC : ret == -ETIMEDOUT ? LR_SD_TIMEOUT : LR_SD_OTHER]++;
+	}
 }
 
 static int sdhc_spi_request(const struct device *dev,
@@ -558,9 +571,10 @@ static int sdhc_spi_request(const struct device *dev,
 		} while ((ret != 0) && (retries-- > 0));
 	} else {
 		do {
-			retries--;
+			lr_sd_err[LR_SD_RETRIED] += retries-- < cmd->retries;  /* LR */
 			ret = sdhc_spi_send_cmd(dev, cmd, true);
 			if (ret) {
+				lr_sd_failed(ret);
 				continue;
 			}
 			if ((cmd->opcode == SD_WRITE_SINGLE_BLOCK) ||
@@ -569,6 +583,7 @@ static int sdhc_spi_request(const struct device *dev,
 			} else {
 				ret = sdhc_spi_read_data(dev, data);
 			}
+			lr_sd_failed(ret);
 			if (ret || (cmd->opcode == SD_READ_MULTIPLE_BLOCK)) {
 				int stop_retries = cmd->retries;
 
@@ -592,6 +607,10 @@ static int sdhc_spi_request(const struct device *dev,
 		/* Release SPI bus */
 		spi_release(config->spi_dev, dev_data->spi_cfg);
 		return ret;
+	}
+	/* LR: the card's registers as init reads them in SPI mode, a 16-byte data block each */
+	if (data && (cmd->opcode == SD_SEND_CID || cmd->opcode == SD_SEND_CSD)) {
+		memcpy(cmd->opcode == SD_SEND_CID ? lr_sd_cid : lr_sd_csd, data->data, sizeof(lr_sd_cid));
 	}
 	/* Release SPI bus */
 	return spi_release(config->spi_dev, dev_data->spi_cfg);

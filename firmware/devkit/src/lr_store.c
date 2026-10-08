@@ -117,6 +117,18 @@ static struct {
     uint32_t ms, max, n[4];  // under 20 ms, 20-49, 50-200, over 200
 } wr;
 
+/* The SD driver's failed tries since the last time (SD mutex held), if any: with SD_WRITES, and at an append that
+ * failed, after which no SD_WRITES may come */
+static void log_sd_errors(void)
+{
+    uint32_t *e = lr_sd_err;
+    if (e[LR_SD_CRC] | e[LR_SD_TIMEOUT] | e[LR_SD_OTHER] | e[LR_SD_RETRIED]) {
+        lr_log(LR_SD_ERRORS, MIN(e[LR_SD_RETRIED], 0xFF), MIN(e[LR_SD_CRC], 0xFFFF) | MIN(e[LR_SD_TIMEOUT], 0xFFFF) << 16,
+               MIN(e[LR_SD_BUSY], 0xFFFF) | MIN(e[LR_SD_OTHER], 0xFFFF) << 16);
+        memset(lr_sd_err, 0, sizeof(lr_sd_err));
+    }
+}
+
 static void count_write(uint32_t ms)
 {
     wr.ms += ms;
@@ -126,6 +138,7 @@ static void count_write(uint32_t ms)
     if (now - wr.start >= 10 * 60 * 1000) {
         lr_log(LR_SD_WRITES, MIN(wr.n[3], 0xFF), MIN(wr.ms, 0xFFFFF) | MIN(wr.max, 0xFFF) << 20,
                MIN(wr.n[0], 0x3FF) | MIN(wr.n[1], 0x3FF) << 10 | MIN(wr.n[2], 0x3FF) << 20);
+        log_sd_errors();
         memset(&wr, 0, sizeof(wr));
         wr.start = now;
     }
@@ -186,6 +199,7 @@ static int append(uint32_t len)
     ring_buf_get(&card_rb, NULL, len - taken);  // what did not make it leaves the queue too
     if (err && !append_failed) {
         lr_log(LR_APPEND_ERR, 0, err, len);
+        log_sd_errors();
     }
     append_failed = err;
     return err;

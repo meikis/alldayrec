@@ -239,6 +239,7 @@ static int fs_statvfs(const char *p, struct fs_statvfs *v) { v->f_bfree = v->f_b
 
 struct k_mutex write_sdcard_mutex;
 uint32_t transport_frame_no;
+uint32_t lr_sd_err[5];  // sdcard.h: the SD driver's failed tries
 #include "../src/lr_store.c"
 
 static void sem_given(int *s)
@@ -439,6 +440,19 @@ int main(void)
     assert(n_logged == 2 && logged[1].code == LR_SD_WRITES && logged[1].x == 2);
     assert(logged[1].a == (1602 | 1001 << 20) && logged[1].b == (4 | 2 << 10 | 2 << 20));
     assert(wr.start == now_ms && wr.ms == 0);
+    // the driver's failed tries (#155 F3), when there were any: with the next SD_WRITES, then cleared
+    lr_sd_err[LR_SD_CRC] = 2, lr_sd_err[LR_SD_TIMEOUT] = 70000, lr_sd_err[LR_SD_BUSY] = 3, lr_sd_err[LR_SD_RETRIED] = 300;
+    now_ms += 10 * 60 * 1000;
+    assert(append1() == 0);
+    assert(n_logged == 4 && logged[2].code == LR_SD_WRITES && logged[3].code == LR_SD_ERRORS && logged[3].x == 255);
+    assert(logged[3].a == (2 | 0xFFFF << 16) && logged[3].b == 3 && !lr_sd_err[LR_SD_CRC] && !lr_sd_err[LR_SD_RETRIED]);
+    // and at an append that fails: no SD_WRITES may come after it
+    lr_sd_err[LR_SD_OTHER] = 1;
+    card_fail = -EIO;
+    assert(append1() == -EIO);
+    card_fail = 0;
+    assert(n_logged == 6 && logged[4].code == LR_APPEND_ERR && logged[5].code == LR_SD_ERRORS && logged[5].b == 1 << 16);
+    assert(append1() == 0);  // the run of failures is over
     write_ms = 0;
 
     // a READ of a finished file from offset 100: READ (interval, bytes, ms | payload << 22) and READ_TIME (card, notify)
