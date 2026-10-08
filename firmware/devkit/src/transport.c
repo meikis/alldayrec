@@ -27,6 +27,7 @@
 #include "sdcard.h"
 #include "speaker.h"
 #include "lr_log.h"
+#include "lr_power.h"
 #include "lr_store.h"
 // #include "friend.h"
 LOG_MODULE_REGISTER(transport, CONFIG_LOG_DEFAULT_LEVEL);
@@ -236,11 +237,15 @@ static const struct bt_data bt_ad[] = {
 static char lr_name[CONFIG_BT_DEVICE_NAME_MAX + 1];
 
 // The recorder's state for a phone that is only scanning (the app's device list): company 0xFFFF (for tests), then
-// bit 0 bound to a phone, bit 1 a phone connected, bit 2 recording paused
+// bit 0 bound to a phone, bit 1 a phone connected, bit 2 recording paused, bits 3-4 lr_charge() (0 on battery,
+// 1 charging, 2 full); the battery, mV / 20 (BAS's ~1 minute average; 0: not read yet); the card, the store's error
+// negated (lr_store_err: 0 recording to it, 19 none, 28 full, 16 lent to USB, others failed). A phone that cannot
+// connect still sees it alive, and how (#155 F4); one that reads only the first byte (apps before it) is not affected
 #define LR_BOUND BIT(0)
 #define LR_CONNECTED BIT(1)
 #define LR_PAUSED BIT(2)
-static uint8_t lr_status[3] = {0xFF, 0xFF, 0};
+static uint8_t lr_status[5] = {0xFF, 0xFF};
+static uint8_t lr_mv20;  // the battery work's
 
 // Scan response data. The DIS and DFU UUIDs are left out for room: no client looks for them in a scan (the DFU library
 // finds the service once connected), and the services themselves are still there
@@ -299,10 +304,21 @@ static bool capturing(void)
 /* Advertising never stops: connectable while no phone is connected; while one is (BT_MAX_CONN=1 leaves no room for
  * another), scannable only and slowly, so a phone looking for recorders still sees this one, bound and busy. The scan
  * response carries the state (lr_status). */
+/* The scan response's state, battery and card as they are now: true if any changed */
+static bool status_now(void)
+{
+    uint8_t was[3];
+    memcpy(was, lr_status + 2, 3);
+    lr_status[2] = (atomic_get(&bonds) ? LR_BOUND : 0) | (current_connection ? LR_CONNECTED : 0) |
+                   (lr_paused() ? LR_PAUSED : 0) | lr_charge() << 3;
+    lr_status[3] = lr_mv20;
+    lr_status[4] = MIN(-lr_store_err(), 255);
+    return memcmp(was, lr_status + 2, 3);
+}
+
 static void adv_restart(struct k_work *work)
 {
-    lr_status[2] = (atomic_get(&bonds) ? LR_BOUND : 0) | (current_connection ? LR_CONNECTED : 0) |
-                   (lr_paused() ? LR_PAUSED : 0);
+    status_now();
     bt_le_adv_stop();
     int err = current_connection
                   ? bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_SCANNABLE | BT_LE_ADV_OPT_USE_IDENTITY,
@@ -420,6 +436,10 @@ void broadcast_battery_level(struct k_work *work_item)
     if (!err) {
         avg4 = avg4 ? avg4 - avg4 / 4 + battery_millivolt : 4 * battery_millivolt;
         err = battery_get_percentage(&battery_percentage, avg4 / 4);
+        lr_mv20 = MIN(avg4 / 4 / 20, 255);
+    }
+    if (status_now()) {  // the advertiser's copy too; not advertising (-EAGAIN): the next start takes it
+        bt_le_adv_update_data(bt_ad, ARRAY_SIZE(bt_ad), bt_sd, ARRAY_SIZE(bt_sd));
     }
     if (!err) {
 

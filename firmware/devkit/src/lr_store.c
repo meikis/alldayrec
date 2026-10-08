@@ -902,9 +902,9 @@ void lr_store_shutdown(void)
     }
 }
 
-bool lr_store_ok(void)
+int lr_store_err(void)
 {
-    return !store_err;
+    return store_err;
 }
 
 void lr_store_lend(bool on)

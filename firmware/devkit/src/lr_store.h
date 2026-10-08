@@ -65,7 +65,8 @@ void lr_store_lend(bool on);
 /* Before a reset: write out the open record and unmount. A card reset mid-command stays dead until power-off. A card
  * stuck in a write is left as it is after 5 s: the reset goes ahead (APPEND_ERR x 2, -EDEADLK). */
 void lr_store_shutdown(void);
-/* The card takes the stream: false with no card, a full one, a failed write, or lent to USB (the one-LED status) */
-bool lr_store_ok(void);
+/* 0 while the card takes the stream, else why not: -ENODEV no card, -ENOSPC full, -EBUSY lent to USB, or the error
+ * that failed it (the one-LED status; the scan response) */
+int lr_store_err(void);
 
 #endif

@@ -107,7 +107,7 @@ void set_led_state()
     tick = !tick;
 #ifdef CONFIG_LR_ONE_LED
     static unsigned n;
-    int k = led_flashes(n++, lr_bond_count(), is_off || lr_paused(), lr_store_ok(), is_connected);
+    int k = led_flashes(n++, lr_bond_count(), is_off || lr_paused(), !lr_store_err(), is_connected);
     for (int i = 0; i < k; i++, k_msleep(150)) {  // 30 ms flashes, 150 ms apart
         set_led_blue(true);  // led2: P0.15, red on these boards
         k_msleep(30);
