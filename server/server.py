@@ -652,11 +652,24 @@ async def pipelines():
         after = {d: dt.datetime.fromisoformat(v) for d in devices if (v := db.kv(f"finalized_to:{d}"))}
         for d in audio.pending(after):
             if d not in running:
-                log.info("pipeline for %s from %s", d, after.get(d))
-                running[d] = asyncio.create_task(pipeline(d), name=f"pipeline:{d}")
-                running[d].add_done_callback(lambda t, d=d: (log.error("pipeline %s ended: %r", d, t.exception()),
-                                                             note(f"{d} 的处理任务退出：{t.exception()!r}"[:160], "error")) if not t.cancelled() else None)
+                running[d] = asyncio.create_task(lasting(d), name=f"pipeline:{d}")
         await asyncio.sleep(5)
+
+
+RESTART_S = 60  # a device's pipeline that failed starts again this much later
+
+
+async def lasting(device: str):
+    """The device's pipeline for good: one that fails (a bug, a missing file) starts again RESTART_S later from the
+    finalized time, as after a server restart (10-09: a new instance's first device stayed untranscribed until one)."""
+    while True:
+        log.info("pipeline for %s from %s", device, db.kv(f"finalized_to:{device}"))
+        try:
+            await pipeline(device)
+        except Exception as e:
+            log.exception("pipeline %s ended", device)
+            note(f"{device} 的处理任务退出：{e!r}"[:140] + f"，{RESTART_S} s 后重来", "error")
+        await asyncio.sleep(RESTART_S)
 
 
 async def pipeline(device: str):
@@ -719,7 +732,8 @@ async def pipeline(device: str):
 
     from diarist import Diarist, relabel
     bank = {k: e for k, (_, e) in db.people().items()}
-    owner = dict(np.load(DATA / "owner-redimnet2.npz"))
+    vp = DATA / "owner-redimnet2.npz"
+    owner = dict(np.load(vp)) if vp.exists() else {}  # a new instance has nobody's voiceprint yet: nobody is 我
     embed, dia, grouper = state["embed"], Diarist(owner, people=bank), Grouper(open_=db.kv(f"open_conversation:{device}"))
     ddia = Diarist(owner, people=bank)  # the drafts' own clustering: it never touches the final labels
     state["dias"] += [dia, ddia]  # a rename on the conversation page teaches every diarist a name
@@ -1100,17 +1114,16 @@ async def pipeline(device: str):
                 while await draft_pass():
                     pass
 
-    def watched(coro, name):
-        """A task whose death is logged: an unhandled exception would otherwise stop the pipeline silently."""
-        t = asyncio.create_task(coro, name=name)
-        t.add_done_callback(lambda t: (log.error("task %s ended: %r", name, t.exception()),
-                                       note(f"内部任务 {name} 退出：{t.exception()!r}"[:160], "error")) if not t.cancelled() else None)
-        return t
-
-    watched(feed(), f"feed:{device}")
-    watched(edge_feed(), f"edge:{device}")
-    watched(draft_loop(), f"draft:{device}")
-    await final_loop()
+    parts = [asyncio.create_task(coro, name=f"{name}:{device}")
+             for name, coro in (("feed", feed()), ("edge", edge_feed()), ("draft", draft_loop()), ("final", final_loop()))]
+    try:  # each runs for good: the first to end (an exception) ends the pipeline, and lasting() starts it again whole
+        t = (await asyncio.wait(parts, return_when=asyncio.FIRST_COMPLETED))[0].pop()
+        raise t.exception() or RuntimeError(f"{t.get_name()} returned")
+    finally:  # nothing left behind: two readers on one device would both move its queue (audio.read_to)
+        for p in parts + ([live_task] if live_task else []):
+            p.cancel()
+        state["dias"].remove(dia)
+        state["dias"].remove(ddia)
 
 
 def device_status(device: str, st: dict) -> dict:

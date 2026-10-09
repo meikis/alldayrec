@@ -80,7 +80,7 @@ class Diarist:
         lab = AgglomerativeClustering(n_clusters=None, distance_threshold=self.th, metric="cosine",
                                       linkage="average").fit_predict(E[big]) if len(big) > 1 else np.zeros(1, int)
         mean = {c: _unit(E[big][lab == c].mean(0)) for c in set(lab)}
-        owner = {c: max(float(m @ o) for o in self.bank) for c, m in mean.items()}
+        owner = {c: max((float(m @ o) for o in self.bank), default=0.0) for c, m in mean.items()}  # no bank: never 我
         near = {c: _closest(m, self.people) for c, m in mean.items()}
         me = {c for c in owner if (lab == c).sum() >= MIN_ME and _me(owner[c], near[c])}
         c = lab[big.index(i)]
