@@ -4,7 +4,7 @@
 #   server/apk_release.sh <apk>     # e.g. app/build/app/outputs/flutter-apk/app-release.apk; its build number must be higher
 set -euo pipefail
 HOST=suyiiyii@203.0.113.10
-DIR=/opt/live-record  # the main instance only (the friend's has no APK)
+DIR=/opt/live-record  # the main instance only (the friends' keep the APK they were set up with)
 
 if [ "${1:-}" != remote ]; then  # on this Mac
   [ -f "${1:-}" ] || { sed -n 4p "$0" >&2; exit 2; }

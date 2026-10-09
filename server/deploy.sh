@@ -1,6 +1,6 @@
 #!/bin/bash
 # Put the server (server/*.py and the web app built into static/dist) live on the deploy host, on every instance, and check it.
-#   server/deploy.sh            # HEAD (a clean origin/main): build, back up, install, restart, check; the friend's first
+#   server/deploy.sh            # HEAD (a clean origin/main): build, back up, install, restart, check; the friends' first
 #   server/deploy.sh check      # check what runs now (read only)
 #   server/deploy.sh rollback   # put back what the last deploy replaced (code, web, columns it added), restart, check
 # Instances are dir:unit; LR_INSTANCES replaces them (a throwaway test instance). Each deploy keeps a backup with a copy
@@ -8,7 +8,7 @@
 # own and the one before.
 set -euo pipefail
 HOST=suyiiyii@203.0.113.10
-INSTANCES=${LR_INSTANCES:-/opt/lr-prod:lr-prod /opt/live-record:live-record}
+INSTANCES=${LR_INSTANCES:-/opt/lr-prod:lr-prod /opt/lr-prod2:lr-prod2 /opt/live-record:live-record}
 
 if [ "${1:-}" != remote ]; then  # on this Mac
   mode=${1:-deploy}
