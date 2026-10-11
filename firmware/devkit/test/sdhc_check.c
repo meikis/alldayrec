@@ -273,6 +273,15 @@ int main(void)
     assert(r == -ETIMEDOUT && us >= 30000000 && us < 31000000);
     assert(lr_sd_err[LR_SD_TIMEOUT] == 3 && lr_sd_err[LR_SD_BUSY] == 3 && lr_sd_err[LR_SD_RETRIED] == 2);
     assert(lr_sd_err[LR_SD_CRC] == 0 && lr_sd_err[LR_SD_OTHER] == 0);
+    memset(lr_sd_err, 0, sizeof(lr_sd_err));
+
+    // a card that answers a read and never sends the data: a timeout after SD_SPI_SKIP_MS per try, 3 tries; upstream
+    // polled 1e6 bytes per try (1 s here, ~100 s on the board) and called it -EIO
+    prog_us = 0, nac_us = 100000000;
+    r = request(SD_READ_SINGLE_BLOCK, 1, buf, &us, &ms);
+    printf("read never answered: %d after %llu ms\n", r, (unsigned long long) us / 1000);
+    assert(r == -ETIMEDOUT && us >= 3 * SD_SPI_SKIP_MS * 1000 && us < 3 * SD_SPI_SKIP_MS * 1000 + 50000);
+    assert(lr_sd_err[LR_SD_TIMEOUT] == 3 && lr_sd_err[LR_SD_RETRIED] == 2);
 
     printf("sdhc_check: ok\n");
     return 0;

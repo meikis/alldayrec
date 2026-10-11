@@ -13,6 +13,7 @@
  * 3. No 512-byte block of 0xFF in flash to clock reads with: nRF SPI and SPIM send their overrun character, 0xFF, when
  *    there is no TX buffer (upstream main does this too); SPIM could not DMA from flash without a RAM copy.
  * 4. The card's CID and CSD and the failed tries of data transfers go to the event log (sdcard.h, #155 F2 F3).
+ * 5. A read's data token waited for SD_SPI_SKIP_MS, yielding (sdhc_skip): upstream polled 1e6 times without yielding.
  * Before, on LR-P3-92D2: a 4 KB read took ~48 ms (~84 KB/s), an append of ~4 KB with its sync ~95 ms. */
 #define DT_DRV_COMPAT zephyr_sdhc_spi_slot
 
@@ -31,7 +32,8 @@ LOG_MODULE_REGISTER(sdhc_spi, CONFIG_SDHC_LOG_LEVEL);
 
 #define MAX_CMD_READ 21
 #define SPI_R1B_TIMEOUT_MS 3000
-#define SD_SPI_SKIP_RETRIES 1000000
+/* LR: a read's data token comes within 100 ms on an SDHC card (the spec's Nac; Linux's mmc_spi waits that long) */
+#define SD_SPI_SKIP_MS 250
 
 /* LR: the SD protocol wants ones on MOSI while reading: with no TX buffer the nRF SPI(M) sends its overrun character,
  * 0xFF by default */
@@ -358,14 +360,17 @@ static int sdhc_spi_send_cmd(const struct device *dev, struct sdhc_command *cmd,
 	return sdhc_spi_response_get(dev, cmd, bufs[0].len);
 }
 
-/* Skips bytes in SDHC data stream. */
+/* Skips bytes in SDHC data stream. LR: for SD_SPI_SKIP_MS, yielding. Upstream polled up to 1e6 times without yielding,
+ * then returned the skipped value (its count wrapped) for an -EIO: a card that answers a read and never sends the data
+ * held its thread ~100 s per try (BDAE 10-09, injected: 1e6 polls in 101 s), 3 tries per read, each mount try of a
+ * card in that state ~5 minutes */
 static int sdhc_skip(const struct device *dev, uint8_t skip_val)
 {
 	const struct sdhc_spi_config *config = dev->config;
 	struct sdhc_spi_data *data = dev->data;
 	uint8_t buf;
 	int ret;
-	uint32_t retries = SD_SPI_SKIP_RETRIES;
+	int64_t start = k_uptime_get();
 
 	do {
 		ret = sdhc_spi_rx(config->spi_dev, data->spi_cfg,
@@ -373,12 +378,13 @@ static int sdhc_skip(const struct device *dev, uint8_t skip_val)
 		if (ret) {
 			return ret;
 		}
-	} while (buf == skip_val && retries--);
-	if (retries == 0) {
-		return -ETIMEDOUT;
-	}
-	/* Return first non-skipped value */
-	return buf;
+		if (buf != skip_val) {
+			/* Return first non-skipped value */
+			return buf;
+		}
+		k_yield();
+	} while (k_uptime_get() - start < SD_SPI_SKIP_MS);
+	return -ETIMEDOUT;
 }
 
 /* Handles reading data from SD SPI device */
