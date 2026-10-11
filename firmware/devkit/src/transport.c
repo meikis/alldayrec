@@ -489,7 +489,6 @@ static void _transport_connected(struct bt_conn *conn, uint8_t err)
             info.le.data_len->rx_max_len,
             info.le.data_len->rx_max_time);
 
-    k_work_schedule(&battery_work, K_MSEC(100)); // run immediately
     // ask for encryption at once: a bonded phone starts it with its keys, a new one pairs. macOS does not pair on its
     // own when a read fails for want of encryption (10-03)
     bt_conn_set_security(conn, BT_SECURITY_L2);
@@ -816,6 +815,8 @@ int transport_start()
     } else {
         LOG_INF("Battery initialized");
     }
+    // from boot, not from the first connection: the scan response's battery is for a phone that has not connected
+    k_work_schedule(&battery_work, K_MSEC(100));
 
     // Start pusher
     ring_buf_init(&ring_buf, sizeof(tx_queue), tx_queue);
