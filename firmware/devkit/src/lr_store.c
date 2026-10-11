@@ -788,13 +788,27 @@ static int lend(bool on)
 
 static int card_init(int (*mount)(void), uint16_t *counted);
 
-/* A card that failed (a write, the mount, none at boot) is tried again once a minute, one mount try, the SD mutex
+/* A card that failed is tried again RETRY_FAST times RETRY_FAST_MS apart, then once a minute: one that comes back by
+ * itself costs seconds of audio, not a minute (BDAE 10-08 14:45: back at the first try, 80 s after its EIO, with no
+ * phone to take those 80 s), and a dead one is not knocked on every few seconds for good. A card not there at boot is
+ * tried once a minute only: each try at no card takes seconds of the store thread. */
+#define RETRY_FAST 6
+#define RETRY_FAST_MS 5000
+static int retries;  // tries of a failed card since it last worked
+
+static int64_t retry_every(void)
+{
+    return boot && retries < RETRY_FAST ? RETRY_FAST_MS : 60000;
+}
+
+/* A card that failed (a write, the mount, none at boot) is tried again (retry_every), one mount try, the SD mutex
  * not held meanwhile (the stream goes on). Back, it goes on in a new segment, as after a lend; a card that was not
  * there at boot counts this boot then and starts at its segment 0. Lent (-EBUSY) and full (-ENOSPC: back when a phone
  * deletes) are not failures. */
 static void retry_card(void)
 {
     if (!store_err || store_err == -EBUSY || store_err == -ENOSPC) {
+        retries = 0;
         return;
     }
     k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
@@ -809,6 +823,7 @@ static void retry_card(void)
         err = card_init(mount_sd_card_once, &was);  // counts the boot
     }
     k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+    retries = err ? retries + 1 : 0;
     if (!err) {
         k_mutex_lock(&stream_mtx, K_FOREVER);
         flush();  // the stream's last records go with the file they are in (not on the card)
@@ -834,8 +849,8 @@ static void store_thread(void)
     struct cmd c;
     int64_t tried = k_uptime_get();
     for (;;) {
-        int got = k_msgq_get(&cmds, &c, K_SECONDS(60));
-        if (k_uptime_get() - tried >= 60000) {
+        int got = k_msgq_get(&cmds, &c, K_MSEC(retry_every()));
+        if (k_uptime_get() - tried >= retry_every()) {
             tried = k_uptime_get();
             retry_card();
         }

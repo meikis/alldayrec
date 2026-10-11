@@ -149,8 +149,8 @@ uint8_t lr_charge(void) { return 0; }
 void lr_pause(uint32_t s) {}
 void usb_reattach(void) {}
 int mount_sd_card(void) { return 0; }
-static int mounts;  // tries of the card again (retry_card)
-int mount_sd_card_once(void) { mounts++; return 0; }
+static int mounts, mount_fails;  // tries of the card again (retry_card); how many of the next ones fail
+int mount_sd_card_once(void) { mounts++; return mount_fails ? mount_fails--, -EIO : 0; }
 static struct { uint8_t code, x; uint32_t a, b; } logged[16];
 static int n_logged;
 void lr_log(uint8_t code, uint8_t x, uint32_t a, uint32_t b)
@@ -319,8 +319,21 @@ int main(void)
     assert(memcmp(card[0], phone[0], card_len[0]) == 0);
 
     // the card tried again (once a minute): back, in a new segment, the card and the stream the same again
+    // a card that failed is tried again every 5 s at first (one that comes back by itself, BDAE 10-08), after 6 failed
+    // tries once a minute (a dead one); back, every 5 s again for the next failure. None at boot: once a minute
+    boot = 0;
+    assert(retry_every() == 60000);
+    boot = 1;
+    assert(retry_every() == 5000);
+    mount_fails = 6;
+    for (int i = 0; i < 6; i++) {
+        retry_card();
+    }
+    assert(mounts == 6 && store_err == -EIO && retries == 6 && retry_every() == 60000);
+    mounts = 0;
     retry_card();
     assert(mounts == 1 && store_err == 0);
+    assert(retries == 0 && retry_every() == 5000);
     frames(1700, 500);
     flush();
     assert(seg == 1 && card_len[1] == phone_len[1] && memcmp(card[1], phone[1], card_len[1]) == 0);
