@@ -576,7 +576,12 @@ static void live_thread(void)
         live_send();
     }
 }
-K_THREAD_DEFINE(live_tid, 2048, live_thread, NULL, NULL, NULL, K_PRIO_PREEMPT(8), 0, 0);  // between the pusher (7) and the store (9): LIVE before READ's DATA
+/* The pusher's priority (7), above everything that touches the card (its writer 8, the store 9). Threads of one
+ * priority take turns only when one blocks (no time slices: CONFIG_TIMESLICE_SIZE 0), and the SD stack can go on for
+ * long without blocking: sdhc_spi.c's sdhc_skip polled 1e6 times for a read's data that never came, NCS's
+ * sdmmc_wait_ready busy-waits for a busy card. At 8 with the card writer, LIVE stopped for as long (BDAE 10-09 10:53:
+ * 82 s, LIVE_LOST 826 records, the phone connected all along). */
+K_THREAD_DEFINE(live_tid, 2048, live_thread, NULL, NULL, NULL, K_PRIO_PREEMPT(7), 0, 0);
 
 static void reply(struct bt_conn *conn, uint8_t op, uint32_t a, uint32_t b, uint8_t blen)
 {
