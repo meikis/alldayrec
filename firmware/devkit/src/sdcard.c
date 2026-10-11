@@ -3,13 +3,16 @@
 #include "wdog_facade.h"
 
 #include <ff.h>
+#include <hal/nrf_gpio.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/pinctrl.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/fs/fs.h>
 #include <zephyr/fs/fs_sys.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sd/sd.h>
 #include <zephyr/sd/sdmmc.h>
 #include <zephyr/storage/disk_access.h>
 #include <zephyr/sys/byteorder.h>
@@ -25,8 +28,10 @@ static FATFS fat_fs;
  * minute (#137). The linker sends the SD disk's calls here (CMakeLists.txt, --wrap); drop it with an NCS that has
  * the break. */
 int __real_sdmmc_ioctl(struct sd_card *card, uint8_t cmd, void *buf);
+static struct sd_card *disk_card;  // the SD disk's own card, kept by NCS's disk driver: each mount asks it (log_card)
 int __wrap_sdmmc_ioctl(struct sd_card *card, uint8_t cmd, void *buf)
 {
+    disk_card = card;
     int err = __real_sdmmc_ioctl(card, cmd, buf);
     return cmd == DISK_IOCTL_CTRL_SYNC && err == -ENOTSUP ? 0 : err;
 }
@@ -53,6 +58,24 @@ static bool sd_enabled;
 
 #if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), sd_pwr_gpios)
 static const struct gpio_dt_spec sd_pwr = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), sd_pwr_gpios);
+
+/* The card's SPI lines (SCK MOSI MISO, then CS). Driven, they feed a card whose supply is off, through the module's
+ * 10k pull-ups and the card's protection diodes: CS above all, driven high (deselected) from the SPI driver's init on,
+ * before main. LR-P3s with a card went flat in under two days "off" (#197), and the card never really lost power in
+ * a power cycle. */
+#define SD_LINE(node, prop, idx) NRF_GET_PIN(DT_PROP_BY_IDX(node, prop, idx)),
+static const uint32_t sd_lines[] = {
+    DT_FOREACH_PROP_ELEM(DT_CHILD(DT_NODELABEL(custom_spi), group1), psels, SD_LINE)
+    NRF_GPIO_PIN_MAP(DT_PROP(DT_GPIO_CTLR_BY_IDX(DT_NODELABEL(spi2), cs_gpios, 0), port),
+                     DT_GPIO_PIN_BY_IDX(DT_NODELABEL(spi2), cs_gpios, 0)),
+};
+
+void sd_lines_release(void)
+{
+    for (int i = 0; i < ARRAY_SIZE(sd_lines); i++) {
+        nrf_gpio_cfg_default(sd_lines[i]);
+    }
+}
 #endif
 
 // the card's chip select, as the board overlay gives it to the SD SPI bus (LR-X1 D10/P1.15, LR-P1 P0.20)
@@ -105,20 +128,38 @@ static void sd_spi_reset(void)
     lr_log(LR_SD_RESET, 0, r12, r0);
 }
 
-int mount_sd_card(void)
+/* A board that switches the card's supply (LR-P3, LR-P1: the nice!nano's VCC on P0.13, #122 wire 12): off long enough
+ * to drain, its SPI lines let go meanwhile (sd_lines), then on, so the card starts from reset; the lines back as the SPI
+ * driver set them (pinctrl, CS). LR-X1 feeds it from 3V3: nothing to do. */
+static void sd_power_cycle(void)
 {
-    // at boot only: NCS 2.7's SD disk has no deinit, it would not initialise the card again (mounted back after USB, -EIO)
-    static bool booted;
 #if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), sd_pwr_gpios)
-    // a board that switches the card's supply: off long enough to drain, then on, so the card starts from reset
-    if (!booted) {
-        gpio_pin_configure_dt(&sd_pwr, GPIO_OUTPUT_INACTIVE);
-        k_msleep(300);
-        gpio_pin_set_dt(&sd_pwr, 1);
-        k_msleep(50);
+    uint32_t cnf[ARRAY_SIZE(sd_lines)], out[ARRAY_SIZE(sd_lines)];
+    for (int i = 0; i < ARRAY_SIZE(sd_lines); i++) {
+        uint32_t pin = sd_lines[i];
+        cnf[i] = nrf_gpio_pin_port_decode(&pin)->PIN_CNF[pin];
+        out[i] = nrf_gpio_pin_out_read(sd_lines[i]);
+    }
+    sd_lines_release();
+    gpio_pin_configure_dt(&sd_pwr, GPIO_OUTPUT_INACTIVE);
+    k_msleep(300);
+    gpio_pin_set_dt(&sd_pwr, 1);
+    k_msleep(50);
+    for (int i = 0; i < ARRAY_SIZE(sd_lines); i++) {
+        uint32_t pin = sd_lines[i];
+        nrf_gpio_pin_write(sd_lines[i], out[i]);  // the level first: CS comes back high (deselected)
+        nrf_gpio_pin_port_decode(&pin)->PIN_CNF[pin] = cnf[i];
     }
 #endif
+}
+
+int mount_sd_card(void)
+{
+    // the card reset at boot only: NCS 2.7's SD disk has no deinit, it would not initialise the card again (mounted back
+    // after USB, -EIO); a failed card is reset by mount_sd_card_reset
+    static bool booted;
     if (!booted) {
+        sd_power_cycle();
         sd_spi_reset();
         booted = true;
     }
@@ -144,7 +185,7 @@ int mount_sd_card(void)
     return err;
 }
 
-/* One try, no waiting: the store tries a failed card again once a minute (lr_store.c). Logged when it works. */
+/* One try, no waiting: the store tries a failed card again (lr_store.c retry_card). Logged when it works. */
 int mount_sd_card_once(void)
 {
     int err = disk_access_init("SD") ?: fs_mount(&mount_point);
@@ -154,6 +195,19 @@ int mount_sd_card_once(void)
     }
     sd_enabled = !err;
     return err;
+}
+
+/* A card that failed and stays failed: BDAE 10-08 11:29 was not back after 10 minutes of mounts, a reboot brought it
+ * back. NCS 2.7's disk init returns at once while it holds the disk OK (drivers/disk/sdmmc_subsys.c), so a mount alone
+ * goes on reading a card still stuck. What boot does instead: the supply off and on, the SPI reset (SD_RESET), sd_init
+ * again on the disk's own card, then the mount; logged as MOUNT x 0 like the plain one, the SD_RESET before it. The
+ * store's retry_card, once quick mounts have failed. */
+int mount_sd_card_reset(void)
+{
+    sd_power_cycle();
+    sd_spi_reset();
+    int err = disk_card ? sd_init(disk_card->sdhc, disk_card) : 0;  // none: it never mounted, disk_access_init inits it
+    return err ?: mount_sd_card_once();
 }
 
 void unmount_sd_card(void)

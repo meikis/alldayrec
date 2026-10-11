@@ -11,7 +11,12 @@
  */
 int mount_sd_card(void);
 int mount_sd_card_once(void);
+/* A failed card from scratch, as at boot: supply off and on where the board can, SPI reset, sd_init, mount */
+int mount_sd_card_reset(void);
 void unmount_sd_card(void);
+/* The card's four SPI lines let go (high impedance), on a board that switches the card's supply: before its supply goes
+ * off for good (System OFF, lr_power.c) */
+void sd_lines_release(void);
 
 void sd_on();
 void sd_off();

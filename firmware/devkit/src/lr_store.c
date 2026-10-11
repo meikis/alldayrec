@@ -793,17 +793,19 @@ static int lend(bool on)
 
 static int card_init(int (*mount)(void), uint16_t *counted);
 
-/* A card that failed is tried again RETRY_FAST times RETRY_FAST_MS apart, then once a minute: one that comes back by
- * itself costs seconds of audio, not a minute (BDAE 10-08 14:45: back at the first try, 80 s after its EIO, with no
- * phone to take those 80 s), and a dead one is not knocked on every few seconds for good. A card not there at boot is
- * tried once a minute only: each try at no card takes seconds of the store thread. */
+/* A card that failed is tried again RETRY_FAST times RETRY_FAST_MS apart: one that comes back by itself costs seconds
+ * of audio, not a minute (BDAE 10-08 14:45: back at the first try, 80 s after its EIO, with no phone to take those
+ * 80 s). Then it is reset from scratch (mount_sd_card_reset: a card stuck, BDAE 10-08 11:29, back only by a reboot),
+ * once a minute, RETRY_RESETS times; then every 10 minutes, so a dead or missing card is not knocked on for good. A
+ * card not there at boot is tried once a minute only: each try at no card takes seconds of the store thread. */
 #define RETRY_FAST 6
 #define RETRY_FAST_MS 5000
+#define RETRY_RESETS 3
 static int retries;  // tries of a failed card since it last worked
 
 static int64_t retry_every(void)
 {
-    return boot && retries < RETRY_FAST ? RETRY_FAST_MS : 60000;
+    return !boot ? 60000 : retries < RETRY_FAST ? RETRY_FAST_MS : retries < RETRY_FAST + RETRY_RESETS ? 60000 : 600000;
 }
 
 /* A card that failed (a write, the mount, none at boot) is tried again (retry_every), one mount try, the SD mutex
@@ -823,7 +825,7 @@ static void retry_card(void)
     int err;
     unmount_sd_card();  // whatever state the failure left it in
     if (was) {
-        err = mount_sd_card_once();
+        err = retries < RETRY_FAST ? mount_sd_card_once() : mount_sd_card_reset();
     } else {
         err = card_init(mount_sd_card_once, &was);  // counts the boot
     }

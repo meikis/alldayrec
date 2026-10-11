@@ -13,7 +13,6 @@
 #include <nrfx_power.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/hci.h>
-#include <zephyr/drivers/pinctrl.h>
 #include <zephyr/kernel.h>
 
 #include "config.h"
@@ -21,19 +20,8 @@
 #include "lr_log.h"
 #include "lr_store.h"
 #include "lr_switch.h"
+#include "sdcard.h"
 #include "transport.h"
-
-#if DT_NODE_HAS_PROP(LR_USER, sd_pwr_gpios)
-/* The card's SPI lines (SCK MOSI MISO, then CS), let go as its supply goes off. The SPI driver sets CS up driven high
- * (deselected) at every boot, before main; into the unpowered card it went on through the card's protection diode, a
- * supply for the card through the whole System OFF: LR-P3s with a card went flat in under two days "off". */
-#define SD_LINE(node, prop, idx) NRF_GET_PIN(DT_PROP_BY_IDX(node, prop, idx)),
-static const uint32_t sd_lines[] = {
-    DT_FOREACH_PROP_ELEM(DT_CHILD(DT_NODELABEL(custom_spi), group1), psels, SD_LINE)
-    NRF_GPIO_PIN_MAP(DT_PROP(DT_GPIO_CTLR_BY_IDX(DT_NODELABEL(spi2), cs_gpios, 0), port),
-                     DT_GPIO_PIN_BY_IDX(DT_NODELABEL(spi2), cs_gpios, 0)),
-};
-#endif
 
 #define LOW_READINGS 3
 #define OFF_MAGIC 0x10B477E7
@@ -75,9 +63,7 @@ void lr_power_off(void)
     // (a hardware fix: the resistor); left open, the pull-up turns VCC on
     nrf_gpio_pin_clear(LR_PIN(sd_pwr_gpios));
     nrf_gpio_cfg_output(LR_PIN(sd_pwr_gpios));
-    for (int i = 0; i < ARRAY_SIZE(sd_lines); i++) {
-        nrf_gpio_cfg_default(sd_lines[i]);
-    }
+    sd_lines_release();  // or they feed the card on through the night (#197)
 #endif
     nrf_gpio_pin_clear(PDM_PWR_PIN);
     nrf_gpio_cfg_output(PDM_PWR_PIN);
