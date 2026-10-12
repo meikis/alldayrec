@@ -301,7 +301,7 @@ def test_hold_release(tmp_path, monkeypatch):
     save(t, flac(tone(0, 3)))  # it came just now: the device records
     audio.hold(DEVICE, int(t.timestamp() * 1000))
     st = {"audio_end": None, "done_to": None, "progress": [], "latency": [], "final_latency": [], "drafting": False,
-          "last_speech": None, "refine": None, "conversation": None, "draft": None, "draft_to": None}
+          "last_speech": None, "refine": None, "conversation": None, "draft": None, "draft_to": None, "live_task": None}
     d = server.device_status(DEVICE, st)
     assert d["hold"] == "2026-10-07T17:36:00" and d["recording"], d
     seen, until = dt.datetime.fromisoformat(d["hold_seen"]), dt.datetime.fromisoformat(d["hold_until"])

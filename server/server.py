@@ -479,7 +479,7 @@ def summarize(c: dict, tags: list[str]) -> dict:
     and the day in its context, the prefix cached); any other, and every redo, from a plain summary call."""
     rows = conversation_rows(c)
     tl = db.timeline(c["id"]) if c.get("via_live") else None
-    if tl and tl.get("messages") and c.get("speech_s", 0) >= summary.MIN_SPEECH_S:
+    if tl and tl.get("messages") and (c.get("speech_s", 0) >= summary.MIN_SPEECH_S or tl.get("asked")):  # asked: 立即总结 on a short one
         return {**summary.result(c, rows, *live.final(tl, rows, tags, c["start"])), "via": "live"}
     return summary.summarize(c, rows, tags)
 
@@ -684,6 +684,7 @@ async def pipeline(device: str):
     draft0 = db.kv(f"draft_to:{device}")
     st = state["devices"][device] = {"seg": seg, "done_to": done0, "audio_end": None, "edge_end": None, "last_speech": None, "refine": None,
                                      "conversation": None, "latency": [], "final_latency": [], "live": None,
+                                     "live_task": None,  # the live analysis running
                                      "progress": [],  # (wall time, finalized time) per commit, the last 10 min: the rate
                                      "utts": [],  # VAD utterances after the finalized time: where the final layer cuts
                                      # the draft layer: its own progress, VAD utterances, last pause, wake-up, and its rows not yet covered
@@ -737,7 +738,7 @@ async def pipeline(device: str):
     embed, dia, grouper = state["embed"], Diarist(owner, people=bank), Grouper(open_=db.kv(f"open_conversation:{device}"))
     ddia = Diarist(owner, people=bank)  # the drafts' own clustering: it never touches the final labels
     state["dias"] += [dia, ddia]  # a rename on the conversation page teaches every diarist a name
-    live_task, live_failed = None, 0.0
+    live_failed = 0.0
 
     def open_view() -> dict | None:
         """The conversation going on now as the pages and the live analysis see it: the open conversation's final rows
@@ -756,7 +757,8 @@ async def pipeline(device: str):
 
     def show_open():
         v = open_view()
-        st["conversation"] = {"start": v["start"], "end": v["end"], "sentences": len(v["sentences"]), "device": device} if v else None
+        st["conversation"] = {"start": v["start"], "end": v["end"], "sentences": len(v["sentences"]), "speech_s": round(v["speech_s"]),
+                              "device": device} if v else None
 
     if (lv := db.kv(f"live:{device}")) and "messages" in lv and (v := open_view()) and overlaps(lv, v):
         st["live"] = lv
@@ -849,23 +851,25 @@ async def pipeline(device: str):
             st["live"] = None
             await broadcast({"type": "live", "device": device, "live": None})
 
+    def present(o: dict) -> bool:
+        """The device is recording now and o is the conversation going on: during a backlog the drafts of what is said
+        now (open_view starts one of them after the gap), not the old conversation the final layer is still on."""
+        edge = st["edge_end"]
+        return bool(edge) and (dt.datetime.now() - edge).total_seconds() <= LIVE_AUDIO_S and \
+            (edge - dt.datetime.fromisoformat(o["end"])).total_seconds() <= grouper.gap
+
     def live_due() -> bool:
-        """A page is in front, the device is recording now, the conversation going on has a minute of speech and is the
-        present: during a backlog the drafts of what is said now (open_view starts one of them after the gap), not the
-        old conversation the final layer is still on; and LIVE_EVERY_S of new speech came (or any, when a page just
-        came to the front)."""
-        o, lv, now, edge = open_view(), st["live"], time.time(), st["edge_end"]
-        if not o or o["speech_s"] < summary.MIN_SPEECH_S or now > state["watch_until"] or now - live_failed < 120:
-            return False
-        if not edge or (dt.datetime.now() - edge).total_seconds() > LIVE_AUDIO_S or \
-                (edge - dt.datetime.fromisoformat(o["end"])).total_seconds() > grouper.gap:
+        """A page is in front, the conversation going on has a minute of speech and is the present, and LIVE_EVERY_S of
+        new speech came (or any, when a page just came to the front)."""
+        o, lv, now = open_view(), st["live"], time.time()
+        if not o or o["speech_s"] < summary.MIN_SPEECH_S or now > state["watch_until"] or now - live_failed < 120 or not present(o):
             return False
         if not lv or not overlaps(lv, o):
             return True
         grown = o["speech_s"] - lv["speech_s"]
         return grown >= LIVE_EVERY_S or (grown > 0 and state["wake_at"] > lv["wall"])
 
-    async def live_update():
+    async def live_update(asked: bool = False):
         nonlocal live_failed
         o = open_view()
         lv = st["live"] if st["live"] and overlaps(st["live"], o) else live.new(o["start"], device, db.conversations(o["start"][:10], o["start"]))
@@ -878,7 +882,7 @@ async def pipeline(device: str):
             note(f"{device}：实时分析失败：{str(e)[:120]}，2 分钟后再试", "error")
             return
         res.update(speech_s=speech, wall=time.time(), at=dt.datetime.now().isoformat(timespec="seconds"),
-                   upto=rows[-1]["start"], sentences=len(rows))
+                   upto=rows[-1]["start"], sentences=len(rows), asked=lv.get("asked") or asked)
         if (v := open_view()) and overlaps(res, v):
             st["live"] = res
             db.put_kv(f"live:{device}", res)
@@ -887,10 +891,29 @@ async def pipeline(device: str):
                                     (device, res["upto"], res["start"])).fetchone():
             db.put_timeline(r[0], res)  # it closed while the call ran
 
+    def running() -> bool:
+        return bool(st["live_task"]) and not st["live_task"].done()
+
     def maybe_live():
-        nonlocal live_task
-        if (live_task is None or live_task.done()) and live_due():
-            live_task = asyncio.create_task(live_update(), name=f"live:{device}")
+        if not running() and live_due():
+            st["live_task"] = asyncio.create_task(live_update(), name=f"live:{device}")
+
+    def ask() -> str | None:
+        """立即总结: the live analysis of the conversation going on, now: before its minute of speech, before LIVE_EVERY_S
+        more, during a failure's wait. One at a time, and only with speech it has not seen (the page holds its button 10 s
+        after a press). None when it started, else why not. Asked once, its agent writes the final summary however short
+        it stays (summarize)."""
+        o, lv = open_view(), st["live"]
+        if running():
+            return "正在分析"
+        if not o or not present(o):
+            return "没有进行中的对话"
+        if o["speech_s"] <= (lv["speech_s"] if lv and overlaps(lv, o) else 0):
+            return "没有新的语音"
+        st["live_task"] = asyncio.create_task(live_update(asked=True), name=f"live:{device}")
+        return None
+
+    st["ask"] = ask
 
     async def final_piece() -> bool:
         """Cut and finalize the next piece when there is one; True when a piece was done (look for the next at once)."""
@@ -1120,7 +1143,7 @@ async def pipeline(device: str):
         t = (await asyncio.wait(parts, return_when=asyncio.FIRST_COMPLETED))[0].pop()
         raise t.exception() or RuntimeError(f"{t.get_name()} returned")
     finally:  # nothing left behind: two readers on one device would both move its queue (audio.read_to)
-        for p in parts + ([live_task] if live_task else []):
+        for p in parts + ([st["live_task"]] if st["live_task"] else []):
             p.cancel()
         state["dias"].remove(dia)
         state["dias"].remove(ddia)
@@ -1148,6 +1171,7 @@ def device_status(device: str, st: dict) -> dict:
             "rate": round(rate, 1) if rate else None, "eta_s": round(left / rate) if rate and rate > 0.1 and left > 30 else None,
             "last_speech": st["last_speech"].isoformat(timespec="seconds") if st["last_speech"] else None,
             "refine": st["refine"], "conversation": st["conversation"], "drafting": st["drafting"], "draft": st["draft"],
+            "analyzing": bool(st["live_task"]) and not st["live_task"].done(),  # the live analysis is running
             "draft_to": st["draft_to"].isoformat(timespec="seconds") if st["draft_to"] else None,
             "latency_s": sorted(lat)[len(lat) // 2] if lat else None,
             "arrival": arrived, "sound": sound(device, received_to)}
@@ -1360,6 +1384,17 @@ async def events():
 async def live_now():
     """Each device's live analysis of its open conversation."""
     return [live.public(st["live"]) for st in state["devices"].values() if st.get("live")]
+
+
+@app.post("/api/live/{device}")
+async def live_ask(device: str):
+    """立即总结 (the live page's button): the device's live analysis now; 409 with why not."""
+    ask = state["devices"].get(device, {}).get("ask")  # none yet: its pipeline is starting (lasting() restarts a failed one)
+    if not ask:
+        raise HTTPException(404, "没有这台设备的处理流程")
+    if why := ask():
+        raise HTTPException(409, why)
+    return {"analyzing": True}
 
 
 @app.get("/api/status")

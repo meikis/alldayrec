@@ -13,6 +13,7 @@ import {
   hhmm,
   hhmmss,
   holdLeft,
+  post,
   type Conversation,
   type DeviceStatus,
   type LiveState,
@@ -263,12 +264,89 @@ onUnmounted(() => {
 });
 watch([connected, live], ([c, l]) => c && l && ((wake = true), beat()));
 
-// the most recently updated device's analysis, shown above the transcript in a pane whose height is dragged
-const current = computed(() =>
-  live.value
-    ? lives.value.reduce<LiveState | null>((a, l) => (a && a.at > l.at ? a : l), null)
-    : null,
+// The bar above the transcript, today: what the live analysis does for one device, its result in a pane whose height
+// is dragged. The device: of the recording ones, the one whose conversation going on spoke last (not the one analyzed
+// last: a conversation under a minute has no analysis yet); with none talking, the one whose audio came in last
+const MIN_SPEECH_S = 60; // server summary.MIN_SPEECH_S: a conversation is analyzed by itself from this much speech on
+const barDev = computed(() => {
+  const ds = status.value?.devices ?? [];
+  const talking = ds
+    .filter((d) => d.recording && d.conversation)
+    .reduce<DeviceStatus | null>(
+      (a, d) => (a && a.conversation!.end > d.conversation!.end ? a : d),
+      null,
+    );
+  return talking ?? ds.find((d) => d.device === status.value?.device) ?? null;
+});
+const talk = computed(() => (barDev.value?.recording && barDev.value.conversation) || null);
+// its analysis, when it is of the conversation going on (server overlaps())
+const current = computed(() => {
+  const c = talk.value;
+  return (
+    (c &&
+      lives.value.find(
+        (l) => l.device === barDev.value!.device && l.start <= c.end && l.upto >= c.start,
+      )) ||
+    null
+  );
+});
+// with none going on, its last conversation today: its summary stays until the next one starts
+const last = computed(() =>
+  convs.value
+    .filter((c) => !c.device || c.device === barDev.value?.device)
+    .reduce<Conversation | null>((a, c) => (a && a.end > c.end ? a : c), null),
 );
+const said = (s: number) => (s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`);
+const barText = computed(() => {
+  const d = barDev.value,
+    c = talk.value,
+    l = current.value;
+  const prev = last.value ? ` · 上一段 ${hhmm(last.value.start)}《${convLink(last.value)}》` : "";
+  if (!status.value?.recording) return "未在录音" + prev;
+  if (!c) return "暂无进行中的对话" + prev;
+  if (l) return `实时分析 · 更新于 ${hhmm(l.at)}` + (d?.analyzing ? " · 分析中…" : "");
+  if (d?.analyzing) return "分析中…";
+  return (
+    `对话进行中 · 已说 ${said(c.speech_s)}` +
+    (c.speech_s < MIN_SPEECH_S ? `，满 ${MIN_SPEECH_S / 60} 分钟自动分析` : "")
+  );
+});
+const body = computed(() => (current.value ? "live" : !talk.value && last.value ? "last" : ""));
+// 立即总结 / 立即更新: the analysis now, with speech it has not seen; the button rests 10 s after a press (double taps)
+const asking = ref(false),
+  askErr = ref("");
+const fresh = computed(() => (talk.value?.speech_s ?? 0) > (current.value?.speech_s ?? 0));
+async function askNow() {
+  const d = barDev.value;
+  if (!d) return;
+  asking.value = true;
+  setTimeout(() => (asking.value = false), 10000);
+  askErr.value = "";
+  try {
+    Object.assign(
+      d,
+      await post<Partial<DeviceStatus>>(`/api/live/${encodeURIComponent(d.device)}`),
+    );
+  } catch (e) {
+    askErr.value = (e as Error).message;
+    setTimeout(() => (askErr.value = ""), 5000);
+  }
+}
+const paneOpen = ref(
+  (() => {
+    try {
+      return localStorage.getItem("livePaneOpen") !== "0";
+    } catch {
+      return true;
+    }
+  })(),
+);
+function toggle() {
+  paneOpen.value = !paneOpen.value;
+  try {
+    localStorage.setItem("livePaneOpen", paneOpen.value ? "1" : "0");
+  } catch {}
+}
 const clampH = (h: number) => Math.round(Math.min(Math.max(h, 80), window.innerHeight * 0.7));
 const paneH = ref(
   clampH(
@@ -299,7 +377,7 @@ function dragEnd() {
   } catch {}
 }
 watch(
-  () => current.value?.at,
+  () => [current.value?.at, paneOpen.value],
   async () => {
     await nextTick();
     if (paneBox.value) paneBox.value.scrollTop = paneBox.value.scrollHeight; // the newest topic is at the bottom
@@ -376,16 +454,54 @@ const convLink = (c: Conversation) =>
         <template v-else>连接中…</template>
       </RouterLink>
     </div>
-    <div v-if="current" class="pane">
-      <div ref="paneBox" class="pane-body" :style="{ height: paneH + 'px' }">
-        <div class="pane-meta">
-          实时分析{{ current.start > doneTo(current.device) ? "（基于最新初稿）" : "" }} · 对话
-          {{ hhmmss(current.start) }} 起 · 更新于 {{ hhmmss(current.at) }} · 到
-          {{ hhmmss(current.upto) }} 共 {{ current.sentences }} 句
-        </div>
-        <Timeline :topics="current.topics" open @jump="jump" />
+    <div v-if="live && status" class="pane">
+      <div class="pane-line">
+        <button
+          class="fold"
+          :disabled="!body"
+          :aria-expanded="body ? paneOpen : undefined"
+          @click="toggle"
+        >
+          <span v-if="body" class="caret">{{ paneOpen ? "▾" : "▸" }}</span
+          >{{ barText }}
+          <span v-if="askErr" class="bad"> · {{ askErr }}</span>
+        </button>
+        <button
+          v-if="talk"
+          class="ask"
+          :disabled="asking || barDev?.analyzing || !fresh"
+          :title="fresh ? '' : '没有新的语音'"
+          @click="askNow"
+        >
+          {{ current ? "立即更新" : "立即总结" }}
+        </button>
       </div>
       <div
+        v-if="body && paneOpen"
+        ref="paneBox"
+        class="pane-body"
+        :style="{ [current ? 'height' : 'maxHeight']: paneH + 'px' }"
+      >
+        <template v-if="current">
+          <div class="pane-meta">
+            {{ current.start > doneTo(current.device) ? "基于最新初稿 · " : "" }}对话
+            {{ hhmmss(current.start) }} 起 · 到 {{ hhmmss(current.upto) }} 共
+            {{ current.sentences }} 句
+          </div>
+          <Timeline :topics="current.topics" open @jump="jump" />
+        </template>
+        <template v-else-if="last">
+          <div class="pane-meta">
+            对话 {{ hhmmss(last.start) }}–{{ hhmmss(last.end) }} · {{ last.sentences }} 句 ·
+            <RouterLink :to="'/c/' + last.id">查看</RouterLink>
+          </div>
+          <p v-if="last.summary?.status !== 'done'" class="muted">{{ convLink(last) }}</p>
+          <p v-else-if="last.summary.summary">{{ last.summary.summary }}</p>
+          <p v-else class="muted">这段太短，没有生成摘要</p>
+        </template>
+      </div>
+      <div
+        v-if="body && paneOpen"
         class="grip"
         role="separator"
         aria-orientation="horizontal"
@@ -452,9 +568,45 @@ const convLink = (c: Conversation) =>
   border-top: 1px solid var(--line);
   margin-top: 4px;
 }
+.pane-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+.fold {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  padding: 2px 0;
+  text-align: left;
+  font-size: 12px;
+  color: var(--muted);
+}
+.fold:disabled {
+  cursor: default;
+}
+.caret {
+  display: inline-block;
+  width: 14px;
+  color: var(--accent);
+}
+.ask {
+  flex: none;
+  font-size: 12px;
+  padding: 2px 10px;
+}
+.ask:disabled {
+  color: var(--muted);
+  cursor: default;
+}
 .pane-body {
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+.pane-body p {
+  margin: 4px 0;
+  font-size: 14px;
 }
 .pane-meta {
   font-size: 12px;

@@ -31,7 +31,8 @@ def test_metrics(monkeypatch):
                          {"battery": 80, "charge": "charging", "fw": 'a"b\\c\nd'})
     audio.hold("某人的 iPhone", ms)
     st = {"audio_end": now - dt.timedelta(seconds=2), "done_to": None, "progress": [], "latency": [], "final_latency": [4.0],
-          "drafting": False, "last_speech": None, "refine": None, "conversation": None, "draft": None, "draft_to": None}
+          "drafting": False, "last_speech": None, "refine": None, "conversation": None, "draft": None, "draft_to": None,
+          "live_task": None}
     monkeypatch.setitem(server.state, "devices", {"LR-P3-116C": st, "某人的 iPhone": {**st, "audio_end": None, "final_latency": []}})
     monkeypatch.setitem(server.state, "commit", "abc1234")
     for h, cny in ((24, 27.3), (0, 24.1)):  # ¥3.2 a day: 7.5 days left

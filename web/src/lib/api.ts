@@ -108,6 +108,7 @@ export interface LiveState {
   at: string;
   upto: string;
   sentences: number;
+  speech_s: number; // the conversation's speech it has seen
 }
 
 export interface DeviceStatus {
@@ -125,7 +126,8 @@ export interface DeviceStatus {
   queued: number;
   latency_s: number | null;
   refine?: { at: string; ms: number; error?: string; backlog_s?: number } | null;
-  conversation?: { start: string; sentences: number } | null;
+  conversation?: { start: string; end: string; sentences: number; speech_s: number } | null; // the one going on
+  analyzing?: boolean; // its live analysis is running
   hw?: RecorderStatus | null; // a BLE recorder, as its phone last read it
   arrival?: { at: number; lag_s: number } | null; // its newest audio: when it came (unix ms), how long after its end
   sound?: { s: number; zero_s: number; full: number } | null; // its last 10 min of audio: s of it, s in zero runs, full-scale samples
