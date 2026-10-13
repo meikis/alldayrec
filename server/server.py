@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 import apk
@@ -35,6 +35,7 @@ import db
 import firmware
 import hints
 import live
+import mcp_server
 import profiles
 import recap
 import speakers
@@ -1458,6 +1459,25 @@ async def ask_ai(body: dict):
         raise HTTPException(502, f"模型调用失败：{e!r}"[:300])
 
 
+@app.post("/mcp")
+async def mcp(request: Request):
+    """Remote MCP for the owner's agents (mcp_server.py), with the same token as every other client: stateless, JSON only."""
+    if not mcp_server.origin_ok(request.headers):
+        return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32600, "message": "Origin not allowed"}}, 403)
+    try:
+        msg = await request.json()
+    except ValueError:
+        return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}, 400)
+    status, out = await asyncio.to_thread(mcp_server.handle, msg, request.headers)
+    return Response(status_code=202) if out is None else JSONResponse(out, status)
+
+
+@app.api_route("/mcp", methods=["GET", "DELETE"])
+async def mcp_stream():
+    """No server-sent stream and no sessions to end (2026-07-28)."""
+    return Response(status_code=405, headers={"Allow": "POST"})
+
+
 @app.get("/api/recap")
 async def recap_get(date: str = ""):
     """A day's recap, the newest one when no day is given; null when there is none. A todo marked done or wrong since is left out."""
@@ -1541,14 +1561,7 @@ async def resummarize(conv_id: str):
 @app.get("/api/names")
 async def names():
     """Names already in use, most conversations first: suggestions for a rename."""
-    n = {}
-    for c in all_conversations():
-        for p in c.get("participants") or []:
-            if p != "我" and not re.fullmatch(r"S(\d+|\?)", p):
-                n[p] = n.get(p, 0) + 1
-    for p in db.people():
-        n.setdefault(p, 0)
-    return sorted(n, key=lambda k: -n[k])
+    return list(db.names())
 
 
 @app.post("/api/conversation/{conv_id}/rename")

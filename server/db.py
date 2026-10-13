@@ -212,6 +212,18 @@ def search(q: str = "", tag: str = "", kind: str = "", who: str = "", after: str
     return out
 
 
+def names() -> dict[str, int]:
+    """Names in use and their conversations, most first; a voice in the people bank with none yet at 0."""
+    n = {}
+    for c in conversations():
+        for p in c.get("participants") or []:
+            if p != "我" and not re.fullmatch(r"S(\d+|\?)", p):
+                n[p] = n.get(p, 0) + 1
+    for p in people():
+        n.setdefault(p, 0)
+    return dict(sorted(n.items(), key=lambda kv: -kv[1]))
+
+
 def summary(conv_id: str) -> dict | None:
     r = conn().execute("SELECT body FROM summaries WHERE conversation = ?", (conv_id,)).fetchone()
     return json.loads(r["body"]) if r else None
