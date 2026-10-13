@@ -107,6 +107,11 @@ void lr_log(uint8_t code, uint8_t x, uint32_t a, uint32_t b)
     }
 }
 
+uint16_t lr_log_boot(void)
+{
+    return ram.boot;
+}
+
 void lr_log_sync(void)
 {
     flush();

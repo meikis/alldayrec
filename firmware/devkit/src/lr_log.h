@@ -16,7 +16,9 @@
  *     1 BOOT        x battery mV / 20, a RESETREAS (why the last boot ended), b firmware hash (lr.sh's rev; bit 28 dirty)
  *     2 FAULT       a reason, b PC of the crash that ended the previous boot
  *     3 MOUNT       x try, a error: one per SD mount try
- *     4 STORE       a the audio's boot number (file names BBBBSSSS), b free KB: the offline store is up
+ *     4 STORE       a the audio's boot number (file names BBBBSSSS), b free KB: the offline store is up; x bit 0: the
+ *                   card's BOOT did not read back (2 bytes), bit 1: the new count did not write to it, bit 2: a count
+ *                   on the card (BOOT, a file name) too far past the chip's own to be real was left out
  *     5 SLOW        a ms, b bytes: an SD append slower than 1000 ms
  *     6 APPEND_ERR  a error, b bytes: the first failed SD append of a run
  *     7 CARD_FULL   x 1 recording stopped / 0 resumed, a free KB
@@ -89,6 +91,8 @@ enum {
 int lr_log_init(void);
 /* Any thread; never blocks. */
 void lr_log(uint8_t code, uint8_t x, uint32_t a, uint32_t b);
+/* This boot's count in the log (the chip's flash: a card swapped or lost does not reset it). After lr_log_init. */
+uint16_t lr_log_boot(void);
 /* Into the bootloader (GPREGRET 0x57 UF2, 0xA8 OTA), the log written first. */
 void lr_log_reset(uint8_t gpregret);
 /* The RAM batch to flash now, on this thread: before a reset or System OFF. */

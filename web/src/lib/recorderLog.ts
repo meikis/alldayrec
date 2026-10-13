@@ -149,7 +149,8 @@ const EVENTS: Record<number, [string, string, (r: Rec) => string]> = {
     "STORE",
     "离线存储就绪",
     (r) =>
-      `音频批次 ${r.a}（文件 ${hex(r.a, 4).toUpperCase()}xxxx），剩 ${Math.floor(r.b / 1024)} MB`,
+      `音频批次 ${r.a}（文件 ${hex(r.a, 4).toUpperCase()}xxxx），剩 ${Math.floor(r.b / 1024)} MB` +
+      (r.x & 1 ? "；卡上的计数读不出" : "") + (r.x & 2 ? "；新计数没写进卡" : ""),
   ],
   5: ["SLOW", "写卡慢", (r) => `${r.a} ms（${r.b} B）`],
   6: ["APPEND_ERR", "写卡失败", (r) => `${err(r.a)}（${r.b} B）`],

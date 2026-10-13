@@ -984,6 +984,60 @@ int lr_store_init(void)
     return err;
 }
 
+/* The audio's boot numbers name its files (boot << 16 | segment) and the app keeps TIME records and files by them, for
+ * good: a number must never come back. Counted on the card alone it did: a card that lost its /LR (BDAE 10-13 11:18, a
+ * dying card: BOOT read back nothing) started again at 1, and the app timed the new audio by 10-10's records of boot 1
+ * (#207). So a boot also counts past the newest file on the card and past the chip's own count (lr_log, in its flash)
+ * plus BOOT_FLOOR, above anything a card counted before (815 at most, 10-09). A card that is falling apart says
+ * anything (BDAE's /LR was 105 entries of garbage): a count more than BOOT_SLACK past the chip's, or one that would not
+ * fit 16 bits, is not taken; nor is a name other than 8 hex digits and .BIN. */
+#define BOOT_FLOOR 4096
+#define BOOT_SLACK 1000
+
+static bool our_file(const char *name)  /* BBBBSSSS.BIN, as file_path() writes it */
+{
+    for (int i = 0; i < 8; i++) {
+        if (!((name[i] >= '0' && name[i] <= '9') || (name[i] >= 'A' && name[i] <= 'F'))) {
+            return false;
+        }
+    }
+    return !strcmp(name + 8, ".BIN");
+}
+
+static uint32_t newest_file_boot(void)
+{
+    struct fs_dir_t d;
+    struct fs_dirent e;
+    uint32_t newest = 0;
+    fs_dir_t_init(&d);
+    if (fs_opendir(&d, DIR)) {
+        return 0;
+    }
+    while (!fs_readdir(&d, &e) && e.name[0]) {
+        if (e.type == FS_DIR_ENTRY_FILE && our_file(e.name)) {
+            newest = MAX(newest, strtoul(e.name, NULL, 16) >> 16);
+        }
+    }
+    fs_closedir(&d);
+    return newest;
+}
+
+/* The next boot: past the card's count and its newest file, never below the chip's count + BOOT_FLOOR. *wild: a count
+ * on the card was too far past the chip's to be real (garbage) and was left out. */
+static uint16_t next_boot(uint32_t on_card, uint32_t newest, uint32_t chip, bool *wild)
+{
+    uint32_t floor = chip + BOOT_FLOOR, next = floor;
+    for (int i = 0; i < 2; i++) {
+        uint32_t v = i ? newest : on_card;
+        if (v > floor + BOOT_SLACK || v + 1 > 0xFFFF) {
+            *wild = true;
+        } else {
+            next = MAX(next, v + 1);
+        }
+    }
+    return MIN(next, 0xFFFF);
+}
+
 /* Mount, set the card up, count this boot into *counted. The caller sets store_err (and boot, under the SD mutex). */
 static int card_init(int (*mount)(void), uint16_t *counted)
 {
@@ -1014,14 +1068,14 @@ static int card_init(int (*mount)(void), uint16_t *counted)
         return err;
     }
     uint8_t b[2] = {0};
-    fs_read(&f, b, 2);
-    *counted = sys_get_le16(b) + 1;
+    bool unread = fs_read(&f, b, 2) != 2, wild = false;
+    *counted = next_boot(sys_get_le16(b), newest_file_boot(), lr_log_boot(), &wild);
     sys_put_le16(*counted, b);
     fs_seek(&f, 0, FS_SEEK_SET);
-    fs_write(&f, b, 2);
+    bool unwritten = fs_write(&f, b, 2) != 2;
     fs_close(&f);
     count_free();
     LOG_INF("boot %u, %u of %u KB free", *counted, free_kb, total_kb);
-    lr_log(LR_STORE, 0, *counted, free_kb);
+    lr_log(LR_STORE, unread | unwritten << 1 | wild << 2, *counted, free_kb);
     return 0;
 }

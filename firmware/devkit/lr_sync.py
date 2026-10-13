@@ -327,7 +327,7 @@ EVENTS = {
     1: ("BOOT", lambda x, a, b: f"reset {reas(a)} (0x{a:x}), battery {x * 20} mV, fw {b & 0xFFFFFFF:07x}{'+' * (b >> 28 & 1)}"),
     2: ("FAULT", lambda x, a, b: f"{FAULT[a] if a < len(FAULT) else a}, PC 0x{b:08x} (previous boot)"),
     3: ("MOUNT", lambda x, a, b: f"try {x}: {err(a)}"),
-    4: ("STORE", lambda x, a, b: f"audio boot {a} (files {a:04X}xxxx), {b // 1024} MB free"),
+    4: ("STORE", lambda x, a, b: f"audio boot {a} (files {a:04X}xxxx), {b // 1024} MB free" + ", BOOT unread" * (x & 1) + ", BOOT unwritten" * (x >> 1 & 1)),
     5: ("SLOW", lambda x, a, b: f"SD append {a} ms ({b} B)"),
     6: ("APPEND_ERR", lambda x, a, b: f"{err(a)} ({b} B)"),
     7: ("CARD_FULL", lambda x, a, b: f"{'recording stopped' if x else 'resumed'}, {a} KB free"),

@@ -205,10 +205,22 @@ static uint8_t card[FILES][1 << 16];
 static uint32_t card_len[FILES];
 static int card_fail;  // writes fail with this
 static int seg_of(const char *path) { return strstr(path, ".BIN") ? (int) (strtoul(strstr(path, ".BIN") - 4, 0, 16)) : -1; }
-static int fs_open(struct fs_file_t *f, const char *path, int flags) { f->f = seg_of(path); f->pos = 0; return 0; }
+#define BOOT_F (-2)  // /SD:/LR/BOOT, the card's boot count
+static uint8_t boot_file[2];
+static uint32_t boot_len;
+static int boot_fail;  // BOOT's writes fail with this
+static int fs_open(struct fs_file_t *f, const char *path, int flags) { f->f = strstr(path, "/BOOT") ? BOOT_F : seg_of(path); f->pos = 0; return 0; }
 static int fs_close(struct fs_file_t *f) { return 0; }
 static ssize_t fs_write(struct fs_file_t *f, const void *d, size_t n)
 {
+    if (f->f == BOOT_F) {
+        if (boot_fail) {
+            return boot_fail;
+        }
+        memcpy(boot_file + f->pos, d, n);
+        boot_len = MAX(boot_len, f->pos + n);
+        return n;
+    }
     if (card_fail) {
         return card_fail;
     }
@@ -221,8 +233,8 @@ static ssize_t fs_write(struct fs_file_t *f, const void *d, size_t n)
 }
 static ssize_t fs_read(struct fs_file_t *f, void *d, size_t n)
 {
-    n = MIN(n, card_len[f->f] - f->pos);
-    memcpy(d, card[f->f] + f->pos, n);
+    n = MIN(n, (f->f == BOOT_F ? boot_len : card_len[f->f]) - f->pos);
+    memcpy(d, (f->f == BOOT_F ? boot_file : card[f->f]) + f->pos, n);
     f->pos += n;
     now_ms += read_ms;
     return n;
@@ -231,14 +243,23 @@ static int fs_seek(struct fs_file_t *f, long o, int w) { f->pos = o; return 0; }
 static int fs_sync(struct fs_file_t *f) { return 0; }
 static void fs_file_t_init(struct fs_file_t *f) {}
 static void fs_dir_t_init(struct fs_dir_t *d) {}
-static int fs_opendir(struct fs_dir_t *d, const char *p) { return -ENOENT; }
-static int fs_readdir(struct fs_dir_t *d, struct fs_dirent *e) { return -ENOENT; }
+static const char *dir[4];  // /LR's files, for the boot count (none: no directory)
+static int dir_n, dir_at;
+static int fs_opendir(struct fs_dir_t *d, const char *p) { return dir_n ? (dir_at = 0) : -ENOENT; }
+static int fs_readdir(struct fs_dir_t *d, struct fs_dirent *e)
+{
+    e->type = FS_DIR_ENTRY_FILE;
+    strcpy(e->name, dir_at < dir_n ? dir[dir_at++] : "");
+    return 0;
+}
 static int fs_closedir(struct fs_dir_t *d) { return 0; }
 static int fs_mkdir(const char *p) { return 0; }
 static int fs_unlink(const char *p) { return 0; }
 static int fs_statvfs(const char *p, struct fs_statvfs *v) { v->f_bfree = v->f_blocks = 1 << 20; v->f_frsize = 4096; return 0; }
 
 struct k_mutex write_sdcard_mutex;
+static uint16_t chip_boot;  // lr_log's own count
+uint16_t lr_log_boot(void) { return chip_boot; }
 uint32_t transport_frame_no;
 uint32_t lr_sd_err[5];  // sdcard.h: the SD driver's failed tries
 #include "../src/lr_store.c"
@@ -291,7 +312,7 @@ static void parse(const uint8_t *b, uint32_t n, int *a_frames, int *syncs)
 
 int main(void)
 {
-    assert(lr_store_init() == 0 && boot == 1 && store_err == 0);
+    assert(lr_store_init() == 0 && boot == BOOT_FLOOR && store_err == 0);  // a new card, the chip's first boot
 
     frames(0, 950);       // 9.5 s: several batches
     put_sync(950, 123);   // a phone's TIME
@@ -499,6 +520,33 @@ int main(void)
     lr_store_shutdown();
     assert(n_logged == 1 && logged[0].code == LR_APPEND_ERR && logged[0].x == 2 && (int32_t) logged[0].a == -EDEADLK);
     card_held = false;
+
+    // the boot count (#207): never one used before, whatever the card says
+    uint16_t c;
+    n_logged = 0, boot_len = 0, chip_boot = 7;  // a new card (no BOOT yet), the chip's 7th boot
+    assert(card_init(mount_sd_card, &c) == 0 && c == 7 + BOOT_FLOOR && sys_get_le16(boot_file) == c);
+    assert(logged[0].code == LR_STORE && logged[0].x == 1 && logged[0].a == c);  // BOOT did not read back
+    chip_boot = 8;  // the next boot: card and chip agree
+    assert(card_init(mount_sd_card, &c) == 0 && c == 8 + BOOT_FLOOR && logged[1].x == 0);
+    sys_put_le16(22, boot_file), chip_boot = 116;  // a card counted the old way (10-13: 22)
+    assert(card_init(mount_sd_card, &c) == 0 && c == 116 + BOOT_FLOOR);
+    boot_len = 0, dir[0] = "10800003.BIN", dir[1] = "BOOT", dir_n = 2;  // BOOT lost, a newer file there
+    assert(card_init(mount_sd_card, &c) == 0 && c == 0x1081 && logged[3].x == 1);
+    boot_len = 0, boot_fail = -EIO;  // a count that neither reads nor writes: said, and the boot goes on
+    assert(card_init(mount_sd_card, &c) == 0 && c == 0x1081 && logged[4].x == (1 | 2));
+    boot_fail = 0;
+    // a card falling apart (BDAE 10-13: /LR all garbage): names not ours left out, counts far past the chip's too
+    dir[0] = "12G4ABCD.BIN", dir[1] = "10900003.BI~", dir[2] = "1090000.BIN", dir_n = 3;  // ~ 4240 if read as hex
+    boot_len = 0;
+    assert(card_init(mount_sd_card, &c) == 0 && c == 116 + BOOT_FLOOR && logged[5].x == 1);
+    dir[0] = "FFFF1234.BIN", dir_n = 1;  // hex, but no boot ever got that far: left out, and said
+    boot_len = 0;
+    assert(card_init(mount_sd_card, &c) == 0 && c == 116 + BOOT_FLOOR && logged[6].x == (1 | 4));
+    dir_n = 0, sys_put_le16(0xFFFF, boot_file);  // BOOT garbage: no wrap to 0
+    assert(card_init(mount_sd_card, &c) == 0 && c == 116 + BOOT_FLOOR && logged[7].x == 4);
+    dir_n = 1, sys_put_le16(0xFFFF, boot_file);  // both
+    assert(card_init(mount_sd_card, &c) == 0 && c == 116 + BOOT_FLOOR && logged[8].x == 4);
+    dir_n = 0;
     printf("store_check ok: %u + %u + %u B on the card\n", card_len[0], card_len[1], card_len[2]);
     return 0;
 }
