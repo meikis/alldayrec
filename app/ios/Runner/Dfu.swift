@@ -15,13 +15,17 @@ enum Dfu {
     l.back(fw)
   }
 
-  /// Why the package may not go onto the bound recorder (error code, message), as MainActivity's "dfu" checks it: the
-  /// model the recorder said it is must be the package's, and the bytes must be the ones the server listed. Nil: go on.
-  static func refusal(want: String?, model: String?, id: String?, linked: Bool, sha256: String, expected: String?) -> (String, String)? {
+  /// Why the package may not go onto the bound recorder (error code, message), as Dfu.refusal in Dfu.kt: the model the
+  /// recorder said it is must be the package's, its revision as last read (`running`) not the package's `version` (#199:
+  /// the same build sent again, a page that offered it from a stale revision), and the bytes must be the ones the
+  /// server listed. Nil: go on.
+  static func refusal(want: String?, model: String?, id: String?, linked: Bool, sha256: String, expected: String?,
+                      version: String?, running: String?) -> (String, String)? {
     if busy { return ("busy", "正在升级") }
     if linked { return ("busy", "录音设备的连接还没断开，稍后再试") }
     guard let model, id.flatMap(UUID.init(uuidString:)) != nil else { return ("none", "还没连上过录音设备，不知道它的型号") }
     if want != model { return ("model", "这个固件是 \(want ?? "?") 的，录音设备是 \(model)，不能刷") }
+    if let version, version == running { return ("same", "录音设备已经是 \(version)，不用再升级") }
     if sha256 != expected { return ("sha256", "固件下载不完整，再试一次") }
     return nil
   }

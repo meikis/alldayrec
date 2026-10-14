@@ -29,6 +29,7 @@ extension Dfu {
     state = s
     busy = false
     run = nil
+    Recorder.relink()
   }
 
   fileprivate static func failed(_ why: String, code: Int? = nil) {
@@ -133,7 +134,10 @@ private final class DfuRun: NSObject, CBCentralManagerDelegate, CBPeripheralDele
     switch s {
     case .starting: Dfu.state = "开始升级"; Dfu.log?.reached("boot")
     case .uploading: Dfu.log?.reached("send")
-    case .completed: Dfu.log?.done(); Dfu.end("升级完成，录音设备已重启")  // no .aborted: nothing here aborts (Android's notification can)
+    case .completed:  // no .aborted: nothing here aborts (Android's notification can)
+      Dfu.log?.done()
+      if let to = Dfu.log?.to { Recorder.defaults.set(to, forKey: "bleFw") }  // what the page shows until the link reads it (#199)
+      Dfu.end("升级完成，录音设备已重启")
     default: break
     }
   }

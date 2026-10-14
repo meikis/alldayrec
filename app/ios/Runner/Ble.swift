@@ -453,7 +453,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       try subscribe(p, Ble.data)
       try subscribe(p, Ble.live)  // before LIST: nothing the stream adds after it is missed
       var synced = try step("给设备对时") { try sync(p) }
-      let st = try step("读取设备状态") { try status(p, name) }
+      let st = try step("读取设备状态") { try status(p, name, fresh: true) }
       Ble.log("status: boot \(st.boot) frame \(st.frame) mtu \(q.sync { p.p.maximumWriteValueLength(for: .withoutResponse) } + 3) \(hw)")
       if adding {
         if prefs.bool(forKey: "bindForce") {
@@ -551,8 +551,10 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
   private struct Status { let boot: Int, frame: Int64, store: Int, at: Int64 }  // at: the phone's clock as it was read
 
-  /// The board's state, kept for the app's page and sent to the server under the board's name.
-  private func status(_ p: Conn, _ name: String) throws -> Status {
+  /// The board's state, kept for the app's page and sent to the server under the board's name. Its model and revision
+  /// are read again on each connection (`fresh`): a board flashed over USB meanwhile came back on another one, and the
+  /// page offered it the update it already ran (#199).
+  private func status(_ p: Conn, _ name: String, fresh: Bool = false) throws -> Status {
     let t = try read(p, Ble.store, Ble.time)
     guard t.count >= 16 else { throw Fail(description: "状态只有 \(t.count) 字节") }
     let s = Status(boot: Int(Store.le(t, 0, 2)), frame: Ble.u32(t, 2), store: Int(Int16(truncatingIfNeeded: Store.le(t, 6, 2))), at: Recorder.now())
@@ -572,7 +574,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       pausedUntil = left > 0 ? Recorder.now() + left * 1000 : 0
     }
     for (k, c) in [("model", Ble.model), ("fw", Ble.fwRev)] {
-      h[k] = hw[k] as? String ?? (try? read(p, Ble.dis, c)).map { String(decoding: $0, as: UTF8.self) } ?? NSNull()
+      h[k] = (fresh ? nil : hw[k] as? String) ?? (try? read(p, Ble.dis, c)).map { String(decoding: $0, as: UTF8.self) } ?? NSNull()
     }
     hw = h
     prefs.set(h["model"] as? String, forKey: "bleModel")  // for the page while not connected

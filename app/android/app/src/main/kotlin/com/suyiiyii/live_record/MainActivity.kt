@@ -153,16 +153,14 @@ class MainActivity : FlutterActivity() {
                     val addr = p.getString("bleAddress", null); val model = p.getString("bleModel", null)
                     val want = call.argument<String>("model"); val zip = call.argument<ByteArray>("zip")!!
                     val sha = java.security.MessageDigest.getInstance("SHA-256").digest(zip).joinToString("") { "%02x".format(it) }
-                    if (Dfu.busy) result.error("busy", "正在升级", null)
-                    else if (RecorderService.slicer != null) result.error("busy", "录音设备的连接还没断开，稍后再试", null)
-                    else if (addr == null || model == null) result.error("none", "还没连上过录音设备，不知道它的型号", null)
-                    else if (want != model) result.error("model", "这个固件是 $want 的，录音设备是 $model，不能刷", null)
-                    else if (sha != call.argument<String>("sha256")) result.error("sha256", "固件下载不完整，再试一次", null)
-                    else {
+                    val no = Dfu.refusal(want, model, addr, RecorderService.slicer != null, sha, call.argument<String>("sha256"),
+                                         call.argument<String>("version"), p.getString("bleFw", null))
+                    if (no != null) result.error(no.first, no.second, null)
+                    else {  // refusal() checked both
                         val f = File(cacheDir, "$model.zip").apply { writeBytes(zip) }
-                        Dfu.log = DfuLog(Ble.tag(p.getString("bleName", null) ?: model), p.getString("bleFw", null),
+                        Dfu.log = DfuLog(Ble.tag(p.getString("bleName", null) ?: model!!), p.getString("bleFw", null),
                                          call.argument<String>("version") ?: "?", zip.size, sha, call.argument<Int>("battery"))
-                        Dfu.start(this, addr, p.getString("bleName", null) ?: model, f); result.success(null)
+                        Dfu.start(this, addr!!, p.getString("bleName", null) ?: model!!, f); result.success(null)
                     }
                 }
                 "app" -> packageManager.getPackageInfo(packageName, 0).let {  // this build, and where update.dart puts a newer one

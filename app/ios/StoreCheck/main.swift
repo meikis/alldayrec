@@ -458,8 +458,9 @@ do {
 // a firmware update: only the recorder's own model, only the bytes the server listed, only with the link down
 do {
   let id = UUID().uuidString, sha = String(repeating: "ab", count: 32)
-  func no(want: String? = "LR-P3", model: String? = "LR-P3", id: String? = id, linked: Bool = false, sha256: String = sha) -> String? {
-    Dfu.refusal(want: want, model: model, id: id, linked: linked, sha256: sha256, expected: sha)?.0
+  func no(want: String? = "LR-P3", model: String? = "LR-P3", id: String? = id, linked: Bool = false, sha256: String = sha,
+          running: String? = "20261009.183242-1749146") -> String? {
+    Dfu.refusal(want: want, model: model, id: id, linked: linked, sha256: sha256, expected: sha, version: "20261011.164128-098861b", running: running)?.0
   }
   check(no(), nil, "the recorder's model, the listed bytes: go")
   check(no(want: "LR-X1"), "model", "another model's package")
@@ -469,6 +470,8 @@ do {
   check(no(id: nil), "none", "no recorder bound")
   check(no(id: "LR-P3-116C"), "none", "a name where the identifier goes")
   check(no(linked: true), "busy", "the link still up")
+  check(no(running: "20261011.164128-098861b"), "same", "#199: the version the recorder runs already")
+  check(no(running: nil), nil, "a revision never read: go")
   Dfu.busy = true
   check(no(), "busy", "an update under way")
   Dfu.busy = false

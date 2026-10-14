@@ -54,4 +54,23 @@ class DfuLogTest {
         done.done(); done.back(old)
         assertEquals(listOf("升级后连回，用时 0 秒，固件 $old，不是目标版本", "warn"), listOf(got.last().text, got.last().level))
     }
+
+    /** What an update checks first, StoreCheck's case for Dfu.swift: only the recorder's own model, not the version it
+     *  runs already (#199: 098861b sent to a board on 098861b, the page offering it from a stale revision), only the
+     *  bytes the server listed, only with the link down. */
+    @Test fun refusal() {
+        val sha = "ab".repeat(32); val running = "20261009.183242-1749146"; val version = "20261011.164128-098861b"
+        fun no(want: String? = "LR-P3", model: String? = "LR-P3", address: String? = "AA:BB", linked: Boolean = false,
+               sha256: String = sha, running: String? = "20261009.183242-1749146") =
+            Dfu.refusal(want, model, address, linked, sha256, sha, version, running)?.first
+        assertEquals(null, no())  // the recorder's model, a newer version, the listed bytes: go
+        assertEquals("same", no(running = version))
+        assertEquals(null, no(running = null))  // a revision never read: go
+        assertEquals("model", no(want = "LR-X1"))
+        assertEquals("none", no(model = null))
+        assertEquals("none", no(address = null))
+        assertEquals("sha256", no(sha256 = "ab".repeat(31) + "ac"))
+        assertEquals("busy", no(linked = true))
+        assertEquals(null, no(running = running))
+    }
 }

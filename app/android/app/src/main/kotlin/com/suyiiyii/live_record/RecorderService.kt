@@ -47,6 +47,19 @@ class RecorderService : Service() {
                 "listen" to link?.listening?.lines)
         }
 
+        /** A firmware update ended (Dfu.kt): the BLE link back at once, set up as the last start left it, as the home
+         *  page's ticker would bring it (on iOS the ticker does not run in the background: 18 min without LIVE, #199).
+         *  From the background the system may refuse a foreground service start: the ticker is left to it then. */
+        fun relink(ctx: Context) {
+            val p = ctx.getSharedPreferences("recorder", Context.MODE_PRIVATE)
+            if (slicer != null || p.getString("source", "mic") != "ble") return
+            val i = Intent(ctx, RecorderService::class.java).putExtra("nonce", System.currentTimeMillis())
+            for (k in listOf("server", "token", "device", "source")) i.putExtra(k, p.getString(k, null))
+            for (k in listOf("foreground", "background", "screenOff")) i.putExtra(k, p.getInt(k, 20))
+            i.putExtra("archive", p.getBoolean("archive", true))
+            try { ctx.startForegroundService(i) } catch (e: Exception) { Log.w("live-record", "relink after dfu: $e") }
+        }
+
         /** The recorder's card when it does not record to it, as main.dart cardState says it: store an errno, total_kb 0
          *  when none mounted this boot (no card, or one not seated: -19, a mount that timed out -116). */
         fun cardLine(store: Int?, totalKb: Long?): String? = when {

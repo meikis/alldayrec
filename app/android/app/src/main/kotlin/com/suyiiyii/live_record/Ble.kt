@@ -331,7 +331,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             subscribe(g, Ble.STORE, Ble.DATA)
             subscribe(g, Ble.STORE, Ble.LIVE)  // first: nothing the stream adds after LIST is missed
             var synced = step("给设备对时") { sync(g) }
-            val st = step("读取设备状态") { status(g, name) }
+            val st = step("读取设备状态") { status(g, name, fresh = true) }
             Log.i("live-record", "ble status: boot ${st.boot} frame ${st.frame} " + hw.entries.joinToString(" ") { "${it.key}=${it.value}" })
             if (adding) {
                 if (prefs.getBoolean("bindForce", false)) step("让录音设备忘掉其他手机") {
@@ -501,8 +501,10 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         return null
     }
 
-    /** The board's state, kept for the app's page and sent to the server under the board's name. */
-    private fun status(g: BluetoothGatt, name: String): Status {
+    /** The board's state, kept for the app's page and sent to the server under the board's name. Its model and revision
+     *  are read again on each connection ([fresh]): a board flashed over USB meanwhile came back on another one, and the
+     *  page offered it the update it already ran (#199). */
+    private fun status(g: BluetoothGatt, name: String, fresh: Boolean = false): Status {
         val raw = read(g, Ble.STORE, Ble.TIME)
         val t = le(raw)
         val s = Status(t.getShort(0).toInt() and 0xffff, t.getInt(2).toLong() and 0xffffffffL, t.getShort(6).toInt(), System.currentTimeMillis())
@@ -518,7 +520,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             "rssi" to rssi(g))
         if (t.limit() >= 47) pausedUntil = t.getInt(43).toLong().let { if (it > 0) System.currentTimeMillis() + it * 1000 else 0L }
         for ((k, c) in listOf("model" to Ble.MODEL, "fw" to Ble.FW_REV))
-            h[k] = hw[k] ?: try { String(read(g, Ble.DIS, c)) } catch (e: Exception) { null }
+            h[k] = (if (fresh) null else hw[k]) ?: try { String(read(g, Ble.DIS, c)) } catch (e: Exception) { null }
         hw = h
         prefs.edit().putString("bleModel", h["model"] as String?).putString("bleFw", h["fw"] as String?).apply()  // for an update later
         Dfu.back(h["fw"] as String?)  // the first status after an update, for its log

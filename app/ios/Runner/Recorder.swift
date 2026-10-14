@@ -102,7 +102,8 @@ enum Recorder {
       case "dfu":  // a package from the server for `model`: only onto a recorder that said it is that model (DfuRun.swift)
         let zip = (a["zip"] as? FlutterStandardTypedData)?.data ?? Data(), id = defaults.string(forKey: "bleId")
         if let no = Dfu.refusal(want: a["model"] as? String, model: defaults.string(forKey: "bleModel"), id: id,
-                                linked: slicer != nil || link != nil, sha256: Dfu.sha256(zip), expected: a["sha256"] as? String) {
+                                linked: slicer != nil || link != nil, sha256: Dfu.sha256(zip), expected: a["sha256"] as? String,
+                                version: a["version"] as? String, running: defaults.string(forKey: "bleFw")) {
           return result(FlutterError(code: no.0, message: no.1, details: nil))
         }
         Dfu.log = DfuLog(device: Ble.tag(defaults.string(forKey: "bleName") ?? id!), from: defaults.string(forKey: "bleFw"),
@@ -129,6 +130,16 @@ enum Recorder {
             "hw": l?.hw ?? NSNull(), "usbNote": l?.usbNote ?? NSNull(), "lastSync": l?.syncNote ?? NSNull(),
             "syncDone": l?.syncDoneKb ?? NSNull(), "syncTotal": l?.syncTotalKb ?? NSNull(), "syncLive": l?.syncLiveKb ?? NSNull(), "pausedUntil": l?.pausedUntil ?? NSNull(),
             "dfu": Dfu.state ?? NSNull(), "dfuBusy": Dfu.busy, "listen": l?.listening?.lines ?? NSNull()]
+  }
+
+  /// A firmware update ended (DfuRun.swift): the BLE link back at once, set up as the last start left it. The home
+  /// page's ticker would start it, but iOS does not run it in the background, and nothing else wakes the app with the
+  /// link down: after an update in the background, 18 min without LIVE until iOS relaunched the app (#199). Started
+  /// here, the link's connect request waits for the recorder's reboot and wakes the app for it.
+  static func relink() {
+    guard slicer == nil, link == nil, defaults.string(forKey: "source") == "ble" else { return }
+    _ = start(Dictionary(uniqueKeysWithValues: ["server", "token", "device", "source", "archive", "foreground", "background"]
+      .compactMap { k in defaults.object(forKey: k).map { (k, $0) } }))
   }
 
   /// The piece length the BLE link cuts the live file into (the microphone's Slicer has its own).
