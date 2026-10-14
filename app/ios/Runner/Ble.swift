@@ -53,6 +53,22 @@ enum Ble {
   }
   static let chargeEvery: TimeInterval = 5  // that byte read this often while no READ runs: a plug or unplug shows within seconds
 
+  /// The card's state in a status read (bytes 6-7): 0 storing, else -errno (-16: lent as a USB disk).
+  static func store(_ status: [UInt8]) -> Int { Int(Int16(truncatingIfNeeded: Store.le(status, 6, 2))) }
+
+  /// What the USB disk switch says after CTRL 0x06 asked for `on`: `err` its answer (nil: none in 15 s), `store` the
+  /// card's state the board reports since. A slow card answers late (#208: lend() flushes, closes and unmounts before it
+  /// answers; 10-13 BDAE went past 15 s and the app said it failed, a second tap took the disk back): no answer is not a
+  /// failure, the board's state is what the switch shows and the note says.
+  static func usbNote(on: Bool, err: Int?, store: Int) -> String? {
+    if err == -107 { return "录音设备没接在电脑的 USB 上" }
+    if let err, err != 0 { return "切换失败 \(err)" }
+    if (store == -16) != on {
+      return (on ? "还没切到 U 盘模式" : "还在 U 盘模式") + "（录音设备没有及时回应，卡慢时会晚一些；开关跟着录音设备的状态）"
+    }
+    return on ? "U 盘模式：电脑上出现 OMI 盘（约 20 秒）；用完先在电脑上推出，再切回" : nil
+  }
+
   static func hhmm() -> String {
     let f = DateFormatter()
     f.dateFormat = "HH:mm"
@@ -151,6 +167,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   @Shared var files = 0                // pieces made
   @Shared var pausedUntil: Int64 = 0   // wall ms the recorder's pause ends (0: recording), as last known
   @Shared var usbNote: String?
+  private var usbAsk: (on: Bool, err: Int?)?  // the switch's last ask, until the board reports that state (status())
   @Shared var syncNote: String?        // the last catch-up, for the app's recorder page
   @Shared var syncDoneKb: Int64 = 0    // the catch-up under way: taken of total (0 of 0: none)
   @Shared var syncTotalKb: Int64 = 0
@@ -511,13 +528,14 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
           if reading == nil { try nextRead(p, m) }
           if -lastPieces.timeIntervalSinceNow >= 0.5 { try pieces(m); lastPieces = Date() }
           if Recorder.now() - synced > Ble.timeEveryMs { try endRead(p, m); synced = try sync(p) }
-          var plugged = false
+          var changed = false  // plugged or unplugged, the card lent or back (#208: the USB disk switch follows the board)
           // not while a READ is in flight: the backlog's DATA keeps the link (#130); the minute's status reads it then
           if reading == nil && -lastCharge.timeIntervalSinceNow >= Ble.chargeEvery {
             lastCharge = Date()
-            plugged = Ble.charge(try read(p, Ble.store, Ble.time)) != hw["charge"] as? String
+            let t = try read(p, Ble.store, Ble.time)
+            changed = Ble.charge(t) != hw["charge"] as? String || Ble.store(t) != hw["store"] as? Int
           }
-          if plugged || -lastStatus.timeIntervalSinceNow > 60 {
+          if changed || -lastStatus.timeIntervalSinceNow > 60 {
             _ = try status(p, name)
             if live0 {
               try endRead(p, m)
@@ -557,7 +575,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   private func status(_ p: Conn, _ name: String, fresh: Bool = false) throws -> Status {
     let t = try read(p, Ble.store, Ble.time)
     guard t.count >= 16 else { throw Fail(description: "状态只有 \(t.count) 字节") }
-    let s = Status(boot: Int(Store.le(t, 0, 2)), frame: Ble.u32(t, 2), store: Int(Int16(truncatingIfNeeded: Store.le(t, 6, 2))), at: Recorder.now())
+    let s = Status(boot: Int(Store.le(t, 0, 2)), frame: Ble.u32(t, 2), store: Ble.store(t), at: Recorder.now())
     noCard = s.store < 0 && Ble.u32(t, 12) == 0
     let left = syncTotalKb - syncDoneKb, rate = caughtSince.map { Double(caught) / max(1, -$0.timeIntervalSinceNow) } ?? 0
     let dbm = try rssi(p)
@@ -577,6 +595,10 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       h[k] = (fresh ? nil : hw[k] as? String) ?? (try? read(p, Ble.dis, c)).map { String(decoding: $0, as: UTF8.self) } ?? NSNull()
     }
     hw = h
+    if let a = usbAsk {
+      usbNote = Ble.usbNote(on: a.on, err: a.err, store: s.store)
+      if a.err != nil || (s.store == -16) == a.on { usbAsk = nil }
+    }
     prefs.set(h["model"] as? String, forKey: "bleModel")  // for the page while not connected
     prefs.set(h["fw"] as? String, forKey: "bleFw")
     DispatchQueue.main.async { Dfu.back(h["fw"] as? String) }  // the first status after an update, for its log
@@ -632,11 +654,10 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     guard peripheral?.state == .connected else { usbNote = "录音设备没连上"; return }
     usbNote = on ? "正在切换到 U 盘模式" : "正在切回录音"
     jobs.put { [self] p in
-      let err = try reply(p, [6, on ? 1 : 0], 0x86).map { Int8(bitPattern: $0[5]) }
-      Ble.log("usb disk \(on): \(err.map { "\($0)" } ?? "-")")
-      usbNote = if let err { err == -107 ? "录音设备没接在电脑的 USB 上" : err != 0 ? "切换失败 \(err)"
-                              : on ? "U 盘模式：电脑上出现 OMI 盘（约 20 秒）；用完先在电脑上推出，再切回" : nil }
-                else { "录音设备没有回应" }
+      let err = try reply(p, [6, on ? 1 : 0], 0x86).map { Int(Int8(bitPattern: $0[5])) }
+      Ble.log("usb disk \(on): \(err.map { "\($0)" } ?? "no answer")")
+      usbAsk = (on, err)
+      _ = try status(p, prefs.string(forKey: "bleName") ?? p.p.identifier.uuidString)  // the note and the switch from what it reports
     }
   }
 

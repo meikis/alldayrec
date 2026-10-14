@@ -92,6 +92,21 @@ object Ble {
     fun charge(status: ByteArray): String? = status.getOrNull(47)?.toInt()?.let { listOf("battery", "charging", "full").getOrNull(it) }
     const val CHARGE_EVERY_MS = 5_000L  // that byte read this often while no READ runs: a plug or unplug shows within seconds
 
+    /** The card's state in a status read (bytes 6-7): 0 storing, else -errno (-16: lent as a USB disk). */
+    fun store(status: ByteArray): Int = ByteBuffer.wrap(status).order(ByteOrder.LITTLE_ENDIAN).getShort(6).toInt()
+
+    /** What the USB disk switch says after CTRL 0x06 asked for [on]: [err] its answer (null: none in 15 s), [store] the
+     *  card's state the board reports since. A slow card answers late (#208: lend() flushes, closes and unmounts before
+     *  it answers; 10-13 BDAE went past 15 s and the app said it failed, a second tap took the disk back): no answer is
+     *  not a failure, the board's state is what the switch shows and the note says. */
+    fun usbNote(on: Boolean, err: Int?, store: Int): String? = when {
+        err == -107 -> "录音设备没接在电脑的 USB 上"
+        err != null && err != 0 -> "切换失败 $err"
+        (store == -16) != on -> (if (on) "还没切到 U 盘模式" else "还在 U 盘模式") + "（录音设备没有及时回应，卡慢时会晚一些；开关跟着录音设备的状态）"
+        on -> "U 盘模式：电脑上出现 OMI 盘（约 20 秒）；用完先在电脑上推出，再切回"
+        else -> null
+    }
+
     /** The phone's own bond goes too (hidden API, as BLE libraries call it): a bond the recorder has forgotten would
      *  only fail to encrypt when this phone binds it again. */
     fun removeBond(d: BluetoothDevice): Boolean = try {
@@ -387,9 +402,10 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
                 if (now - lastPieces >= 500) { pieces(m); lastPieces = now }
                 if (System.currentTimeMillis() - synced > Ble.TIME_EVERY_MS) { endRead(g, m); synced = sync(g) }
                 // not while a READ is in flight: the backlog's DATA keeps the link (#130); the minute's status reads it then
-                val plugged = reading == null && now - lastCharge >= Ble.CHARGE_EVERY_MS &&
-                    run { lastCharge = now; Ble.charge(read(g, Ble.STORE, Ble.TIME)) != hw["charge"] }
-                if (plugged || now - lastStatus > 60_000) {
+                // plugged or unplugged, the card lent or back (#208: the USB disk switch follows the board)
+                val changed = reading == null && now - lastCharge >= Ble.CHARGE_EVERY_MS &&
+                    run { lastCharge = now; read(g, Ble.STORE, Ble.TIME).let { Ble.charge(it) != hw["charge"] || Ble.store(it) != hw["store"] } }
+                if (changed || now - lastStatus > 60_000) {
                     status(g, name)
                     if (live0) {
                         endRead(g, m)
@@ -466,6 +482,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
     /** What the app asks of the connected board, run on the session thread between status reads. */
     private val jobs = LinkedBlockingQueue<(BluetoothGatt) -> Unit>()
     @Volatile var usbNote: String? = null
+    private var usbAsk: Pair<Boolean, Int?>? = null  // the switch's last ask (on, its answer), until the board reports that state (status())
     @Volatile var syncNote: String? = null  // the last catch-up, for the app's recorder page
     @Volatile var syncDoneKb = 0L           // the catch-up under way: taken of total (0 of 0: none)
     @Volatile var syncTotalKb = 0L
@@ -476,16 +493,10 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         if (gatt == null) { usbNote = "录音设备没连上"; return }
         usbNote = if (on) "正在切换到 U 盘模式" else "正在切回录音"
         jobs.put { g ->
-            val r = reply(g, byteArrayOf(6, if (on) 1 else 0), 0x86)
-            val err = r?.get(5)?.toInt()
-            Log.i("live-record", "ble usb disk $on: $err")
-            usbNote = when {
-                err == null -> "录音设备没有回应"
-                err == -107 -> "录音设备没接在电脑的 USB 上"
-                err != 0 -> "切换失败 $err"
-                on -> "U 盘模式：电脑上出现 OMI 盘（约 20 秒）；用完先在电脑上推出，再切回"
-                else -> null
-            }
+            val err = reply(g, byteArrayOf(6, if (on) 1 else 0), 0x86)?.get(5)?.toInt()
+            Log.i("live-record", "ble usb disk $on: ${err ?: "no answer"}")
+            usbAsk = on to err
+            status(g, prefs.getString("bleName", null) ?: g.device.name ?: g.device.address)  // the note and the switch from what it reports
         }
     }
 
@@ -507,7 +518,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
     private fun status(g: BluetoothGatt, name: String, fresh: Boolean = false): Status {
         val raw = read(g, Ble.STORE, Ble.TIME)
         val t = le(raw)
-        val s = Status(t.getShort(0).toInt() and 0xffff, t.getInt(2).toLong() and 0xffffffffL, t.getShort(6).toInt(), System.currentTimeMillis())
+        val s = Status(t.getShort(0).toInt() and 0xffff, t.getInt(2).toLong() and 0xffffffffL, Ble.store(raw), System.currentTimeMillis())
         noCard = s.store < 0 && t.getInt(12) == 0
         val left = syncTotalKb - syncDoneKb
         val rate = if (caughtSince > 0) caught * 1000.0 / maxOf(1000L, android.os.SystemClock.elapsedRealtime() - caughtSince) else 0.0
@@ -522,6 +533,10 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         for ((k, c) in listOf("model" to Ble.MODEL, "fw" to Ble.FW_REV))
             h[k] = (if (fresh) null else hw[k]) ?: try { String(read(g, Ble.DIS, c)) } catch (e: Exception) { null }
         hw = h
+        usbAsk?.let { (on, err) ->
+            usbNote = Ble.usbNote(on, err, s.store)
+            if (err != null || (s.store == -16) == on) usbAsk = null
+        }
         prefs.edit().putString("bleModel", h["model"] as String?).putString("bleFw", h["fw"] as String?).apply()  // for an update later
         Dfu.back(h["fw"] as String?)  // the first status after an update, for its log
         report(Ble.tag(name), h - "name")

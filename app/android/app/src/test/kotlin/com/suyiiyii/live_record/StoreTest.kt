@@ -208,3 +208,23 @@ class NameTest {
         assertEquals(null, Ble.fullName(listOf("Omi", null), "D6:07:F3:A3:BD:AE"))
     }
 }
+
+/** The USB disk switch after CTRL 0x06 (#208): what the board reports decides, an answer that came late is no failure.
+ *  10-13 BDAE: the card lent after more than 15 s, the app said 录音设备没有回应, a second tap took the disk back. */
+class UsbDiskTest {
+    private fun status(store: Int) = ByteArray(48).also { java.nio.ByteBuffer.wrap(it).order(java.nio.ByteOrder.LITTLE_ENDIAN).putShort(6, store.toShort()) }
+
+    @Test fun note() {
+        assertEquals(-16, Ble.store(status(-16)))
+        assertEquals(-5, Ble.store(status(-5)))
+        val lent = "U 盘模式：电脑上出现 OMI 盘（约 20 秒）；用完先在电脑上推出，再切回"
+        assertEquals(lent, Ble.usbNote(true, 0, -16))
+        assertEquals(lent, Ble.usbNote(true, null, -16))  // no answer in 15 s, yet the board reports the card lent
+        assertEquals("还没切到 U 盘模式（录音设备没有及时回应，卡慢时会晚一些；开关跟着录音设备的状态）", Ble.usbNote(true, null, 0))
+        assertEquals(null, Ble.usbNote(false, 0, 0))
+        assertEquals(null, Ble.usbNote(false, null, 0))  // back, the answer late
+        assertEquals("还在 U 盘模式（录音设备没有及时回应，卡慢时会晚一些；开关跟着录音设备的状态）", Ble.usbNote(false, null, -16))
+        assertEquals("录音设备没接在电脑的 USB 上", Ble.usbNote(true, -107, 0))
+        assertEquals("切换失败 -19", Ble.usbNote(true, -19, -19))
+    }
+}
