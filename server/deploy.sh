@@ -4,9 +4,10 @@
 #   server/deploy.sh check      # check what runs now (read only)
 #   server/deploy.sh rollback   # put back what the last deploy replaced (code, web, columns it added), restart, check
 # Instances are dir:unit; LR_INSTANCES replaces them (a throwaway test instance). Each serves the tenants in its
-# <dir>/tenants.json (server/tenant.py; made from its .env once by server/tenants.sh), asked as them. Each deploy keeps a
-# backup with a copy of every tenant's live.db in <dir>/backup-deploy-<time>, <dir>/backup-last points at it; a deploy that
-# passes its check keeps only its own and the one before.
+# <dir>/tenants.json (server/tenant.py; made from its .env once by server/tenants.sh), asked as them; a deploy installs
+# nothing anywhere unless the new server reads every instance's tenants.json (a server without one stops at its start).
+# Each deploy keeps a backup with a copy of every tenant's live.db in <dir>/backup-deploy-<time>, <dir>/backup-last points
+# at it; a deploy that passes its check keeps only its own and the one before.
 set -euo pipefail
 HOST=suyiiyii@203.0.113.10
 INSTANCES=${LR_INSTANCES:-/opt/lr-prod:lr-prod /opt/lr-prod2:lr-prod2 /opt/live-record:live-record}
@@ -36,7 +37,7 @@ fi
 # in WSL on the deploy host, as root: remote <mode> <dir:unit>...
 mode=$2; shift 2
 RUN=$(date +%Y%m%d-%H%M%S)
-TGZ=/mnt/c/Users/me/lr-deploy.tgz  # where scp put it (the Windows home)
+TGZ=${LR_TGZ:-/mnt/c/Users/me/lr-deploy.tgz}  # where scp put it (the Windows home); LR_TGZ: test_deploy.py's
 UV=/root/.local/bin/uv
 
 env_of() { grep "^$2=" "$1/.env" | tail -1 | cut -d= -f2-; }  # dir key: the last one wins, as in systemd
@@ -162,6 +163,12 @@ stopped() {  # on exit: what a failed deploy left
   if [ -n "${INSTALLED:-}" ]; then echo "stopped; installed on$INSTALLED, undo with: server/deploy.sh rollback"; else echo "stopped; nothing installed"; fi
 }
 trap 'stopped $?' EXIT
+if [ "$mode" = deploy ]; then  # every instance's tenants.json as its new server reads it: the release's tenant.py, then load()
+  for i in "$@"; do
+    { tar -xOzf "$TGZ" ./tenant.py; echo 'import sys; load(Path(sys.argv[1]))'; } | "${i%%:*}/server/.venv/bin/python" - "${i%%:*}/tenants.json" ||
+      { echo "  stop: the new server cannot read ${i%%:*}/tenants.json (server/tenants.sh migrate first)"; exit 1; }
+  done
+fi
 NEWEST=$(for i in "$@"; do readlink "${i%%:*}/backup-last" || true; done | sed 's|.*/||' | sort | tail -1)
 rc=0
 for i in "$@"; do
