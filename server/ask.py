@@ -8,11 +8,14 @@ import datetime as dt
 import json
 import logging
 import re
-import time
 import urllib.error
+
+import anyio
+import anyio.to_thread
 
 import db
 import summary
+import threads
 
 log = logging.getLogger("live")
 
@@ -185,47 +188,47 @@ def run_tool(name: str, args: str) -> str:
     return json.dumps(res, ensure_ascii=False)[:TOOL_CHARS]
 
 
-def call(msgs: list[dict], **extra) -> dict:
+async def call(msgs: list[dict], **extra) -> dict:
     """summary.call, once more after a 429 (the relay's accounts rate-limit for a while): Retry-After seconds, at most 30."""
     try:
-        return summary.call(msgs, timeout=120, kind="ask", **extra)
+        return await summary.call(msgs, timeout=120, kind="ask", **extra)
     except urllib.error.HTTPError as e:
         if e.code != 429:
             raise
         wait = (e.headers or {}).get("Retry-After") or ""
-        time.sleep(min(float(wait), 30) if wait.replace(".", "", 1).isdigit() else 5)
-        return summary.call(msgs, timeout=120, kind="ask", **extra)
+        await anyio.sleep(min(float(wait), 30) if wait.replace(".", "", 1).isdigit() else 5)
+        return await summary.call(msgs, timeout=120, kind="ask", **extra)
 
 
 CITE = ("上面的回答没有用 [对话 id] 标出处。内容不变，在结论后面标上出处，id 只用前面资料和工具结果里出现过的；"
         "确实没有对应的对话（比如什么都没找到）就照原样回答。")
 
 
-def ask(q: str, now: dt.datetime | None = None) -> dict:
+async def ask(q: str, now: dt.datetime | None = None) -> dict:
     """{answer, sources, calls: the tool calls made, usage: tokens over all rounds}; raises on HTTP errors. An answer
     citing no conversation is asked once more for its citations: the prompt alone left counts uncited (10-05)."""
     msgs = [{"role": "system", "content": system(now or dt.datetime.now())}, {"role": "user", "content": q}]
     calls, usage = [], collections.Counter()
-    def reply(**extra) -> dict:
-        raw = call(msgs, tools=SPECS, **extra)
+    async def reply(**extra) -> dict:
+        raw = await call(msgs, tools=SPECS, **extra)
         u = raw.get("usage") or {}
         usage.update(prompt=u.get("prompt_tokens") or 0, completion=u.get("completion_tokens") or 0,
                      cached=(u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
         return raw["choices"][0]["message"]
     for i in range(ROUNDS + 1):
-        m = reply(**({"tool_choice": "none"} if i == ROUNDS else {}))
+        m = await reply(**({"tool_choice": "none"} if i == ROUNDS else {}))
         if not m.get("tool_calls"):
             break
         msgs.append({"role": "assistant", "content": m.get("content"), "tool_calls": m["tool_calls"]})
         for tc in m["tool_calls"]:
-            out = run_tool(tc["function"]["name"], tc["function"]["arguments"])
+            out = await anyio.to_thread.run_sync(run_tool, tc["function"]["name"], tc["function"]["arguments"], limiter=threads.DB)  # grep scans every row
             calls.append({"tool": tc["function"]["name"], "args": tc["function"]["arguments"], "chars": len(out)})
             msgs.append({"role": "tool", "tool_call_id": tc["id"], "content": out})
     answer = m.get("content") or ""
     if not sources(answer):
         msgs += [{"role": "assistant", "content": answer}, {"role": "user", "content": CITE}]
         try:
-            answer = reply(tool_choice="none").get("content") or answer
+            answer = (await reply(tool_choice="none")).get("content") or answer
         except Exception as e:  # HTTP errors, timeouts: the answer without citations is still the answer
             log.warning("ask: citations not added: %r", e)
     return {"answer": answer, "sources": sources(answer), "calls": calls, "usage": dict(usage)}
@@ -277,42 +280,42 @@ if __name__ == "__main__":
     replies = iter([{"tool_calls": [{"id": "t1", "type": "function", "function": {"name": "grep", "arguments": '{"q": "复查"}'}}]},
                     {"content": "8 月 1 日聊过复查 [c20260801090000]。"}])
     seen = []
-    def fake(msgs, timeout=300, **extra):
+    async def fake(msgs, timeout=300, **extra):
         seen.append((msgs, extra))
         return {"choices": [{"message": next(replies)}], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}
     summary.call = fake
-    r = ask("我什么时候说过复查？", now)
+    r = anyio.run(ask, "我什么时候说过复查？", now)
     assert r["answer"].startswith("8 月 1 日") and [x["id"] for x in r["sources"]] == ["c20260801090000"], r
     assert r["calls"] == [{"tool": "grep", "args": '{"q": "复查"}', "chars": len(run_tool("grep", '{"q": "复查"}'))}] and r["usage"]["prompt"] == 200, r
     assert seen[1][0][-1]["role"] == "tool" and "c20260801090000" in seen[1][0][-1]["content"] and "tool_choice" not in seen[1][1]
     loop = {"tool_calls": [{"id": "t", "type": "function", "function": {"name": "calendar", "arguments": '{"month": "2026-09"}'}}]}
     replies, seen = iter([loop] * ROUNDS + [{"content": "没找到"}, {"content": "没找到"}]), []
-    assert ask("一直查", now)["answer"] == "没找到" and len(seen) == ROUNDS + 2 and seen[ROUNDS][1]["tool_choice"] == "none"
+    assert anyio.run(ask, "一直查", now)["answer"] == "没找到" and len(seen) == ROUNDS + 2 and seen[ROUNDS][1]["tool_choice"] == "none"
     assert seen[-1][0][-1]["content"] == CITE and seen[-1][0][-2]["content"] == "没找到", "no citation: asked once more, kept when none"
     replies, seen = iter([{"content": "9 月 30 日有 2 段对话。"}, {"content": "9 月 30 日有 2 段对话。出处：[c20260930100000]"}]), []
-    r = ask("9 月 30 日有几段对话", now)
+    r = anyio.run(ask, "9 月 30 日有几段对话", now)
     assert [x["id"] for x in r["sources"]] == ["c20260930100000"] and len(seen) == 2 and seen[1][1]["tool_choice"] == "none" and r["usage"]["prompt"] == 200
     def busy(codes):
-        def f(msgs, timeout=300, **extra):
+        async def f(msgs, timeout=300, **extra):
             seen.append(extra)
             if codes:
                 raise urllib.error.HTTPError("u", codes.pop(0), "busy", {"Retry-After": "0"}, None)
             return {"choices": [{"message": {"content": "好了"}}]}
         return f
     summary.call, seen = busy([429]), []
-    assert ask("x", now)["answer"] == "好了" and len(seen) == 3, "one 429: tried again (then once more for citations)"
+    assert anyio.run(ask, "x", now)["answer"] == "好了" and len(seen) == 3, "one 429: tried again (then once more for citations)"
     replies, seen = iter([{"content": "有 2 段。"}]), []
-    def once(msgs, timeout=300, **extra):
+    async def once(msgs, timeout=300, **extra):
         seen.append(extra)
         if len(seen) == 2:
             raise urllib.error.HTTPError("u", 502, "bad gateway", {}, None)
         return {"choices": [{"message": next(replies)}]}
     summary.call = once
-    assert ask("x", now)["answer"] == "有 2 段。" and len(seen) == 2, "the citation call failing keeps the answer"
+    assert anyio.run(ask, "x", now)["answer"] == "有 2 段。" and len(seen) == 2, "the citation call failing keeps the answer"
     for codes, n in (([429, 429], 2), ([503], 1)):  # a second 429 and any other error: raised, no more tries
         summary.call, seen, code = busy(codes), [], codes[-1]
         try:
-            ask("x", now)
+            anyio.run(ask, "x", now)
             raise SystemExit(f"{code} must raise")
         except urllib.error.HTTPError as e:
             assert e.code == code and len(seen) == n, (code, len(seen))

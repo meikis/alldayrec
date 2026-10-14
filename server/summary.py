@@ -8,9 +8,9 @@ import datetime as dt
 import json
 import os
 import time
-import urllib.request
 
 import db
+import net
 
 MIN_SPEECH_S = 60
 PROMPT_VERSION = 8  # 2: tags, 3: people, 4: speech to AI told apart from speech to people, 5: media played aloud, 6: no "there was none" lines, fewer people,
@@ -49,19 +49,19 @@ def transcript(rows: list[dict]) -> str:
     return "\n".join(f'[{r["start"][11:19]}] {r.get("speaker") or "S?"}: {r["text"]}' for r in rows if r.get("text"))
 
 
-def call(messages: list[dict], timeout: int = 300, kind: str = "summary", **extra) -> dict:
+async def call(messages: list[dict], timeout: int = 300, kind: str = "summary", **extra) -> dict:
     """One chat call, extra fields as they are (tools, response_format): the raw response; raises on HTTP errors. Kept
-    in the calls table as `kind` (summary, hints, profile, recap, live, ask): time, tokens, the error, never the text."""
+    in the calls table as `kind` (summary, hints, profile, recap, live, ask): time, tokens, the error, never the text;
+    a call cut off (the task cancelled) too, as CancelledError."""
     req = {"model": os.environ["LLM_MODEL"], "messages": messages, **extra}
     t, usage, err = time.perf_counter(), {}, None
     try:
-        r = urllib.request.urlopen(urllib.request.Request(
-            os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions", json.dumps(req).encode(),
-            {"Authorization": f'Bearer {os.environ["LLM_API_KEY"]}', "Content-Type": "application/json"}), timeout=timeout)
-        out = json.load(r)
+        r = await net.request("POST", os.environ["LLM_BASE_URL"].rstrip("/") + "/chat/completions", timeout, content=json.dumps(req).encode(),
+                              headers={"Authorization": f'Bearer {os.environ["LLM_API_KEY"]}', "Content-Type": "application/json"})
+        out = json.loads(r.content)
         usage = out.get("usage") or {}
         return out
-    except Exception as e:
+    except BaseException as e:
         err = f"{type(e).__name__}: {e}"[:120]
         raise
     finally:
@@ -69,9 +69,9 @@ def call(messages: list[dict], timeout: int = 300, kind: str = "summary", **extr
                     prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"))
 
 
-def complete(messages: list[dict], timeout: int = 300, kind: str = "summary") -> tuple[dict, dict]:
+async def complete(messages: list[dict], timeout: int = 300, kind: str = "summary") -> tuple[dict, dict]:
     """One chat call answering a JSON object: (parsed reply, raw response); raises on HTTP errors and on a reply that is not JSON."""
-    raw = call(messages, timeout, kind, response_format={"type": "json_object"})
+    raw = await call(messages, timeout, kind, response_format={"type": "json_object"})
     return json.loads(raw["choices"][0]["message"]["content"]), raw
 
 
@@ -82,8 +82,8 @@ def instructions(known_tags: list[str], start: str) -> str:
             + f"\n这段对话开始于 {d:%Y-%m-%d}（周{'一二三四五六日'[d.weekday()]}）{d:%H:%M}。")
 
 
-def chat(text: str, known_tags: list[str], start: str) -> tuple[dict, dict]:
-    return complete([{"role": "system", "content": instructions(known_tags, start)}, {"role": "user", "content": text}])
+async def chat(text: str, known_tags: list[str], start: str) -> tuple[dict, dict]:
+    return await complete([{"role": "system", "content": instructions(known_tags, start)}, {"role": "user", "content": text}])
 
 
 def day(x) -> str | None:
@@ -115,13 +115,13 @@ def anchor(res: dict, rows: list[dict]) -> dict:
     return res
 
 
-def summarize(conv: dict, rows: list[dict], known_tags: list[str] = ()) -> dict:
+async def summarize(conv: dict, rows: list[dict], known_tags: list[str] = ()) -> dict:
     base = {"conversation": conv["id"], "prompt_version": PROMPT_VERSION,
             "created_at": dt.datetime.now().isoformat(timespec="seconds"), "error": None}
     if conv.get("speech_s", 0) < MIN_SPEECH_S or not rows:
         first = next((r["text"] for r in rows if r.get("text")), "")
         return {**base, "status": "done", "model": None, "title": first[:20], "summary": "", **{k: [] for k in LISTS}}
-    return result(conv, rows, *chat(transcript(rows), list(known_tags), conv["start"]))
+    return result(conv, rows, *await chat(transcript(rows), list(known_tags), conv["start"]))
 
 
 def result(conv: dict, rows: list[dict], res: dict, raw: dict) -> dict:
@@ -163,6 +163,7 @@ def media_labels(rows: list[dict], spans: list[dict]) -> set[str]:
 
 
 if __name__ == "__main__":
+    import anyio
     rows = [dict(start="2026-09-30T10:00:01.200", text="我们先定一下", speaker="我"), dict(start="2026-09-30T10:02:00.000", text="好", speaker="S1")]
     r = anchor({"topics": [{"title": "b", "at": "10:02:00"}, {"title": "a", "at": "10:00:01"}], "todos": [{"text": "x", "at": "9:99"}]}, rows)
     assert [t["title"] for t in r["topics"]] == ["a", "b"] and r["topics"][0]["at"] == rows[0]["start"]
@@ -177,6 +178,6 @@ if __name__ == "__main__":
     assert spans == [{"from": rows[2]["start"], "to": rows[2]["start"]}], spans
     assert media_labels(rows, spans) == {"S2"} and media_share(rows, spans) == round(30 / (7.8 + 9 + 30), 2), media_share(rows, spans)
     assert media_share(rows, []) == 0.0
-    s = summarize({"id": "c1", "speech_s": 12}, rows)
+    s = anyio.run(summarize, {"id": "c1", "speech_s": 12}, rows)
     assert s["title"] == "我们先定一下" and s["model"] is None, s
     print("ok")

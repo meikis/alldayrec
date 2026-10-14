@@ -7,10 +7,12 @@ job on the same audio (#96's H1).
 import base64
 import json
 import os
-import urllib.error
-import urllib.request
 
+import anyio.to_thread
 import numpy as np
+
+import net
+import threads
 
 URL = os.environ.get("STEPFUN_SSE_URL") or "https://api.stepfun.com/v1/audio/asr/sse"  # pay-as-you-go; /step_plan/v1/... is the Plan's
 ACCOUNT = "https://api.stepfun.com/v1/accounts"  # the pay-as-you-go account the key draws on (#155)
@@ -19,27 +21,32 @@ REACH_MS = 1000  # a character this close to a file sentence joins it (the rule 
 END = "。？！?!"   # ... and these end one
 
 
-def balance() -> float:
+async def balance() -> float:
     """The pay-as-you-go balance, CNY."""
-    req = urllib.request.Request(ACCOUNT, headers={"Authorization": f"Bearer {os.environ['STEPFUN_API_KEY']}", "User-Agent": "curl/8"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return float(json.load(r)["balance"])
+    r = await net.request("GET", ACCOUNT, 30, headers={"Authorization": f"Bearer {os.environ['STEPFUN_API_KEY']}", "User-Agent": "curl/8"})
+    return float(json.loads(r.content)["balance"])
 
 
-def sse(x: np.ndarray, on_sentence=None) -> list[dict]:
-    """x: 16 kHz int16 PCM. Its deltas [{delta, start_time, end_time}] (ms into x); on_sentence(deltas so far) whenever
-    one ends a sentence or starts one after a pause (see sentences).
-    Raises on an HTTP error (402 balance, 429 rate, 451 refused) and unless transcript.text.done arrives (a cut stream)."""
-    body = json.dumps({"audio": {"data": base64.b64encode(x.tobytes()).decode(), "input": {
+def _body(x: np.ndarray) -> bytes:
+    return json.dumps({"audio": {"data": base64.b64encode(x.tobytes()).decode(), "input": {
         "transcription": {"model": "stepaudio-2.5-asr", "language": "zh", "enable_itn": True, "enable_timestamp": True},
         "format": {"type": "pcm", "codec": "pcm_s16le", "rate": 16000, "bits": 16, "channel": 1}}}}).encode()
-    req = urllib.request.Request(URL, body, {"Authorization": f"Bearer {os.environ['STEPFUN_API_KEY']}", "User-Agent": "curl/8",
-                                             "Content-Type": "application/json", "Accept": "text/event-stream"})
+
+
+async def sse(x: np.ndarray, on_sentence=None) -> list[dict]:
+    """x: 16 kHz int16 PCM. Its deltas [{delta, start_time, end_time}] (ms into x); on_sentence(deltas so far) whenever
+    one ends a sentence or starts one after a pause (see sentences), as each arrives.
+    Raises on an HTTP error (402 balance, 429 rate, 451 refused) and unless transcript.text.done arrives (a cut stream)."""
+    body = await anyio.to_thread.run_sync(_body, x, limiter=threads.MEDIA)  # a 5 min window is 13 MB of JSON: ~35 ms, off the event loop
     out = []
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            for line in r:
-                if not line.startswith(b"data:"):
+    with net.errors():
+        async with net.client(60) as c, c.stream("POST", URL, content=body, headers={
+                "Authorization": f"Bearer {os.environ['STEPFUN_API_KEY']}", "User-Agent": "curl/8",
+                "Content-Type": "application/json", "Accept": "text/event-stream"}) as r:
+            if r.status_code >= 400:
+                raise RuntimeError(f"stepfun sse HTTP {r.status_code}: {(await r.aread())[:200].decode(errors='replace')}")
+            async for line in r.aiter_lines():
+                if not line.startswith("data:"):
                     continue
                 m = json.loads(line[5:])
                 if m.get("type") == "transcript.text.delta":
@@ -52,8 +59,6 @@ def sse(x: np.ndarray, on_sentence=None) -> list[dict]:
                     return out
                 elif "error" in m or m.get("type", "").endswith("error"):
                     raise RuntimeError(f"stepfun sse: {str(m)[:200]}")
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"stepfun sse HTTP {e.code}: {e.read()[:200].decode(errors='replace')}") from None
     raise RuntimeError(f"stepfun sse: no transcript.text.done after {len(out)} deltas")
 
 

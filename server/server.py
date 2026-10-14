@@ -10,19 +10,21 @@ each pause for the minutes not final yet; all state is in data/live.db.
 import argparse
 import asyncio
 import base64
-import concurrent.futures as cf
 import copy
 import datetime as dt
 import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import subprocess
 import time
 from pathlib import Path
 
+import anyio
+import anyio.to_thread
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
@@ -36,6 +38,7 @@ import firmware
 import hints
 import live
 import mcp_server
+import net
 import profiles
 import recap
 import selfvoice
@@ -43,6 +46,7 @@ import speakers
 import squeeze
 import stepfun_asr
 import summary
+import threads
 from conversations import IGNORE, Grouper
 
 HERE = Path(__file__).resolve().parent
@@ -189,33 +193,36 @@ class Segmenter:
         return [(self.time_at(a), self.time_at(b), x)] if len(x) else []
 
 
-def _http(url, data=None, headers=None, method=None) -> bytes:
-    import urllib.request
-    req = urllib.request.Request(url, data=data, headers={"User-Agent": "curl/8", **(headers or {})}, method=method)
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return r.read()
+async def _http(url, data=None, headers=None, method=None) -> bytes:
+    """urllib.request's way: POST when there is data, else GET; raises urllib's errors (net)."""
+    r = await net.request(method or ("GET" if data is None else "POST"), url, 60, content=data,
+                          headers={"User-Agent": "curl/8", **(headers or {})})
+    return r.content
 
 
 FILE_MODELS = tuple(os.environ.get("FILE_MODELS", "stepaudio-2.5-asr-8006,doubao-seedasr-2.0").split(","))  # file-mode engines, in order of preference
 
 
-def engine_segs(x: np.ndarray, speech: list[tuple[float, float]], partial=None, engine: str = ENGINE, kind: str = "final",
-                device: str | None = None) -> list[dict]:
+async def engine_segs(x: np.ndarray, speech: list[tuple[float, float]], partial=None, engine: str = ENGINE, kind: str = "final",
+                      device: str | None = None) -> list[dict]:
     """Sentences with times and speaker ids for a window of audio, from `engine` (PROVIDERS), or ENGINE_FALLBACK when
     it fails; each carries `engine`, and `fallback` (why) when it came from ENGINE_FALLBACK. speech: the VAD speech in
     x, (start, end) seconds; the provider gets x with the silences squeezed (squeeze.py), the times come back in x.
     partial(segs): the sentences so far, whenever an answer adds some during the call (volc, stepfun*). Each try goes
-    in the calls table as `kind` (final, draft) of `device`."""
+    in the calls table as `kind` (final, draft) of `device`, one cut off (the task cancelled) too, as CancelledError."""
     xs, spans = squeeze.squeeze(x, speech, SQUEEZE_KEEP_S)
     why = None
     for name in dict.fromkeys(filter(None, (engine, ENGINE_FALLBACK))):
         mark = lambda gs, name=name: squeeze.unsqueeze([{**g, "engine": name, **({"fallback": why} if why else {})} for g in gs], spans)
         t = time.perf_counter()
         try:
-            segs = PROVIDERS[name](xs, partial and (lambda gs: partial(mark(gs))))
-        except Exception as e:
-            log.warning("asr %s: %.0f of %.0f s sent, failed after %.1f s: %r", name, len(xs) / SR, len(x) / SR, time.perf_counter() - t, e)
+            segs = await PROVIDERS[name](xs, partial and (lambda gs: partial(mark(gs))))
+        except BaseException as e:
+            e = threads.first(e)  # stepfun and volc run parts of a call side by side: their error as before
             db.add_call(kind, name, device, round((time.perf_counter() - t) * 1000), failure(e), len(x) / SR, len(xs) / SR)
+            if not isinstance(e, Exception):  # cancelled: no fallback
+                raise
+            log.warning("asr %s: %.0f of %.0f s sent, failed after %.1f s: %r", name, len(xs) / SR, len(x) / SR, time.perf_counter() - t, e)
             why = (f"{why}; " if why else "") + f"{name}: {e!r}"[:200]
             continue
         db.add_call(kind, name, device, round((time.perf_counter() - t) * 1000), None, len(x) / SR, len(xs) / SR)
@@ -230,48 +237,56 @@ def failure(e: Exception) -> str:
     return f"{type(e).__name__}: {e}"[:120]
 
 
-def volc(x: np.ndarray, partial=None) -> list[dict]:
+async def volc(x: np.ndarray, partial=None) -> list[dict]:
     import volc_asr
     mark = lambda us: [{"speaker": "SPEAKER_0", **u} for u in us]
-    return mark(volc_asr.transcribe(x, partial=partial and (lambda us: partial(mark(us))))[0])
+    return mark((await volc_asr.transcribe(x, partial=partial and (lambda us: partial(mark(us)))))[0])
 
 
-def stepfun_sse(x: np.ndarray, partial=None) -> list[dict]:
+async def stepfun_sse(x: np.ndarray, partial=None) -> list[dict]:
     """StepFun's SSE alone (#96 H3): text and character times, sentences cut by punctuation and pauses, no speakers."""
-    return stepfun_asr.sentences(stepfun_asr.sse(x, partial and (lambda ds: partial(stepfun_asr.sentences(ds)))))
+    return stepfun_asr.sentences(await stepfun_asr.sse(x, partial and (lambda ds: partial(stepfun_asr.sentences(ds)))))
 
 
-def stepfun(x: np.ndarray, partial=None) -> list[dict]:
-    """StepFun's SSE text on the sentences and speakers of a file job on the same audio (#96 H1), both at once."""
-    pool = cf.ThreadPoolExecutor(1)
-    file = pool.submit(diarize, x)
-    pool.shutdown(wait=False)  # an SSE failure raises at once: the file job's thread ends on its own
-    deltas = stepfun_asr.sse(x, partial and (lambda ds: partial(stepfun_asr.sentences(ds))))
-    return stepfun_asr.merge(deltas, file.result())
+async def stepfun(x: np.ndarray, partial=None) -> list[dict]:
+    """StepFun's SSE text on the sentences and speakers of a file job on the same audio (#96 H1), both at once: either
+    failing cancels the other (an SSE failure goes to the fallback at once), raised in an ExceptionGroup."""
+    file = []
+
+    async def job():
+        file.append(await diarize(x))
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(job)
+        deltas = await stepfun_asr.sse(x, partial and (lambda ds: partial(stepfun_asr.sentences(ds))))
+    return stepfun_asr.merge(deltas, file[0])
 
 
-# provider(x: 16 kHz int16 PCM, partial=None) -> [{start_ms, end_ms, text, speaker?, words?}], times in x
-PROVIDERS = {"volc": volc, "stepfun": stepfun, "stepfun-sse": stepfun_sse, "stepfun-file": lambda x, partial=None: diarize(x)}
+async def stepfun_file(x: np.ndarray, partial=None) -> list[dict]:
+    return await diarize(x)
 
 
-def diarize(x: np.ndarray, model: str = FILE_MODELS[0]) -> list[dict]:
+# provider(x: 16 kHz int16 PCM, partial=None) -> [{start_ms, end_ms, text, speaker?, words?}], times in x; async
+PROVIDERS = {"volc": volc, "stepfun": stepfun, "stepfun-sse": stepfun_sse, "stepfun-file": stepfun_file}
+
+
+async def diarize(x: np.ndarray, model: str = FILE_MODELS[0]) -> list[dict]:
     """File-mode ASR with speakers and word times on a window of audio (via the file-mode ASR service).
     StepFun's risk control refuses some content outright; that window is then sent to Doubao and every
     segment carries `engine` so the rows say which engine wrote them."""
     t_enc = time.perf_counter()
-    ogg = subprocess.run(["ffmpeg", "-v", "error", "-f", "s16le", "-ar", str(SR), "-ac", "1", "-i", "pipe:0",
-                          "-c:a", "libopus", "-b:a", "16k", "-f", "ogg", "pipe:1"], input=x.tobytes(),
-                         capture_output=True, check=True).stdout
+    async with threads.MEDIA:
+        ogg = (await anyio.run_process(["ffmpeg", "-v", "error", "-f", "s16le", "-ar", str(SR), "-ac", "1", "-i", "pipe:0",
+                                        "-c:a", "libopus", "-b:a", "16k", "-f", "ogg", "pipe:1"], input=x.tobytes())).stdout
     t_up = time.perf_counter()
-    up = json.loads(_http(BRIDGE, json.dumps({"filename": "live.ogg", "content_type": "audio/ogg"}).encode(),
-                          {"Authorization": f"Bearer {os.environ['ASR_UPLOAD_BRIDGE_TOKEN']}", "Content-Type": "application/json"}))
-    _http(up["upload_url"], ogg, {"Content-Type": "audio/ogg"}, "PUT")
+    up = json.loads(await _http(BRIDGE, json.dumps({"filename": "live.ogg", "content_type": "audio/ogg"}).encode(),
+                                {"Authorization": f"Bearer {os.environ['ASR_UPLOAD_BRIDGE_TOKEN']}", "Content-Type": "application/json"}))
+    await _http(up["upload_url"], ogg, {"Content-Type": "audio/ogg"}, "PUT")
     auth = {"Authorization": "Basic " + base64.b64encode(os.environ["ASR_SERVICE_BASIC_AUTH"].encode()).decode()}
-    job = json.loads(_http(f"{DIARIZE}/audio/transcriptions", json.dumps({"audio_url": up["download_url"], "model": model}).encode(),
-                           {**auth, "Content-Type": "application/json"}))["job_id"]
+    job = json.loads(await _http(f"{DIARIZE}/audio/transcriptions", json.dumps({"audio_url": up["download_url"], "model": model}).encode(),
+                                 {**auth, "Content-Type": "application/json"}))["job_id"]
     t_job = time.perf_counter()
     for _ in range(120):
-        r = json.loads(_http(f"{DIARIZE}/jobs/{job}", headers=auth))
+        r = json.loads(await _http(f"{DIARIZE}/jobs/{job}", headers=auth))
         if r["status"] == "COMPLETED":
             log.info("diarize %s: %.0f s audio, encode %.1f s, upload %.1f s, job %.1f s", model, len(x) / SR,
                      t_up - t_enc, t_job - t_up, time.perf_counter() - t_job)
@@ -282,9 +297,9 @@ def diarize(x: np.ndarray, model: str = FILE_MODELS[0]) -> list[dict]:
             err = str(r.get("error"))
             if "risk" in err and model == FILE_MODELS[0]:
                 log.warning("StepFun refused the window (%s); sending it to Doubao", err[:80])
-                return diarize(x, FILE_MODELS[1])
+                return await diarize(x, FILE_MODELS[1])
             raise RuntimeError(err)
-        time.sleep(1)
+        await anyio.sleep(1)
     raise RuntimeError(f"diarization job {job} still running after 120 s")
 
 
@@ -476,14 +491,14 @@ async def summary_worker():
     await asyncio.gather(*(summarize_loop() for _ in range(SUMMARY_WORKERS)))
 
 
-def summarize(c: dict, tags: list[str]) -> dict:
+async def summarize(c: dict, tags: list[str]) -> dict:
     """A conversation that closed with a live agent gets its final summary from that agent (the whole conversation
     and the day in its context, the prefix cached); any other, and every redo, from a plain summary call."""
     rows = conversation_rows(c)
     tl = db.timeline(c["id"]) if c.get("via_live") else None
     if tl and tl.get("messages") and (c.get("speech_s", 0) >= summary.MIN_SPEECH_S or tl.get("asked")):  # asked: 立即总结 on a short one
-        return {**summary.result(c, rows, *live.final(tl, rows, tags, c["start"])), "via": "live"}
-    return summary.summarize(c, rows, tags)
+        return {**summary.result(c, rows, *await live.final(tl, rows, tags, c["start"])), "via": "live"}
+    return await summary.summarize(c, rows, tags)
 
 
 async def summarize_loop():
@@ -491,7 +506,7 @@ async def summarize_loop():
         c = await summary_q.get()
         for delay in (10, 60, 300, None):
             try:
-                res = await asyncio.to_thread(summarize, c, list(tag_counts())[:60])
+                res = await summarize(c, list(tag_counts())[:60])
                 break
             except Exception as e:  # HTTP errors, timeouts, a reply that is not JSON
                 log.warning("summary %s failed: %r", c["id"], e)
@@ -499,7 +514,7 @@ async def summarize_loop():
                     c.pop("via_live", None)  # the last try takes the plain summary
                 res = {"conversation": c["id"], "status": "failed", "error": repr(e)[:300]}
                 if delay:
-                    await asyncio.sleep(delay)
+                    await anyio.sleep(delay)
         old = db.summary(c["id"])
         if res["status"] == "failed" and old and old["status"] == "done":  # a failed upgrade keeps the old summary
             continue
@@ -530,7 +545,7 @@ async def name_hints(c: dict, media: set[str]):
     if not set(c.get("participants") or []) - {"我", "S?"} - media:
         return
     try:
-        h = await asyncio.to_thread(hints.hints, c, conversation_rows(c), media)
+        h = await hints.hints(c, conversation_rows(c), media)
     except Exception as e:
         log.warning("name hints %s failed: %r", c["id"], e)
         return
@@ -544,7 +559,7 @@ RECAP_AT = os.environ.get("RECAP_AT", "10:00")  # yesterday's recap (recap.py) i
 
 
 async def write_recap(day: str) -> dict | None:
-    r = await asyncio.to_thread(recap.make, day)
+    r = await recap.make(day)
     if r:
         db.put_kv(f"recap:{day}", r)
     return r
@@ -554,10 +569,10 @@ async def balance_loop():
     """The StepFun balance every hour (#155): what transcription costs a day, and when the money runs out."""
     while True:
         try:
-            db.add_balance("stepfun", await asyncio.to_thread(stepfun_asr.balance))
+            db.add_balance("stepfun", await stepfun_asr.balance())
         except Exception as e:
             log.warning("stepfun balance: %r", e)
-        await asyncio.sleep(3600)
+        await anyio.sleep(3600)
 
 
 VM_INGEST_URL = os.environ.get("VM_INGEST_URL", "")  # .../api/v1/import/prometheus: metrics_loop pushes there; empty: nothing
@@ -615,10 +630,10 @@ async def metrics_loop():
             try:
                 auth = base64.b64encode(f"{os.environ.get('VM_INGEST_USER', '')}:{os.environ.get('VM_INGEST_PASSWORD', '')}".encode()).decode()
                 body = metrics().encode()
-                await asyncio.to_thread(_http, VM_INGEST_URL, body, {"Authorization": f"Basic {auth}", "Content-Type": "text/plain"})
+                await _http(VM_INGEST_URL, body, {"Authorization": f"Basic {auth}", "Content-Type": "text/plain"})
             except Exception as e:
                 log.warning("metrics push: %s", failure(e))  # the class and code, never the URL or credentials
-        await asyncio.sleep(60)
+        await anyio.sleep(60)
 
 
 async def recap_loop():
@@ -633,10 +648,10 @@ async def recap_loop():
                 await write_recap(day)
             except Exception as e:  # HTTP errors, timeouts, a reply that is not JSON
                 log.warning("recap %s failed: %r", day, e)
-                await asyncio.sleep(3600)
+                await anyio.sleep(3600)
                 continue
         nxt = dt.datetime.combine(now.date() + dt.timedelta(days=now.time() >= at), at)
-        await asyncio.sleep(max(1.0, (nxt - dt.datetime.now()).total_seconds()))
+        await anyio.sleep(max(1.0, (nxt - dt.datetime.now()).total_seconds()))
 
 
 def iso(t: dt.datetime) -> str:
@@ -647,7 +662,7 @@ async def pipelines():
     """One pipeline per device with audio after its finalized time: a phone sending last night's backlog while an
     iPhone records today is transcribed on its own timeline. A device's pipeline lives on once started."""
     from diarist import load_embedder
-    state["embed"] = await asyncio.to_thread(load_embedder)
+    state["embed"] = await anyio.to_thread.run_sync(load_embedder, limiter=threads.TORCH)
     running: dict[str, asyncio.Task] = {}
     while True:
         devices = [r[0] for r in db.conn().execute("SELECT DISTINCT device FROM pieces")]
@@ -655,7 +670,7 @@ async def pipelines():
         for d in audio.pending(after):
             if d not in running:
                 running[d] = asyncio.create_task(lasting(d), name=f"pipeline:{d}")
-        await asyncio.sleep(5)
+        await anyio.sleep(5)
 
 
 RESTART_S = 60  # a device's pipeline that failed starts again this much later
@@ -671,7 +686,7 @@ async def lasting(device: str):
         except Exception as e:
             log.exception("pipeline %s ended", device)
             note(f"{device} 的处理任务退出：{e!r}"[:140] + f"，{RESTART_S} s 后重来", "error")
-        await asyncio.sleep(RESTART_S)
+        await anyio.sleep(RESTART_S)
 
 
 async def pipeline(device: str):
@@ -706,7 +721,7 @@ async def pipeline(device: str):
                 a = max(seg.audio_base, seg.sample_at(done)) if seg.anchors and done else seg.audio_base
                 if (seg.samples - a) / SR <= BUFFER_S - 300:
                     break
-                await asyncio.sleep(1)
+                await anyio.sleep(1)
             st["audio_end"] = t + dt.timedelta(seconds=len(x) / SR)
             try:
                 st["utts"] += [(u[0], u[1]) for u in seg.push(t, x)]
@@ -877,7 +892,7 @@ async def pipeline(device: str):
         lv = st["live"] if st["live"] and overlaps(st["live"], o) else live.new(o["start"], device, db.conversations(o["start"][:10], o["start"]))
         rows, speech = [r for r in o["sentences"] if r.get("text")], o["speech_s"]
         try:
-            res = await asyncio.to_thread(live.analyze, lv, rows)
+            res = await live.analyze(lv, rows)
         except Exception as e:
             live_failed = time.time()
             log.warning("%s live analysis failed: %r", device, e)
@@ -956,15 +971,15 @@ async def pipeline(device: str):
         was_open = bool(grouper.open)
         m0 = dia.mark()
         try:
-            segs = await asyncio.to_thread(engine_segs, x, speech_in(seg, a0, len(x)), device=device)
+            segs = await engine_segs(x, speech_in(seg, a0, len(x)), device=device)
             engine = segs[0]["engine"] if segs else None
-            marks = await asyncio.to_thread(label_sentences, dia, embed, segs, x)
+            marks = await anyio.to_thread.run_sync(label_sentences, dia, embed, segs, x, limiter=threads.TORCH)
         except Exception as e:
             dia.rollback(m0)
             log.warning("%s final piece failed: %r", device, e)
             note(f"{device}：定稿引擎调用失败：{str(e)[:120]}，稍后重试这一块", "error")
             st["refine"] = {"error": str(e)[:200]}
-            await asyncio.sleep(10)
+            await anyio.sleep(10)
             return False
         by_label = {}
         for g in segs:  # final_rows keys confidence by label
@@ -1013,7 +1028,7 @@ async def pipeline(device: str):
             if closed:
                 await commit(closed)
             maybe_live()
-            await asyncio.sleep(2)
+            await anyio.sleep(2)
 
     def drafting() -> bool:
         """A page watches and this device is recording now (its newest audio is recent, backlog or not)."""
@@ -1072,28 +1087,30 @@ async def pipeline(device: str):
             segs = clip_turns(segs[:-1], sent)
             if not segs:
                 return
-            await asyncio.to_thread(label_sentences, ddia, embed, segs, x)
+            await anyio.to_thread.run_sync(label_sentences, ddia, embed, segs, x, limiter=threads.TORCH)
             rows = final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, t0, len(x) / SR, None, sent, at, 0.0)[2]
             sent = segs[-1]["end_ms"] / 1000
             await publish(rows, at(sent), segs[0]["engine"])
 
-        loop, answers = asyncio.get_running_loop(), asyncio.Queue()
-        call = asyncio.ensure_future(asyncio.to_thread(engine_segs, x, speech_in(dseg, a0, len(x)),
-                                                       lambda segs: loop.call_soon_threadsafe(answers.put_nowait, segs), DRAFT_ENGINE,
-                                                       "draft", device))
+        send, answers = anyio.create_memory_object_stream(math.inf)
+        got = []
+
+        async def call():
+            with send:  # closed when the call ends, and with it the answers
+                got.append(await engine_segs(x, speech_in(dseg, a0, len(x)), send.send_nowait, DRAFT_ENGINE, "draft", device))
         m0 = ddia.mark()
         try:
-            while not call.done():  # a 5 min backfill window: its first sentences in ~3 s, not after the whole call
-                try:
-                    segs = await asyncio.wait_for(answers.get(), 0.5)
-                except asyncio.TimeoutError:
-                    continue
-                await early(segs)
-                m0 = ddia.mark()
-            raw = call.result()
+            with answers:
+                async with anyio.create_task_group() as tg:  # a pass failing or cancelled takes its engine call with it
+                    tg.start_soon(call)
+                    async for segs in answers:  # a 5 min backfill window: its first sentences in ~3 s, not after the whole call
+                        await early(segs)
+                        m0 = ddia.mark()
+            raw = got[0]
             segs = clip_turns(raw, sent)
-            marks = await asyncio.to_thread(label_sentences, ddia, embed, segs, x)
+            marks = await anyio.to_thread.run_sync(label_sentences, ddia, embed, segs, x, limiter=threads.TORCH)
         except Exception as e:
+            e = threads.first(e)
             ddia.rollback(m0)
             log.warning("%s draft pass failed: %r", device, e)
             st["draft"] = {"error": str(e)[:200]}
@@ -1209,7 +1226,7 @@ def status() -> dict:
 async def status_loop():
     while True:
         await broadcast({"type": "status", **status()})
-        await asyncio.sleep(2)
+        await anyio.sleep(2)
 
 
 def authorized(cookies, headers) -> bool:
@@ -1278,7 +1295,7 @@ async def apk_latest():
     p = DATA / "live-record.apk"
     if not p.exists():
         raise HTTPException(404, "no apk uploaded")
-    return {**await asyncio.to_thread(apk.version, p), "size": p.stat().st_size}
+    return {**await anyio.to_thread.run_sync(apk.version, p, limiter=threads.DB), "size": p.stat().st_size}
 
 
 @app.post("/api/chunks")
@@ -1292,7 +1309,7 @@ async def chunk(request: Request, device: str, start: int, n: int | None = None,
     without it lets go."""
     audio.hold(device, hold)  # before the piece is in: the queue must not hand it out ahead of the older audio
     body, kind = await request.body(), request.headers.get("content-type", "")
-    seconds = await asyncio.to_thread(audio.save, device, start, body, kind, n)
+    seconds = await anyio.to_thread.run_sync(audio.save, device, start, body, kind, n, limiter=threads.MEDIA)
     if seconds is None:  # the app drops it on a 400 (audio.save keeps its bytes in rejected/): say so, it is lost audio
         log.warning("%s: piece at %s (%s, %d bytes) could not be decoded", device, dt.datetime.fromtimestamp(start / 1000), kind, len(body))
         note(f"{device} 的一块音频（起于 {dt.datetime.fromtimestamp(start / 1000).strftime('%H:%M:%S')}）无法解码，客户端收到 400 会丢弃它；原始字节留在 recordings/rejected/", "error")
@@ -1459,7 +1476,7 @@ async def ask_ai(body: dict):
     if not q or len(q) > 500:
         raise HTTPException(400, "empty or too long")
     try:
-        return await asyncio.to_thread(ask.ask, q)
+        return await ask.ask(q)
     except Exception as e:  # HTTP errors, timeouts
         log.warning("ask failed: %r", e)
         raise HTTPException(502, f"模型调用失败：{e!r}"[:300])
@@ -1474,7 +1491,7 @@ async def mcp(request: Request):
         msg = await request.json()
     except ValueError:
         return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}, 400)
-    status, out = await asyncio.to_thread(mcp_server.handle, msg, request.headers)
+    status, out = await anyio.to_thread.run_sync(mcp_server.handle, msg, request.headers, limiter=threads.DB)
     return Response(status_code=202) if out is None else JSONResponse(out, status)
 
 
@@ -1612,7 +1629,7 @@ async def apply_rename(conv_id: str, frm: str, to: str) -> dict:
                 x = np.frombuffer(await cut(r["start"], min(r["end"], (dt.datetime.fromisoformat(r["start"]) + dt.timedelta(seconds=15)).isoformat()), "s16le", r.get("source")), np.int16)
             except HTTPException:  # history conversations have no recording here
                 continue
-            es.append(await asyncio.to_thread(state["embed"], x))
+            es.append(await anyio.to_thread.run_sync(state["embed"], x, limiter=threads.TORCH))
         if es:
             n0, e0 = db.people().get(to, (0, np.zeros(len(es[0]))))
             n = n0 + len(es)
@@ -1692,7 +1709,7 @@ def describe(members: list[dict], convs: dict, called: dict[str, set[str]]) -> d
 async def speaker_list():
     """Without the member lists (most of the size; the home uplink is slow): GET /api/speakers/{id} has them."""
     bare = lambda g: {k: v for k, v in g.items() if k != "members"}
-    return [{**bare(g), "suggested": [bare(x) for x in g["suggested"]]} for g in await asyncio.to_thread(speaker_groups)]
+    return [{**bare(g), "suggested": [bare(x) for x in g["suggested"]]} for g in await anyio.to_thread.run_sync(speaker_groups, limiter=threads.DB)]
 
 
 def find_group(gid: str, sid: str | None = None) -> dict:
@@ -1706,7 +1723,7 @@ def find_group(gid: str, sid: str | None = None) -> dict:
 
 @app.get("/api/speakers/{gid}")
 async def speaker_one(gid: str):
-    return await asyncio.to_thread(find_group, gid)
+    return await anyio.to_thread.run_sync(find_group, gid, limiter=threads.DB)
 
 
 def check_name(to: str):
@@ -1720,7 +1737,7 @@ async def speaker_name(body: dict):
     to = (body.get("name") or "").strip()
     check_name(to)
     done = 0
-    for m in (await asyncio.to_thread(find_group, body["group"], body.get("suggestion")))["members"]:
+    for m in (await anyio.to_thread.run_sync(find_group, body["group"], body.get("suggestion"), limiter=threads.DB))["members"]:
         if m["label"] == to:
             continue
         try:
@@ -1810,7 +1827,7 @@ async def conversation_speakers(conv_id: str):
     c = find_conversation(conv_id)
     if not c:
         raise HTTPException(404, "no such conversation")
-    groups = await asyncio.to_thread(speaker_groups)
+    groups = await anyio.to_thread.run_sync(speaker_groups, limiter=threads.DB)
     return label_suggestions(c, groups, _speakers["vec"], db.name_hints(conv_id).get(conv_id), db.aliases())
 
 
@@ -1891,8 +1908,8 @@ def mentions(name: str, limit: int = 30, per_conv: int = 3) -> list[dict]:
 async def make_profile(name: str) -> dict:
     """The person's profile from their 40 latest conversations, their todos and mine to them, and 30 mentions."""
     p = await person(name)
-    ms = await asyncio.to_thread(mentions, name)
-    pf = await asyncio.to_thread(profiles.profile, name, p["conversations"][:40], (p["theirs"] + p["mine"])[:30], ms)
+    ms = await anyio.to_thread.run_sync(mentions, name, limiter=threads.DB)
+    pf = await profiles.profile(name, p["conversations"][:40], (p["theirs"] + p["mine"])[:30], ms)
     db.put_profile(pf)
     return pf
 
@@ -1920,8 +1937,8 @@ async def voices_loop():
     """Voiceprints for the labels of closed live conversations (history ones are uploaded): up to 4 sentences of
     >= 1.5 s per label with >= 3 sentences. A conversation without a recording here is marked and not retried."""
     while True:
-        await asyncio.to_thread(speaker_groups)  # warm: the page's first load would otherwise wait seconds
-        await asyncio.sleep(300)
+        await anyio.to_thread.run_sync(speaker_groups, limiter=threads.DB)  # warm: the page's first load would otherwise wait seconds
+        await anyio.sleep(300)
         if not state.get("embed"):
             continue
         seen = db.voiced_conversations()
@@ -1948,7 +1965,7 @@ async def voices_loop():
                         x = np.frombuffer(await cut(r["start"], min(r["end"], (dt.datetime.fromisoformat(r["start"]) + dt.timedelta(seconds=15)).isoformat()), "s16le", r.get("source")), np.int16)
                     except HTTPException:
                         continue
-                    es.append(await asyncio.to_thread(state["embed"], x))
+                    es.append(await anyio.to_thread.run_sync(state["embed"], x, limiter=threads.TORCH))
                     if (lv := selfvoice.level(x)) is not None:
                         ls.append(lv)
                 if es:
@@ -1987,7 +2004,7 @@ async def self_round():
         return
     now = dt.datetime.now()
     st.setdefault("first_at", now.isoformat(timespec="seconds"))
-    cands, n = await asyncio.to_thread(selfvoice.candidates, vs)
+    cands, n = await anyio.to_thread.run_sync(selfvoice.candidates, vs, limiter=threads.DB)
     if why := selfvoice.due(st, cands, n, now):
         st["card"] = await self_card(cands[:selfvoice.SHOW], vs, why, n)
         st.pop("wait", None)
@@ -2008,13 +2025,13 @@ async def self_card(cands: list[dict], vs: list[dict], why: str, n: int) -> dict
         for m in sorted(c["members"], key=lambda m: -m["speech_s"])[:CLIP_CONVS]:
             if not (conv := db.conversation(m["conv"])):
                 continue
-            for r in await asyncio.to_thread(selfvoice.shortlist, conversation_rows(conv), m["label"]):
+            for r in await anyio.to_thread.run_sync(selfvoice.shortlist, conversation_rows(conv), m["label"], limiter=threads.DB):
                 try:
                     x = np.frombuffer(await cut(r["start"], r["end"], "s16le", r.get("source")), np.int16)
                 except HTTPException:
                     continue
                 pool.append({**r, "conv": m["conv"], "lvl": selfvoice.level(x), "lmed": lvl.get((m["conv"], m["label"])),
-                             "e": await asyncio.to_thread(state["embed"], x)})
+                             "e": await anyio.to_thread.run_sync(state["embed"], x, limiter=threads.TORCH)})
         clips = selfvoice.pick(pool, c["bank"], [b for b in banks if b is not c["bank"]])
         out.append({"tier": selfvoice.tier(c["p"]), "p": round(c["p"], 3), "convs": c["convs"], "speech_s": round(c["speech_s"]),
                     "bank": [float(x) for x in c["bank"]],
@@ -2076,7 +2093,7 @@ async def listen(device: str, after: int | None = None):
     before; none: its newest piece) as WAV, X-Start the first piece's start; 204 when there is nothing newer. Decoded
     here, as /api/audio is: pieces are Ogg Opus (Safari before 18.4 cannot decode it) or the iPhone's AAC (each with
     its encoder's delay, trimmed only by decode()); WAV plays in every browser."""
-    got = await asyncio.to_thread(audio.newer, device, after)
+    got = await anyio.to_thread.run_sync(audio.newer, device, after, limiter=threads.MEDIA)
     if got is None:
         return Response(status_code=204)
     start, last, x = got
@@ -2085,7 +2102,7 @@ async def listen(device: str, after: int | None = None):
 
 async def cut(start: str, end: str, fmt: str, device: str | None = None) -> bytes:
     a, b = dt.datetime.fromisoformat(start), dt.datetime.fromisoformat(end)
-    out = await asyncio.to_thread(audio.cut, a, b, fmt, device) if 0 < (b - a).total_seconds() <= 120 else None
+    out = await anyio.to_thread.run_sync(audio.cut, a, b, fmt, device, limiter=threads.MEDIA) if 0 < (b - a).total_seconds() <= 120 else None
     if out is None:
         raise HTTPException(404, "no recording covers this time")
     return out

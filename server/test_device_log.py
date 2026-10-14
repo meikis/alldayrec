@@ -1,10 +1,11 @@
 """Device log and status history: a record sent again is kept once, a range brings the recorder's undated records
 that sit between its dated ones, every status report is kept with the newest one at hand, and firmware updates are put
 together from the app's dfu events and the recorder's DFU and BOOT records."""
-import asyncio
 import datetime as dt
 import tempfile
 from pathlib import Path
+
+import anyio
 
 import db
 from server import DeviceEvent, device_log, device_log_upload, device_status_report, upgrades
@@ -29,15 +30,15 @@ APP = [DeviceEvent(src="app", seq=T + 1, at=T + 1, data={"kind": "connect", "ms"
 
 
 def seqs(lo, hi=None):
-    got = asyncio.run(device_log("LR-X1-567E", iso(lo), hi and iso(hi)))
+    got = anyio.run(device_log, "LR-X1-567E", iso(lo), hi and iso(hi))
     return sorted((e["src"], e["seq"]) for e in got["events"])
 
 
 def test_device_log():
     db.open_db(Path(tempfile.mkdtemp()) / "t.db")
-    asyncio.run(device_log_upload("LR-X1-567E", LOG[:4] + APP))
-    asyncio.run(device_log_upload("LR-X1-567E", LOG[2:]))  # an overlapping read: 5002, 5003 again
-    asyncio.run(device_log_upload("LR-P1-BDAE", [rec(5000, T, 1, 0, 22, 190)]))  # another recorder, same seq
+    anyio.run(device_log_upload, "LR-X1-567E", LOG[:4] + APP)
+    anyio.run(device_log_upload, "LR-X1-567E", LOG[2:])  # an overlapping read: 5002, 5003 again
+    anyio.run(device_log_upload, "LR-P1-BDAE", [rec(5000, T, 1, 0, 22, 190)])  # another recorder, same seq
     assert db.conn().execute("SELECT count(*) FROM device_log").fetchone()[0] == 9
 
     every = [("app", T + 1), ("app", T + 9_000)] + [("rec", s) for s in range(5000, 5006)]
@@ -46,11 +47,11 @@ def test_device_log():
     assert seqs(T + 5_000) == [("app", T + 9_000), ("rec", 5005)], "dated before the range: no undated ones"
     assert seqs(T - 3_600_000, T - 6500) == [("rec", 5000), ("rec", 5001), ("rec", 5002)], \
         "the undated ones up to the first dated record after the range"
-    e = next(e for e in asyncio.run(device_log("LR-X1-567E", iso(T)))["events"] if e["seq"] == 5004)
+    e = next(e for e in anyio.run(device_log, "LR-X1-567E", iso(T))["events"] if e["seq"] == 5004)
     assert (e["at"], e["data"]["a"], e["data"]["b"]) == (iso(T), T & 0xFFFFFFFF, T >> 32)
 
-    asyncio.run(device_log_upload("LR-X1-567E", [rec(5005, T + 20_000, 9, 50, 22, 180)]))  # the log was erased: seq again
-    assert next(e for e in asyncio.run(device_log("LR-X1-567E", iso(T)))["events"] if e["seq"] == 5005)["data"]["boot"] == 9
+    anyio.run(device_log_upload, "LR-X1-567E", [rec(5005, T + 20_000, 9, 50, 22, 180)])  # the log was erased: seq again
+    assert next(e for e in anyio.run(device_log, "LR-X1-567E", iso(T))["events"] if e["seq"] == 5005)["data"]["boot"] == 9
 
 
 def test_device_status():
@@ -58,9 +59,9 @@ def test_device_status():
     assert db.device_status("LR-X1-567E") is None
     lo = (dt.datetime.now() - dt.timedelta(seconds=1)).isoformat()
     for battery in (80, 79):
-        asyncio.run(device_status_report("LR-X1-567E", {"battery": battery, "store": 0, "model": "LR-X1"}))
-    asyncio.run(device_status_report("phone", {"battery": 50}))
-    hist = asyncio.run(device_log("LR-X1-567E", lo))["status"]
+        anyio.run(device_status_report, "LR-X1-567E", {"battery": battery, "store": 0, "model": "LR-X1"})
+    anyio.run(device_status_report, "phone", {"battery": 50})
+    hist = anyio.run(device_log, "LR-X1-567E", lo)["status"]
     assert [h["battery"] for h in hist] == [80, 79] and hist[0]["at"] <= hist[1]["at"]
     assert db.device_status("LR-X1-567E") == hist[-1]
 
@@ -72,7 +73,7 @@ def test_upgrades():
     dfu = lambda seq, at: rec(seq, at, seq - 1, 9000, 21, 0xA8)
     app = lambda at, step, **f: DeviceEvent(src="app:a", seq=at, at=at, data={"kind": "dfu", "step": step, "text": step, **f})
     old, new = "20261006.120000-1751f88", "20261007.023223-c95516b"
-    asyncio.run(device_log_upload("LR-P3-116C", [
+    anyio.run(device_log_upload, "LR-P3-116C", [
         # 10-07 10:54 with app 1.4.0, which logged nothing: the recorder's DFU and the BOOT 3 min 12 s later
         boot(1, T - 60 * M, "1751f88"), dfu(2, T), boot(3, T + 192_000, "c95516b"),
         # an app's update: done, and back on the new revision
@@ -91,11 +92,11 @@ def test_upgrades():
         app(T + 40 * M, "start", **{"from": new, "to": old}), dfu(10, T + 40 * M + 9000), boot(11, T + 40 * M + 200_000, "1751f88"),
         # under way: nothing after the DFU yet
         app(T + 50 * M, "start", **{"from": old, "to": new}), dfu(12, T + 50 * M + 9000),
-    ]))
-    asyncio.run(device_log_upload("LR-P3-2420", [  # no app: USB flashes (UF2, 0x57) of the same and of a new build
+    ])
+    anyio.run(device_log_upload, "LR-P3-2420", [  # no app: USB flashes (UF2, 0x57) of the same and of a new build
         boot(1, T - 60 * M, "28758c4"), rec(2, T, 1, 9000, 21, 0x57), boot(3, T + 60_000, "28758c4"),
-        rec(4, T + 10 * M, 3, 9000, 21, 0x57), boot(5, None, "1751f88")]))  # a BOOT no phone dated
-    got = asyncio.run(upgrades("LR-P3-116C", iso(T - M)))
+        rec(4, T + 10 * M, 3, 9000, 21, 0x57), boot(5, None, "1751f88")])  # a BOOT no phone dated
+    got = anyio.run(upgrades, "LR-P3-116C", iso(T - M))
     pick = lambda u: (u["app"], u["from"], u["to"], u["ms"], u["ok"])
     assert [pick(u) for u in got] == [
         (False, "1751f88", "c95516b", 192_000, True),
@@ -108,10 +109,10 @@ def test_upgrades():
     assert (got[1]["back_ms"], got[1]["fw"]) == (30_000, new)
     assert (got[2]["why"], got[2]["stage"], got[2]["pct"]) == ("Device disconnected", "send", 40)
     assert got[3]["why"] == f"升级后固件是 {new}，不是 {old}"
-    assert [pick(u) for u in asyncio.run(upgrades("LR-P3-116C", iso(T + 10 * M + 1)))][:2] == [
+    assert [pick(u) for u in anyio.run(upgrades, "LR-P3-116C", iso(T + 10 * M + 1))][:2] == [
         (False, "c95516b", "c95516b+", 174_000, True), (True, new, old, 60_000, False)], \
         "an update begun before since: its DFU stands alone (the BOOT after it from a dirty tree), its app events left out"
     assert {u["via"] for u in got if "via" in u} == {"ota"}
-    assert [(u["from"], u["to"], u["ms"], u["ok"], u["why"], u["via"]) for u in asyncio.run(upgrades("LR-P3-2420", iso(T - M)))] == [
+    assert [(u["from"], u["to"], u["ms"], u["ok"], u["why"], u["via"]) for u in anyio.run(upgrades, "LR-P3-2420", iso(T - M))] == [
         ("28758c4", "28758c4", 60_000, None, "重启后版本没变", "usb"), ("28758c4", "1751f88", None, True, None, "usb")]
-    assert asyncio.run(upgrades("LR-X1-567E", iso(T - M))) == []
+    assert anyio.run(upgrades, "LR-X1-567E", iso(T - M)) == []

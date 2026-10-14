@@ -16,6 +16,8 @@ dependencies = [
     "websockets>=17.1",
     "scikit-learn>=1.9.1",
     "scipy>=1.17.1",
+    "httpx2>=2.13.1",
+    "anyio>=4.15.1",
 ]
 
 [[tool.uv.index]]

@@ -30,7 +30,7 @@ def _next(day: str) -> str:
     return (dt.date.fromisoformat(day) + dt.timedelta(days=1)).isoformat()
 
 
-def make(day: str) -> dict | None:
+async def make(day: str) -> dict | None:
     """The recap of a day (YYYY-MM-DD); None when no conversation of it has a summary. Raises on HTTP and JSON errors."""
     convs = [c for c in db.conversations(day, _next(day)) if (c["summary"] or {}).get("status") == "done" and c["summary"].get("title")]
     if not convs:
@@ -40,7 +40,7 @@ def make(day: str) -> dict | None:
              for c in convs for t in c["summary"].get("todos") or [] if t.get("owner") == "我" and (c["id"], t.get("text") or "") not in closed]
     listing = "\n".join(f"#{i}{' →' + t['to'] if t['to'] else ''} {t['text']}{'（' + t['due'] + '）' if t['due'] else ''}"
                         for i, t in enumerate(todos, 1)) or "（没有）"
-    res, raw = summary.complete([{"role": "system", "content": SYSTEM},
+    res, raw = await summary.complete([{"role": "system", "content": SYSTEM},
                                  {"role": "user", "content": f"{day} 的对话摘要：\n\n{ask.digest(convs)}\n\n待办清单：\n{listing}"}], timeout=120,
                                 kind="recap")
     ids = {c["id"] for c in convs}
@@ -64,11 +64,13 @@ if __name__ == "__main__":
     import sys
     import tempfile
     from pathlib import Path
+
+    import anyio
     if sys.argv[1:]:
         db._local.c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)  # never open_db: it writes the schema
         db._local.c.row_factory = sqlite3.Row
         for d in sys.argv[2:]:
-            print(json.dumps(make(d), ensure_ascii=False), flush=True)
+            print(json.dumps(anyio.run(make, d), ensure_ascii=False), flush=True)
         sys.exit()
     db.open_db(Path(tempfile.mkdtemp()) / "t.db")
     with db.tx() as c:
@@ -85,13 +87,13 @@ if __name__ == "__main__":
         db.put_summary({"conversation": "c20261004120000", "status": "pending"}, c)
     db.add_feedback("c20261004100000", db.TODO_MARKS[0] + "已做完")
     seen = []
-    def fake(msgs, timeout=300, kind=None):
+    async def fake(msgs, timeout=300, kind=None):
         seen.append(msgs)
         return {"headline": "改存储", "highlights": [{"text": "定了存储", "conv": "c20261004100000"}, {"text": "编的", "conv": "c1"}, "x", {"conv": "c1"}],
                 "todos": [{"n": 1, "text": "改存储方案"}, {"n": 1}, {"n": 9}, {"n": "1"}, {"n": 0}],
                 "people": [{"who": "老王", "note": "聊存储"}, {"who": "S3"}, {"who": "我"}, "x"]}, {"model": "m"}
     summary.complete = fake
-    r = make("2026-10-04")
+    r = anyio.run(make, "2026-10-04")
     assert "## [c20261004100000]" in seen[0][1]["content"] and "c20261004120000" not in seen[0][1]["content"], "pending summaries left out"
     listing = seen[0][1]["content"].split("待办清单")[1]
     assert listing == "：\n#1 改存储", "only the day's own todos of mine: not 未知, not the days before or after, not marked done"
@@ -99,5 +101,5 @@ if __name__ == "__main__":
     assert r["highlights"] == [{"text": "定了存储", "conv": "c20261004100000"}, {"text": "编的", "conv": None}], r["highlights"]
     assert r["todos"] == [{"conv": "c20261004100000", "text": "改存储", "to": None, "due": None, "short": "改存储方案"}], r["todos"]
     assert r["people"] == [{"who": "老王", "note": "聊存储"}]
-    assert make("2026-10-03") is None and len(seen) == 1, "a day without summaries: no call"
+    assert anyio.run(make, "2026-10-03") is None and len(seen) == 1, "a day without summaries: no call"
     print("ok")

@@ -20,10 +20,10 @@ Candidates
   local-offline  sherpa-onnx diarization on the whole file (upper bound for the local segmenter), SSE per turn
 ASR calls and cloud diarizations are cached under <case>/work/.
 """
-import asyncio
 import base64
 import concurrent.futures as cf
 import datetime as dt
+import functools
 import json
 import os
 import subprocess
@@ -31,6 +31,8 @@ import sys
 import time
 from pathlib import Path
 
+import anyio
+import anyio.to_thread
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -87,12 +89,12 @@ class Asr:
         clients share the key), gives up after 5 tries."""
         for attempt in range(5):
             try:
-                return await asyncio.to_thread(self._post, x)
+                return await anyio.to_thread.run_sync(self._post, x)
             except Exception as e:
                 log.warning("ASR attempt %d failed: %r", attempt + 1, e)
                 if attempt == 4:
                     raise
-                await asyncio.sleep(2 ** attempt)
+                await anyio.sleep(2 ** attempt)
 
 
 def words_to_turns(turns: list[dict], file_segs: list[dict], reach_ms: int = 1000) -> int:
@@ -270,7 +272,7 @@ class Case:
         segs = None
         for attempt in range(4):
             try:
-                segs = diarize(self.x[int(a * SR):int(b * SR)])
+                segs = anyio.run(diarize, self.x[int(a * SR):int(b * SR)])
                 break
             except Exception as e:  # read timeouts on the worker; the job itself usually finished
                 print(f"  cloud diarize {a:.0f}-{b:.0f} attempt {attempt + 1} failed: {e!r}"[:160], flush=True)
@@ -341,7 +343,7 @@ def _volc_window(self, a: float, b: float) -> list[dict]:
     import volc_asr
     for attempt in range(3):
         try:
-            utts, info = volc_asr.transcribe(self.x[int(a * SR):int(b * SR)], mode=mode)
+            utts, info = anyio.run(functools.partial(volc_asr.transcribe, self.x[int(a * SR):int(b * SR)], mode=mode))
             break
         except Exception as e:
             print(f"  volc {a:.0f}-{b:.0f} attempt {attempt + 1} failed: {e!r}"[:160], flush=True)
@@ -370,7 +372,7 @@ def _volc_session(self, a: float, b: float) -> list[dict]:
     import volc_asr
     for attempt in range(3):
         try:
-            utts, info = volc_asr.stream(self.x[int(a * SR):int(b * SR)], STREAM_PACE, STREAM_END_MS)
+            utts, info = anyio.run(volc_asr.stream, self.x[int(a * SR):int(b * SR)], STREAM_PACE, STREAM_END_MS)
             break
         except Exception as e:
             print(f"  stream {a:.0f}-{b:.0f} attempt {attempt + 1} failed: {e!r}"[:160], flush=True)

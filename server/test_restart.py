@@ -1,19 +1,19 @@
 """A new instance has nobody's voiceprint yet: its first device is transcribed all the same, nobody labelled 我. A
 pipeline that fails (here a write, once) starts again whole RESTART_S later, from the finalized time, without leaving
 its readers behind: every sentence final once (10-09: a missing voiceprint ended the pipeline until the next restart)."""
-import asyncio
 import datetime as dt
 import time
 
+import anyio
 import numpy as np
 
 import db
 import server
-from test_backlog import DEVICE, PIECE_S, SR, flac, heard, rig, save, tone
+from test_backlog import DEVICE, PIECE_S, SR, flac, hear, rig, save, tone
 
 
 def test_no_voiceprint_and_restart(tmp_path, monkeypatch):
-    rig(tmp_path, monkeypatch, lambda x, partial=None: heard(x))
+    rig(tmp_path, monkeypatch, hear)
     (tmp_path / "owner-redimnet2.npz").unlink()
     monkeypatch.setattr(server, "RESTART_S", 0.5)
     replace, failed = db.replace_sentences, []
@@ -32,17 +32,18 @@ def test_no_voiceprint_and_restart(tmp_path, monkeypatch):
 
     async def run():
         dias = len(server.state["dias"])
-        task = asyncio.create_task(server.lasting(DEVICE))
-        for _ in range(120):
-            if len(finals()) >= 3:
-                break
-            await asyncio.sleep(0.5)
-        rows = finals()
-        assert [r["text"] for r in rows] == ["0", "1", "2"], rows
-        assert failed, "the write was to fail once"
-        assert "我" not in {r["speaker"] for r in rows}, rows
-        assert [t.get_name() for t in asyncio.all_tasks()].count(f"feed:{DEVICE}") == 1, "the failed pipeline's reader is gone"
-        assert len(server.state["dias"]) == dias + 2, "the failed pipeline's diarists are gone"
-        task.cancel()
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(server.lasting, DEVICE)
+            for _ in range(120):
+                if len(finals()) >= 3:
+                    break
+                await anyio.sleep(0.5)
+            rows = finals()
+            assert [r["text"] for r in rows] == ["0", "1", "2"], rows
+            assert failed, "the write was to fail once"
+            assert "我" not in {r["speaker"] for r in rows}, rows
+            assert [t.name for t in anyio.get_running_tasks()].count(f"feed:{DEVICE}") == 1, "the failed pipeline's reader is gone"
+            assert len(server.state["dias"]) == dias + 2, "the failed pipeline's diarists are gone"
+            tg.cancel_scope.cancel()
 
-    asyncio.run(run())
+    anyio.run(run)

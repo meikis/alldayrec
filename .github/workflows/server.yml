@@ -27,5 +27,7 @@ jobs:
         run: pipx install uv  # into /opt/pipx_bin, on the image's PATH
       - if: runner.environment == 'self-hosted'
         run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"  # .54: uv in ci-runner's home
-      - run: uv sync  # not --locked: uv.lock names a private mirror, uv re-resolves the same versions on PyPI
+      - run: uv sync --locked  # uv.lock as it is, as deploy.sh installs it on the deploy host (uv sync --frozen)
+        env:
+          UV_DEFAULT_INDEX: https://pypi.org/simple  # uv.lock's index: .54's mirror (its runner .env) would read as a lock out of date
       - run: uv run --with pytest pytest -q

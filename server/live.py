@@ -97,13 +97,13 @@ def apply(state: dict, ops: list, rows: list[dict], fresh: list[dict]) -> tuple[
     return sorted(by.values(), key=lambda t: t["start"]), next_id
 
 
-def analyze(state: dict, rows: list[dict]) -> dict:
+async def analyze(state: dict, rows: list[dict]) -> dict:
     """One turn: rows are the open conversation's sentences so far. Raises on HTTP and JSON errors."""
     text, fresh = turn(state, rows)
     if not fresh:
         return state
     msg = {"role": "user", "content": text}
-    res, raw = complete(state["messages"] + [msg], timeout=120, kind="live")
+    res, raw = await complete(state["messages"] + [msg], timeout=120, kind="live")
     topics, next_id = apply(state, res.get("ops"), rows, fresh)
     reply = {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}
     return {**state, "topics": topics, "next_id": next_id, "fed_to": fresh[-1]["start"],
@@ -122,14 +122,15 @@ def final_turn(state: dict, rows: list[dict]) -> str:
     return turn(state, rows)[0]
 
 
-def final(state: dict, rows: list[dict], known_tags: list[str], start: str) -> tuple[dict, dict]:
+async def final(state: dict, rows: list[dict], known_tags: list[str], start: str) -> tuple[dict, dict]:
     """The closing turn: final_turn, then the final summary in summary.SYSTEM's format. start: the closed conversation's
     (due dates count from it; the draft layer may have started the open one on the other side of midnight)."""
-    return complete(state["messages"] + [{"role": "user", "content": f"{final_turn(state, rows)}\n\n{FINAL}{instructions(known_tags, start)}"}],
+    return await complete(state["messages"] + [{"role": "user", "content": f"{final_turn(state, rows)}\n\n{FINAL}{instructions(known_tags, start)}"}],
                     kind="live")
 
 
 if __name__ == "__main__":
+    import anyio
     rows = [dict(start=f"2026-10-02T10:{m:02d}:00.000", text=f"句{m}", speaker="S1") for m in range(0, 20, 2)]
     s = new("2026-10-02T10:00:00.000", "phone", [
         {"start": "2026-10-02T08:00:00", "end": "2026-10-02T08:30:00", "participants": ["我", "老王"],
@@ -150,7 +151,7 @@ if __name__ == "__main__":
                           {"op": "add", "title": "C", "start": "99:99:99"}, {"op": "add", "title": "D"}], rows, fresh)
     assert [(t["id"], t["title"]) for t in topics] == [(1, "A2"), (3, "C"), (4, "D")] and topics[0]["points"] == ["a2"], topics
     assert topics[1]["start"] == "2026-10-02T10:10:00.000"  # a time past every row: the turn's first row
-    assert analyze({**s, "fed_to": rows[-1]["start"]}, rows)["fed_to"] == rows[-1]["start"]  # nothing new: no call
+    assert anyio.run(analyze, {**s, "fed_to": rows[-1]["start"]}, rows)["fed_to"] == rows[-1]["start"]  # nothing new: no call
     assert json.dumps(public({**s, "messages": [1]})).find("messages") < 0
     assert "S1: 句0" not in final_turn(s, rows) and "S1: 句10" in final_turn(s, rows)  # only what it has not seen
     assert final_turn({**s, "drafted": True}, rows).startswith(DRAFTED) and "S1: 句0" in final_turn({**s, "drafted": True}, rows)

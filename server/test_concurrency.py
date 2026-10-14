@@ -1,0 +1,66 @@
+"""One way to run things side by side in server/ (#200): anyio. Threads only through anyio.to_thread.run_sync with a
+limiter (threads.py), tasks in TaskGroups, timeouts with fail_after / move_on_after, queues as memory object streams. No
+asyncio primitives, no threading.Thread, no concurrent.futures pools, except where ALLOWED says why."""
+import io
+import tokenize
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+# file: lines (stripped) that may still use them, and why
+ALLOWED = {
+    "server.py": {  # step 2 (anyio with the tenants, #200): the background loops, their queues and the pipeline's tasks
+        "import asyncio": "",
+        "asyncio.ensure_future(broadcast(e))": "note(): becomes a broadcaster task per tenant",
+        "summary_q: asyncio.Queue = asyncio.Queue()": "becomes a memory object stream per tenant",
+        "await asyncio.gather(*(summarize_loop() for _ in range(SUMMARY_WORKERS)))": "summary workers: a TaskGroup",
+        "running: dict[str, asyncio.Task] = {}": "pipelines(): the tenant's TaskGroup",
+        'running[d] = asyncio.create_task(lasting(d), name=f"pipeline:{d}")': "pipelines(): the tenant's TaskGroup",
+        '"vad_to": None, "wake": asyncio.Event(), "draft": None, "drafting": False,': "anyio.Event cannot be cleared",
+        'await asyncio.wait_for(st["wake"].wait(), REFINE_EVERY_S)': "with the wake Event",
+        "except asyncio.TimeoutError:": "with the wake Event",
+        'st["live_task"] = asyncio.create_task(live_update(), name=f"live:{device}")': "the pipeline's TaskGroup",
+        'st["live_task"] = asyncio.create_task(live_update(asked=True), name=f"live:{device}")': "the pipeline's TaskGroup",
+        'parts = [asyncio.create_task(coro, name=f"{name}:{device}")': "the pipeline's four parts: a TaskGroup",
+        "t = (await asyncio.wait(parts, return_when=asyncio.FIRST_COMPLETED))[0].pop()": "the pipeline's four parts",
+        "asyncio.create_task(coro, name=name).add_done_callback(": "startup: the lifespan's TaskGroup",
+    },
+    "replay_case.py": {  # an offline replay of recorded cases: sync urllib calls in a pool, each window on its own loop
+        "import concurrent.futures as cf": "",
+        'with cf.ThreadPoolExecutor(2) as ex, open(self.cache_path, "a") as f:  # the live service shares the key': "",
+        "with cf.ThreadPoolExecutor(4) as ex:": "",
+    },
+    "migrate.py": {"import concurrent.futures as cf": "one-off (10-02 SQLite cutover): to delete",
+                   "with cf.ThreadPoolExecutor(16) as ex:": "one-off: to delete"},
+    "backfill_hints.py": {"import concurrent.futures as cf": "one-off (#86 history backfill): to delete",
+                          "with cf.ThreadPoolExecutor(args.workers) as ex:": "one-off: to delete"},
+}
+
+
+def uses(src: str) -> list[tuple[int, str]]:
+    """(line, its text) of each use: the names asyncio, concurrent, ThreadPoolExecutor, run_in_executor and
+    threading.Thread (code only: not in comments or strings)."""
+    toks, out = list(tokenize.generate_tokens(io.StringIO(src).readline)), []
+    lines = src.splitlines()
+    for i, t in enumerate(toks):
+        if t.type != tokenize.NAME:
+            continue
+        thread = t.string == "threading" and i + 2 < len(toks) and toks[i + 1].string == "." and toks[i + 2].string == "Thread"
+        if t.string in ("asyncio", "concurrent", "ThreadPoolExecutor", "run_in_executor") or thread:
+            if not out or out[-1][0] != t.start[0]:
+                out.append((t.start[0], lines[t.start[0] - 1].strip()))
+    return out
+
+
+def test_one_way():
+    found = {f.name: uses(f.read_text()) for f in sorted(HERE.glob("*.py"))}
+    bad = [f"{name}:{n}: {line}" for name, us in found.items() for n, line in us if line not in ALLOWED.get(name, {})]
+    assert not bad, "use anyio (see threads.py):\n" + "\n".join(bad)
+    stale = [f"{name}: {line}" for name, lines in ALLOWED.items() for line in lines if line not in {x for _, x in found.get(name, [])}]
+    assert not stale, "allowed but no longer there, drop it from ALLOWED:\n" + "\n".join(stale)
+
+
+def test_uses():
+    src = ('import asyncio  # x\nx = "asyncio.run"  # asyncio in a comment\nthreading.Thread(target=f)\nthreading.Lock()\n'
+           'loop.run_in_executor(None, f)\nwith cf.ThreadPoolExecutor(2) as ex:\n')
+    assert [n for n, _ in uses(src)] == [1, 3, 5, 6]

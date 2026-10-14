@@ -1,12 +1,12 @@
 """metrics() is Prometheus text VictoriaMetrics takes (names, escaped labels, numbers), names no phone and says nothing
 said; metrics_loop pushes it with basic auth, and sends nothing without VM_INGEST_URL."""
-import asyncio
 import base64
 import datetime as dt
 import re
 import tempfile
 from pathlib import Path
 
+import anyio
 import pytest
 
 import audio
@@ -62,17 +62,20 @@ def test_metrics(monkeypatch):
     assert (got['lr_stepfun_balance_cny{instance="main"}'], got['lr_stepfun_days_left{instance="main"}']) == (24.1, 7.5)
 
     sent = []
-    monkeypatch.setattr(server, "_http", lambda url, data, headers: sent.append((url, data, headers)))
+    async def http(url, data, headers):
+        sent.append((url, data, headers))
+    monkeypatch.setattr(server, "_http", http)
 
     async def once(url):  # the loop's first minute
         monkeypatch.setattr(server, "VM_INGEST_URL", url)
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(server.metrics_loop(), 0.5)
-    asyncio.run(once(""))
+        with anyio.move_on_after(0.5) as scope:
+            await server.metrics_loop()
+        assert scope.cancelled_caught, "the loop goes on"
+    anyio.run(once, "")
     assert sent == [], "no VM_INGEST_URL: nothing sent"
     monkeypatch.setenv("VM_INGEST_USER", "lr")
     monkeypatch.setenv("VM_INGEST_PASSWORD", "pw")
-    asyncio.run(once("http://vm/api/v1/import/prometheus"))
+    anyio.run(once, "http://vm/api/v1/import/prometheus")
     (url, data, headers), = sent
     assert url == "http://vm/api/v1/import/prometheus" and data.startswith(b"lr_up{")
     assert headers["Authorization"] == "Basic " + base64.b64encode(b"lr:pw").decode()

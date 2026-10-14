@@ -7,7 +7,6 @@ neither cares about formats, files or piece lengths. A stream pauses when nothin
 stops asking (it pulls at its own pace), and a gap between two pieces is only a jump in their start times. A device
 that sends a backlog of older audio while another one is recording is streamed on its own, not dropped.
 """
-import asyncio
 import datetime as dt
 import io
 import logging
@@ -20,16 +19,19 @@ import time
 import wave
 from pathlib import Path
 
+import anyio
+import anyio.to_thread
 import numpy as np
 
 import db
+import threads
 
 log = logging.getLogger("live")
 SR = 16000
 DIR: Path | None = None  # the recordings dir
 read_to: dict[str, int] = {}  # per device: start of the last piece its reader has finished with; later ones are queued
 HOLD_MAX_S = 12 * 3600  # a hold not said again for this long is let go: a phone that never comes back must not stop finals for good
-_append = threading.Lock()  # uploads are saved in threads: one append (and its index row) at a time
+_append = threading.Lock()  # uploads are saved in threads (threads.MEDIA): one append (and its index row) at a time
 
 
 AAC_DELAY = 2112  # samples an AAC encoder puts before the audio (at the iPhone's 16 kHz: 132 ms)
@@ -305,9 +307,9 @@ async def stream(device: str, after: dt.datetime | None, edge_s: float | None = 
         if p is not None and edge_s is None and (h := held(device)) is not None and p["start_ms"] >= h:
             p = None  # older audio is still on its way: it goes first
         if p is None:
-            await asyncio.sleep(1)
+            await anyio.sleep(1)
             continue
-        x = await asyncio.to_thread(samples, p)
+        x = await anyio.to_thread.run_sync(samples, p, limiter=threads.MEDIA)
         if x is not None:
             yield dt.datetime.fromtimestamp(p["start_ms"] / 1000), x
         at = p["start_ms"]
@@ -411,11 +413,11 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
                 break
         await s.aclose()
         return out
-    assert asyncio.run(take(None, 3)) == [0, 1, 5]
-    assert asyncio.run(take(dt.datetime(2026, 10, 2, 10, 1, 30), 2)) == [1, 5], "resumes from the piece holding `after`"
+    assert anyio.run(take, None, 3) == [0, 1, 5]
+    assert anyio.run(take, dt.datetime(2026, 10, 2, 10, 1, 30), 2) == [1, 5], "resumes from the piece holding `after`"
     assert queued("phone") == 1, "the last piece handed out counts until the reader comes back"
     assert save("iphone", T(2), tone(30), "audio/aac") > 29  # another device, inside phone's gap
-    assert asyncio.run(take(None, 1, "iphone")) == [2], "each device streams on its own"
+    assert anyio.run(take, None, 1, "iphone") == [2], "each device streams on its own"
     assert set(pending({"phone": dt.datetime(2026, 10, 2, 10, 6)})) == {"iphone"}, "phone done, iphone has none finalized"
     assert cut(dt.datetime(2026, 10, 2, 10, 2, 5), dt.datetime(2026, 10, 2, 10, 2, 6), "s16le", "phone") is None
     left, end = backlog("phone", dt.datetime(2026, 10, 2, 10, 1, 30))
@@ -424,39 +426,49 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     with wave.open(io.BytesIO(cut(dt.datetime(2026, 10, 2, 10, 0, 59), dt.datetime(2026, 10, 2, 10, 1, 1), "wav", "phone"))) as w:
         assert w.getframerate() == SR and abs(w.getnframes() - 2.4 * SR) < 2, w.getnframes()
 
+    async def pieces(after, got):  # the stream's pieces into got, one at a time as it hands them out
+        s = stream("phone", after)
+        try:
+            async for t, x in s:
+                await got.send(t)
+        finally:
+            await s.aclose()
+
+    async def next_in(got, s: float):  # the next piece within s seconds, None when the stream holds it back
+        with anyio.move_on_after(s):
+            return (await got.receive()).minute
+
     async def held_back():  # 10:05 came first, the phone still has older audio: 10:03 is to go before it
-        out, s = [], stream("phone", None)
-        go = asyncio.create_task(anext(s))
+        send, got = anyio.create_memory_object_stream()
         hold("phone", T(5))
-        for _ in range(2):
-            out.append((await go)[0].minute)
-            go = asyncio.create_task(anext(s))
-        await asyncio.sleep(2.5)
-        assert out == [0, 1] and not go.done(), "10:05 waits"
-        assert save("phone", T(3), tone(60), "audio/ogg") > 59
-        out.append((await asyncio.wait_for(go, 5))[0].minute)
-        go = asyncio.create_task(anext(s))
-        await asyncio.sleep(2.5)
-        assert out == [0, 1, 3] and not go.done(), "still held"
-        hold("phone", None)
-        out.append((await asyncio.wait_for(go, 5))[0].minute)
-        assert out == [0, 1, 3, 5], out
-        await s.aclose()
-    asyncio.run(held_back())
+        with send, got:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(pieces, None, send)
+                out = [await next_in(got, 5) for _ in range(2)]
+                assert out == [0, 1] and await next_in(got, 2.5) is None, "10:05 waits"
+                assert save("phone", T(3), tone(60), "audio/ogg") > 59
+                out.append(await next_in(got, 5))
+                assert out == [0, 1, 3] and await next_in(got, 2.5) is None, "still held"
+                hold("phone", None)
+                out.append(await next_in(got, 5))
+                assert out == [0, 1, 3, 5], out
+                tg.cancel_scope.cancel()
+    anyio.run(held_back)
     hold("phone", T(5))
-    assert held("phone") == T(5) and asyncio.run(take(dt.datetime(2026, 10, 2, 10, 4), 1, "iphone")) == [20], "a hold is the device's own"
+    assert held("phone") == T(5) and anyio.run(take, dt.datetime(2026, 10, 2, 10, 4), 1, "iphone") == [20], "a hold is the device's own"
 
     async def started_held():  # the reader starts while all there is after `after` is held: older audio still goes first
-        s = stream("phone", dt.datetime(2026, 10, 2, 10, 4))
-        go = asyncio.create_task(anext(s))
-        await asyncio.sleep(1.5)
-        assert not go.done(), "10:05 is held"
-        assert save("phone", T(4) + 30_000, tone(20), "audio/ogg") > 19  # 10:04:30, after `after`, before 10:05
-        t = (await asyncio.wait_for(go, 5))[0]
-        await s.aclose()
+        send, got = anyio.create_memory_object_stream()
+        with send, got:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(pieces, dt.datetime(2026, 10, 2, 10, 4), send)
+                assert await next_in(got, 1.5) is None, "10:05 is held"
+                assert save("phone", T(4) + 30_000, tone(20), "audio/ogg") > 19  # 10:04:30, after `after`, before 10:05
+                t = await got.receive()
+                tg.cancel_scope.cancel()
         return t
-    assert asyncio.run(started_held()) == dt.datetime(2026, 10, 2, 10, 4, 30), "not passed over for the held piece"
+    assert anyio.run(started_held) == dt.datetime(2026, 10, 2, 10, 4, 30), "not passed over for the held piece"
     db.put_kv("hold:phone", {"at": T(5), "seen": time.time() - HOLD_MAX_S - 1})
     assert held("phone") is None, "a hold not said again for HOLD_MAX_S is let go"
-    assert asyncio.run(take(dt.datetime(2026, 10, 2, 10, 4), 2)) == [4, 5]
+    assert anyio.run(take, dt.datetime(2026, 10, 2, 10, 4), 2) == [4, 5]
     print("ok")

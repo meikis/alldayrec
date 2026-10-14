@@ -24,7 +24,7 @@ if [ "${1:-}" != remote ]; then  # on this Mac
     tmp=$(mktemp -d)
     git -C "$root" rev-parse --short HEAD > "$tmp/COMMIT"
     # explicit list, no excludes: bsdtar's * crosses /, an exclude once dropped dist/index.html; no ._ files
-    (cd "$root/server" && COPYFILE_DISABLE=1 tar --no-xattrs -czf "$tmp/release.tgz" ./*.py static/dist -C "$tmp" COMMIT)
+    (cd "$root/server" && COPYFILE_DISABLE=1 tar --no-xattrs -czf "$tmp/release.tgz" ./*.py pyproject.toml uv.lock static/dist -C "$tmp" COMMIT)
     tar -tzf "$tmp/release.tgz" | grep -qx static/dist/index.html || { echo "static/dist/index.html is not in the release" >&2; exit 1; }
     scp -q "$tmp/release.tgz" "$HOST:lr-deploy.tgz"
   fi
@@ -36,6 +36,7 @@ fi
 mode=$2; shift 2
 RUN=$(date +%Y%m%d-%H%M%S)
 TGZ=/mnt/c/Users/me/lr-deploy.tgz  # where scp put it (the Windows home)
+UV=/root/.local/bin/uv
 
 env_of() { grep "^$2=" "$1/.env" | tail -1 | cut -d= -f2-; }  # dir key: the last one wins, as in systemd
 
@@ -79,6 +80,10 @@ deploy() {  # dir unit: back up, install the release, restart, check
   tar -xzf "$TGZ" -C "$b/new" --no-same-owner
   cp -a "$d"/server/*.py "$b/old/"
   [ ! -f "$d/server/COMMIT" ] || cp -a "$d/server/COMMIT" "$b/old/"
+  # the release's packages (its uv.lock) into the instance's venv first: added or changed, none removed (--inexact), so
+  # the code running now and a rollback's run on them too; a failure stops here, nothing installed, nothing restarted
+  (cd "$b/new" && UV_PROJECT_ENVIRONMENT="$d/server/.venv" "$UV" sync --frozen --inexact -q)
+  for f in pyproject.toml uv.lock; do [ ! -f "$d/server/$f" ] || cp -a "$d/server/$f" "$b/old/"; done
   # the columns now (rollback drops those a release adds: old code inserts whole rows) and an online copy of the db
   "$d/server/.venv/bin/python" - "$(env_of "$d" LIVE_DATA)/live.db" "$b/old" << 'PY'
 import json, sqlite3, sys
@@ -90,7 +95,7 @@ PY
   INSTALLED+=" $d"
   ln -sfn "$b" "$d/backup-last"  # once the backup is whole; rollback goes by it and by COMMIT, so COMMIT goes in first
   cp "$b/new/COMMIT" "$d/server/"
-  cp "$b/new/"*.py "$d/server/"
+  cp "$b/new/"*.py "$b/new/pyproject.toml" "$b/new/uv.lock" "$d/server/"
   mv "$d/server/static/dist" "$b/old/dist"
   cp -a "$b/new/static/dist" "$d/server/static/dist"
   off=$(stat -c %s "$d/data/server.log")
@@ -118,6 +123,7 @@ for t, cols in before.items():
             c.execute(f"ALTER TABLE {t} DROP COLUMN {col}")
 PY
   cp -a "$b/old/"*.py "$d/server/"
+  for f in pyproject.toml uv.lock; do [ ! -f "$b/old/$f" ] || cp -a "$b/old/$f" "$d/server/"; done  # the venv keeps what came
   if [ -f "$b/old/COMMIT" ]; then cp -a "$b/old/COMMIT" "$d/server/"; else mv "$d/server/COMMIT" "$b/rolled-back-COMMIT"; fi
   if [ -d "$b/old/dist" ]; then  # the deploy got as far as replacing it
     mv "$d/server/static/dist" "$b/rolled-back-dist"

@@ -23,6 +23,8 @@ import statistics
 import sys
 import time
 
+import anyio
+
 import ask
 import db
 from speakers import ANON
@@ -107,8 +109,9 @@ def score(x: dict, r: dict) -> dict:
 
 
 if __name__ == "__main__":
-    db._local.c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)  # never open_db: it writes the schema
-    db._local.c.row_factory = sqlite3.Row
+    ro = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, check_same_thread=False)  # never open_db: it writes the schema
+    ro.row_factory = sqlite3.Row
+    db.conn = lambda: ro  # ask runs its tools in a thread, one at a time
     qs = questions(dt.datetime.now())
     rows = []
     for k, x in qs.items():
@@ -116,7 +119,7 @@ if __name__ == "__main__":
             continue
         t0 = time.time()
         try:
-            r = ask.ask(x["q"])
+            r = anyio.run(ask.ask, x["q"])
         except Exception as e:
             print(json.dumps({"id": k, "error": repr(e)[:300]}, ensure_ascii=False), flush=True)
             continue

@@ -1,9 +1,10 @@
 """Person profiles: the evidence numbers the model sees point back at conversations, todos and mentions; a line citing
 nothing given is dropped; mentions find the name and its aliases said by others, a few per conversation."""
-import asyncio
 import json
 import tempfile
 from pathlib import Path
+
+import anyio
 
 import db
 import profiles
@@ -32,7 +33,7 @@ def test_profile(monkeypatch):
         db.put_summary({"conversation": "c1", "status": "done", "title": "出差", "summary": "张三说要去上海",
                         "people": [{"who": "张三", "points": ["下周去上海出差"]}],
                         "todos": [{"owner": "我", "to": "张三", "text": "订票", "at": T + "05.000"}]}, t)
-    asyncio.run(alias_set({"alias": "老张", "name": "张三"}))
+    anyio.run(alias_set, {"alias": "老张", "name": "张三"})
 
     ms = mentions("张三")
     assert [(m["conv"], m["at"][11:19]) for m in ms] == [("c2", "11:00:04"), ("c2", "11:00:03"), ("c2", "11:00:02"),
@@ -41,19 +42,19 @@ def test_profile(monkeypatch):
 
     asked = []
 
-    def complete(messages, kind=None):
+    async def complete(messages, kind=None):
         asked.append(messages[1]["content"])
         return {"who": "同事", "facts": [{"text": "要去上海出差", "src": ["E1", "E99"]}, {"text": "编的", "src": ["E99"]}],
                 "recent": [], "mentions": [{"text": "S1 说他要换工作", "src": ["E7"]}], "open": [{"text": "我要订票", "src": ["E2"]}]}, {"model": "m"}
     monkeypatch.setattr(summary, "complete", complete)
-    pf = asyncio.run(make_profile("张三"))
+    pf = anyio.run(make_profile, "张三")
     text = asked[0]
     assert "[E1] 对话" in text and "下周去上海出差" in text and "[E2] 待办 2026-10-05：我答应他：订票" in text
     assert "  >> S1: 老张上次说要换工作" in text, text
     assert [x["text"] for x in pf["facts"]] == ["要去上海出差"] and [s["id"] for s in pf["facts"][0]["src"]] == ["E1"]
     assert pf["mentions"][0]["src"][0]["conv"] == "c1" and pf["open"][0]["src"][0]["at"] == T + "05.000"
     assert pf["upto"] == c1["start"] and pf["inputs"] == {"conversations": 1, "todos": 1, "mentions": 5}
-    p = asyncio.run(person("张三"))
+    p = anyio.run(person, "张三")
     assert p["profile"]["who"] == "同事" and p["profile_newer"] == 0
     assert json.loads(db.conn().execute("SELECT body FROM profiles").fetchone()[0])["name"] == "张三"
 

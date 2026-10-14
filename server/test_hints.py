@@ -1,9 +1,9 @@
 """Name hints and speaker suggestions: only names the rows bear out are kept, a merge keeps the target's voice and
 carries the hints, and a conversation's suggestions come from voices, names and aliases without changing anything."""
-import asyncio
 import tempfile
 from pathlib import Path
 
+import anyio
 import numpy as np
 
 import db
@@ -61,21 +61,21 @@ def test_rename_merges_and_suggestions():
     groups = [{"id": "x", "name": "张三", "members": [], "called": [],
                "suggested": [{"score": 0.7, "members": [{"conv": c["id"], "label": "S3"}],
                               "called": [{"name": "李四", "convs": ["c1", "c2", c["id"]]}, {"name": "王五", "convs": ["c1", c["id"]]}]}]}]
-    asyncio.run(alias_set({"alias": "老张", "name": "张三"}))
+    anyio.run(alias_set, {"alias": "老张", "name": "张三"})
     sug = label_suggestions(db.conversation(c["id"]), groups, vec, db.name_hints(c["id"])[c["id"]], db.aliases())
     assert [(x["who"], x["name"], x["canon"]) for x in sug["names"]] == [("S2", "老张", "张三"), ("S3", "小李", "小李")]
     assert sug["merge"] == [{"from": "S1", "to": "S2", "score": 1.0}]  # alike voices; S2 has more rows
     assert sug["like"] == [{"who": "S3", "name": "张三", "score": 0.7}]
     assert sug["elsewhere"] == [{"who": "S3", "name": "李四", "convs": 2}]
 
-    r = asyncio.run(apply_rename(c["id"], "S1", "S2"))  # the merge, as the page asks it
+    r = anyio.run(apply_rename, c["id"], "S1", "S2")  # the merge, as the page asks it
     assert r["participants"] == ["S2", "S3", "我"]
     assert [v[0] for v in db.conn().execute("SELECT label FROM voices ORDER BY label")] == ["S2", "S3"]
     assert db.vec(db.conn().execute("SELECT e FROM voices WHERE label = 'S2'").fetchone()[0])[0] == 1.0, "S2's own voice stays"
     assert {x["by"] for x in db.name_hints(c["id"])[c["id"]]["names"]} == {"S2", "S3"}, "the caller S1 is S2 now"
 
-    asyncio.run(apply_rename(c["id"], "S2", "张三"))
+    anyio.run(apply_rename, c["id"], "S2", "张三")
     sug = label_suggestions(db.conversation(c["id"]), groups, vec, db.name_hints(c["id"])[c["id"]], db.aliases())
     assert [x["who"] for x in sug["names"]] == ["S3"], "老张 is 张三's alias: nothing left to offer for 张三"
-    assert asyncio.run(person("张三"))["aliases"] == ["老张"]
-    assert asyncio.run(alias_set({"alias": "老张", "name": ""})) == {}
+    assert anyio.run(person, "张三")["aliases"] == ["老张"]
+    assert anyio.run(alias_set, {"alias": "老张", "name": ""}) == {}

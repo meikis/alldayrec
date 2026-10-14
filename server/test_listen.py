@@ -1,13 +1,14 @@
 """Listening in on a device (/api/listen): the newest piece first, then each newer one once, never older audio
 (a backlog arriving) nor more than LISTEN_BACK_S behind the newest, one device at a time, and only with the token.
 Through the app as the page calls it, auth middleware included."""
-import asyncio
 import datetime as dt
 import io
 import subprocess
 import tempfile
 import wave
 from pathlib import Path
+
+import anyio
 
 import audio
 import db
@@ -27,10 +28,10 @@ def get(query: str, headers: dict[str, str] | None = None) -> tuple[int, dict[st
 
     async def send(m):
         out.append(m)
-    asyncio.run(server.app({"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
+    anyio.run(server.app, {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
                             "path": "/api/listen", "raw_path": b"/api/listen", "query_string": query.encode(), "root_path": "",
                             "headers": [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()],
-                            "client": ("127.0.0.1", 1), "server": ("test", 80)}, receive, send))
+                            "client": ("127.0.0.1", 1), "server": ("test", 80)}, receive, send)
     start = next(m for m in out if m["type"] == "http.response.start")
     return start["status"], {k.decode(): v.decode() for k, v in start["headers"]}, b"".join(m.get("body", b"") for m in out)
 

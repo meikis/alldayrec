@@ -17,6 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+import anyio
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from replay_case import DEVICE_PARAMS, EPOCH, LINK_MIN, MIN_SPEAKER_S, Case, Registry, Speakers  # noqa: E402
 from server import SR, _http, final_rows  # noqa: E402
@@ -25,12 +27,12 @@ BRIDGE, SERVICE = os.environ["ASR_UPLOAD_BRIDGE_URL"], os.environ["ASR_SERVICE_U
 
 
 def submit(case: Case, model: str) -> str:
-    up = json.loads(_http(BRIDGE, json.dumps({"filename": f"{case.dir.name}.ogg", "content_type": "audio/ogg"}).encode(),
+    up = json.loads(anyio.run(_http, BRIDGE, json.dumps({"filename": f"{case.dir.name}.ogg", "content_type": "audio/ogg"}).encode(),
                           {"Authorization": f"Bearer {os.environ['ASR_UPLOAD_BRIDGE_TOKEN']}", "Content-Type": "application/json"}))
-    _http(up["upload_url"], (case.dir / case.meta["audio"]).read_bytes(), {"Content-Type": "audio/ogg"}, "PUT")
+    anyio.run(_http, up["upload_url"], (case.dir / case.meta["audio"]).read_bytes(), {"Content-Type": "audio/ogg"}, "PUT")
     auth = {"Authorization": "Basic " + base64.b64encode(os.environ["ASR_SERVICE_BASIC_AUTH"].encode()).decode()}
-    r = json.loads(_http(f"{SERVICE}/audio/transcriptions", json.dumps({"audio_url": up["download_url"], "model": model}).encode(),
-                         {**auth, "Content-Type": "application/json"}))
+    r = json.loads(anyio.run(_http, f"{SERVICE}/audio/transcriptions", json.dumps({"audio_url": up["download_url"], "model": model}).encode(),
+                             {**auth, "Content-Type": "application/json"}))
     print("job", r, flush=True)
     return r["job_id"]
 
@@ -39,7 +41,7 @@ def wait(job: str, every=30) -> dict:
     auth = {"Authorization": "Basic " + base64.b64encode(os.environ["ASR_SERVICE_BASIC_AUTH"].encode()).decode()}
     t = time.time()
     while True:
-        r = json.loads(_http(f"{SERVICE}/jobs/{job}", headers=auth))
+        r = json.loads(anyio.run(_http, f"{SERVICE}/jobs/{job}", None, auth))
         if r["status"] == "COMPLETED":
             print(f"completed after {time.time() - t:.0f}s", flush=True)
             return r

@@ -7,7 +7,6 @@ response: [{text, start_ms, end_ms, speaker?}]. nostream answers once per ~15 s 
 high-accuracy result; async answers after every packet. VOLC_ASR_KEY is the Agent Plan API key.
 """
 import argparse
-import asyncio
 import gzip
 import json
 import os
@@ -16,6 +15,7 @@ import sys
 import time
 import uuid
 
+import anyio
 import numpy as np
 
 URL = "wss://openspeech.bytedance.com/api/v3/plan/sauc/bigmodel_{mode}"
@@ -95,13 +95,16 @@ async def _run(x: np.ndarray, mode: str, pace_s: float, speakers: bool, log=None
                 if r.get("seq", 0) < 0:  # the answer to the last packet
                     return
 
-        task = asyncio.create_task(reader())
-        for i, pk in enumerate(packets, start=2):
-            end = i == len(packets) + 1
-            await ws.send(frame(AUDIO_ONLY, NEG_WITH_SEQ if end else POS_SEQ, -i if end else i, pk))
-            if pace_s:
-                await asyncio.sleep(pace_s)
-        await asyncio.wait_for(task, timeout=120)
+        async with anyio.create_task_group() as tg:  # the reader failing stops the sending
+            tg.start_soon(reader)
+            for i, pk in enumerate(packets, start=2):
+                end = i == len(packets) + 1
+                await ws.send(frame(AUDIO_ONLY, NEG_WITH_SEQ if end else POS_SEQ, -i if end else i, pk))
+                if pace_s:
+                    await anyio.sleep(pace_s)
+            tg.cancel_scope.deadline = anyio.current_time() + 120  # the answer to the last packet
+        if tg.cancel_scope.cancelled_caught:
+            raise TimeoutError  # as asyncio.wait_for did: the calls table keeps "TimeoutError: "
     return utterances(last), {"seconds": round(time.perf_counter() - t0, 1), "responses": responses, "logid": logid,
                   "text": (last or {}).get("result", {}).get("text", "")}
 
@@ -142,24 +145,26 @@ async def _stream(x: np.ndarray, pace_s: float, end_window_ms: int | None = None
                 if r.get("seq", 0) < 0:
                     return
 
-        task = asyncio.create_task(reader())
-        for i, pk in enumerate(packets, start=2):
-            end = i == len(packets) + 1
-            await ws.send(frame(AUDIO_ONLY, NEG_WITH_SEQ if end else POS_SEQ, -i if end else i, pk))
-            if pace_s:
-                await asyncio.sleep(pace_s)
-            if task.done():
-                break
-        await asyncio.wait_for(task, timeout=120)
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(reader)
+            for i, pk in enumerate(packets, start=2):
+                end = i == len(packets) + 1
+                await ws.send(frame(AUDIO_ONLY, NEG_WITH_SEQ if end else POS_SEQ, -i if end else i, pk))
+                if pace_s:
+                    await anyio.sleep(pace_s)
+            tg.cancel_scope.deadline = anyio.current_time() + 120
+        if tg.cancel_scope.cancelled_caught:
+            raise TimeoutError  # as asyncio.wait_for did: the calls table keeps "TimeoutError: "
     return utts, {"seconds": round(time.perf_counter() - t0, 1), "logid": logid, "untimed": untimed}
 
 
-def stream(x: np.ndarray, pace_s: float = 0.02, end_window_ms: int | None = None):
+async def stream(x: np.ndarray, pace_s: float = 0.02, end_window_ms: int | None = None):
     """One stretch of speech through one two-pass streaming session: its definite sentences (ms from x[0])."""
-    return asyncio.run(asyncio.wait_for(_stream(x, pace_s, end_window_ms), timeout=30 + len(x) / SR * (pace_s * 5 + 0.3)))
+    with anyio.fail_after(30 + len(x) / SR * (pace_s * 5 + 0.3)):
+        return await _stream(x, pace_s, end_window_ms)
 
 
-def transcribe(x: np.ndarray, mode: str = "nostream", pace_s: float = 0.02, speakers: bool = True, partial=None):  # 0.02: 10x real time
+async def transcribe(x: np.ndarray, mode: str = "nostream", pace_s: float = 0.02, speakers: bool = True, partial=None):  # 0.02: 10x real time
     """Bounded: a stalled connection (send blocked, no answer) must fail so the caller retries next pass.
     partial(utts): called with the definite sentences so far each time an answer adds some (nostream answers every
     ~4 s while a window goes in at 10x, each ~15-20 s of audio further: a 5 min window's first sentences in ~3 s)."""
@@ -171,7 +176,8 @@ def transcribe(x: np.ndarray, mode: str = "nostream", pace_s: float = 0.02, spea
         if partial and len(us) > seen[0]:
             seen[0] = len(us)
             partial(us)
-    return asyncio.run(asyncio.wait_for(_run(x, mode, pace_s, speakers, log), timeout=budget))
+    with anyio.fail_after(budget):
+        return await _run(x, mode, pace_s, speakers, log)
 
 
 def main():
@@ -183,7 +189,7 @@ def main():
     a = ap.parse_args()
     x = np.frombuffer(subprocess.run(["ffmpeg", "-v", "error", "-i", a.audio, "-f", "s16le", "-ac", "1", "-ar", str(SR), "-"],
                                      capture_output=True, check=True).stdout, np.int16)
-    utts, info = asyncio.run(_run(x, a.mode, a.pace, not a.no_speakers, log=lambda r: print(json.dumps(r["payload"], ensure_ascii=False)[:200], file=sys.stderr)))
+    utts, info = anyio.run(_run, x, a.mode, a.pace, not a.no_speakers, lambda r: print(json.dumps(r["payload"], ensure_ascii=False)[:200], file=sys.stderr))
     print(json.dumps(info, ensure_ascii=False))
     for u in utts:
         print(f"{u['start_ms'] / 1000:7.1f} {u['end_ms'] / 1000:7.1f} {u.get('speaker', '-'):>3} {u['text']}")

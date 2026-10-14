@@ -2,25 +2,25 @@
 a time, only with speech it has not seen. Asked once, its agent writes the final summary though the conversation
 stays under summary.MIN_SPEECH_S; one never asked still gets its first sentence as the title and no call. The pipeline
 rig of test_backlog: real audio store, streams and pipeline, fake engines and LLM, a page watching."""
-import asyncio
 import datetime as dt
 import time
 
+import anyio
 import numpy as np
 import pytest
 from fastapi import HTTPException
 
 import db
 import server
-from test_backlog import DEVICE, SR, flac, heard, rig, save, st, tone
+from test_backlog import DEVICE, SR, flac, hear, rig, save, st, tone
 
 
 def test_ask(tmp_path, monkeypatch):
-    rig(tmp_path, monkeypatch, lambda x, partial=None: heard(x))
+    rig(tmp_path, monkeypatch, hear)
     monkeypatch.setattr(server.summary, "MIN_SPEECH_S", 60)  # 4 tones of 4 s: well under it
     calls = []
 
-    def llm(messages, timeout=None, kind=None):
+    async def llm(messages, timeout=None, kind=None):
         calls.append(messages[-1]["content"])
         if server.live.FINAL in messages[-1]["content"]:
             return {"title": "短的"}, {"model": "m", "choices": [{"message": {"content": "{}"}}]}
@@ -38,43 +38,44 @@ def test_ask(tmp_path, monkeypatch):
 
     async def run():
         save(t0, flac(x))
-        pipe = asyncio.create_task(server.pipeline(DEVICE))
-        finals = lambda: db.sentences(server.iso(t0), "~", source=DEVICE)
-        for _ in range(60):
-            await asyncio.sleep(0.5)
-            if st()["conversation"] and len(finals()) == 4:
-                break
-        speech = st()["conversation"]["speech_s"]
-        assert 10 < speech < 60, st()["conversation"]
-        assert not calls and not st()["live"], "under a minute: no analysis by itself"
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(server.pipeline, DEVICE)
+            finals = lambda: db.sentences(server.iso(t0), "~", source=DEVICE)
+            for _ in range(60):
+                await anyio.sleep(0.5)
+                if st()["conversation"] and len(finals()) == 4:
+                    break
+            speech = st()["conversation"]["speech_s"]
+            assert 10 < speech < 60, st()["conversation"]
+            assert not calls and not st()["live"], "under a minute: no analysis by itself"
 
-        assert await server.live_ask(DEVICE) == {"analyzing": True}
-        assert server.device_status(DEVICE, st())["analyzing"]
-        assert await asked() == "正在分析"
-        for _ in range(20):
-            if st()["live"]:
-                break
-            await asyncio.sleep(0.2)
-        assert st()["live"]["asked"] and st()["live"]["topics"] and len(calls) == 1
-        assert not server.device_status(DEVICE, st())["analyzing"]
-        assert await asked() == "没有新的语音", "no wait between asks: only speech it has not seen"
+            assert await server.live_ask(DEVICE) == {"analyzing": True}
+            assert server.device_status(DEVICE, st())["analyzing"]
+            assert await asked() == "正在分析"
+            for _ in range(20):
+                if st()["live"]:
+                    break
+                await anyio.sleep(0.2)
+            assert st()["live"]["asked"] and st()["live"]["topics"] and len(calls) == 1
+            assert not server.device_status(DEVICE, st())["analyzing"]
+            assert await asked() == "没有新的语音", "no wait between asks: only speech it has not seen"
 
-        db.put_kv(f"end_at:{DEVICE}", server.iso(t0 + dt.timedelta(seconds=len(x) / SR)))  # the recorder stops
-        for _ in range(20):
-            if server.summary_q.qsize():
-                break
-            await asyncio.sleep(0.5)
-        c = server.summary_q.get_nowait()
-        assert c["via_live"] and c["speech_s"] == speech and db.timeline(c["id"])["asked"]
-        assert not st()["live"] and await asked() == "没有进行中的对话"
-        res = server.summarize(c, [])
-        assert res["via"] == "live" and res["title"] == "短的" and len(calls) == 2, "asked: the agent writes the summary"
-        db.put_timeline(c["id"], {**db.timeline(c["id"]), "asked": False})
-        res = server.summarize(c, [])
-        assert res["model"] is None and res["title"] == server.conversation_rows(c)[0]["text"] and len(calls) == 2, "never asked: the first sentence, no call"
-        pipe.cancel()
+            db.put_kv(f"end_at:{DEVICE}", server.iso(t0 + dt.timedelta(seconds=len(x) / SR)))  # the recorder stops
+            for _ in range(20):
+                if server.summary_q.qsize():
+                    break
+                await anyio.sleep(0.5)
+            c = server.summary_q.get_nowait()
+            assert c["via_live"] and c["speech_s"] == speech and db.timeline(c["id"])["asked"]
+            assert not st()["live"] and await asked() == "没有进行中的对话"
+            res = await server.summarize(c, [])
+            assert res["via"] == "live" and res["title"] == "短的" and len(calls) == 2, "asked: the agent writes the summary"
+            db.put_timeline(c["id"], {**db.timeline(c["id"]), "asked": False})
+            res = await server.summarize(c, [])
+            assert res["model"] is None and res["title"] == server.conversation_rows(c)[0]["text"] and len(calls) == 2, "never asked: the first sentence, no call"
+            tg.cancel_scope.cancel()
 
-    asyncio.run(run())
+    anyio.run(run)
 
 
 def test_ask_without_pipeline(monkeypatch):
@@ -83,5 +84,5 @@ def test_ask_without_pipeline(monkeypatch):
     monkeypatch.setitem(server.state, "devices", {"starting": {"live": None}})
     for device in ("nobody", "starting"):
         with pytest.raises(HTTPException) as e:
-            asyncio.run(server.live_ask(device))
+            anyio.run(server.live_ask, device)
         assert e.value.status_code == 404 and e.value.detail == "没有这台设备的处理流程"

@@ -4,6 +4,7 @@ import datetime as dt
 import os
 import subprocess
 
+import anyio
 import numpy as np
 
 from server import CHUNK_S, QUIET_S, SR, Segmenter, clip_turns, final_rows, merge_drafts, next_cut, overlaps, speech_in
@@ -137,7 +138,7 @@ def test_engine_squeeze(monkeypatch):
     squeeze.check()
     sent = []
 
-    def transcribe(x, partial=None):
+    async def transcribe(x, partial=None):
         sent.append(len(x) / SR)
         us = [{"text": "一", "start_ms": 1600, "end_ms": 3400}, {"text": "二", "start_ms": 5000, "end_ms": 6000}]
         if partial:
@@ -145,17 +146,18 @@ def test_engine_squeeze(monkeypatch):
         return us, {}
     monkeypatch.setitem(sys.modules, "volc_asr", types.SimpleNamespace(transcribe=transcribe))
     got = []
-    segs = server.engine_segs(np.zeros(60 * SR, np.int16), [(10, 12), (30, 31.5)], got.append)  # kept: 8.5-13.5, 28.5-33
+    segs = anyio.run(server.engine_segs, np.zeros(60 * SR, np.int16), [(10, 12), (30, 31.5)], got.append)  # kept: 8.5-13.5, 28.5-33
     assert sent == [9.5]
     assert [(g["start_ms"], g["end_ms"]) for g in got[0]] == [(10100, 11900)]
     assert [(g["start_ms"], g["end_ms"], g["engine"]) for g in segs] == [(10100, 11900, "volc"), (28500, 29500, "volc")]
     monkeypatch.setattr(server, "SQUEEZE_KEEP_S", 0.0)  # off: the window whole, times as the engine gave them
-    assert server.engine_segs(np.zeros(60 * SR, np.int16), [(10, 12)])[1]["start_ms"] == 5000 and sent[-1] == 60
+    assert anyio.run(server.engine_segs, np.zeros(60 * SR, np.int16), [(10, 12)])[1]["start_ms"] == 5000 and sent[-1] == 60
 
 
 def test_engine_fallback(monkeypatch):
     """A provider that fails hands the window to ENGINE_FALLBACK (its sentences say so); both failing raises, for the
-    caller's retry. stepfun (H1): the SSE text on the file job's sentences, an SSE failure raising without waiting."""
+    caller's retry. stepfun (H1): the SSE text on the file job's sentences, an SSE failure raising without waiting
+    (the file job cancelled)."""
     import time
 
     import pytest
@@ -165,49 +167,64 @@ def test_engine_fallback(monkeypatch):
     stepfun_asr.check()
     calls, x = [], np.zeros(SR, np.int16)
 
-    def ok(x, partial=None):
+    async def ok(x, partial=None):
         calls.append("ok")
         if partial:
             partial([{"text": "一", "start_ms": 0, "end_ms": 500}])
         return [{"text": "一", "start_ms": 0, "end_ms": 500}, {"text": "二", "start_ms": 600, "end_ms": 900}]
 
-    def bad(x, partial=None):
+    async def bad(x, partial=None):
         calls.append("bad")
         raise RuntimeError("stepfun sse HTTP 402: balance")
     monkeypatch.setattr(server, "PROVIDERS", {**server.PROVIDERS, "a": bad, "b": ok, "c": bad})
     monkeypatch.setattr(server, "SQUEEZE_KEEP_S", 0.0)
     monkeypatch.setattr(server, "ENGINE_FALLBACK", "b")
-    segs = server.engine_segs(x, [], None, "a")
+    segs = anyio.run(server.engine_segs, x, [], None, "a")
     assert calls == ["bad", "ok"] and [g["engine"] for g in segs] == ["b", "b"] and "402" in segs[0]["fallback"]
     got = []
-    assert "fallback" not in server.engine_segs(x, [], got.append, "b")[0] and got[0][0]["engine"] == "b"
+    assert "fallback" not in anyio.run(server.engine_segs, x, [], got.append, "b")[0] and got[0][0]["engine"] == "b"
     monkeypatch.setattr(server, "ENGINE_FALLBACK", "c")
     with pytest.raises(RuntimeError, match="a: .*402.*; c: .*402"):
-        server.engine_segs(x, [], None, "a")
+        anyio.run(server.engine_segs, x, [], None, "a")
     monkeypatch.setattr(server, "ENGINE_FALLBACK", "")
     calls.clear()
     with pytest.raises(RuntimeError):
-        server.engine_segs(x, [], None, "a")
+        anyio.run(server.engine_segs, x, [], None, "a")
     assert calls == ["bad"], "no fallback configured: the error goes to the caller"
 
     d = lambda t, a, b: {"delta": t, "start_time": a, "end_time": b}
-    monkeypatch.setattr(stepfun_asr, "sse", lambda x, on: [d("你好", 100, 400), d("嗯", 5000, 5100)])
-    monkeypatch.setattr(server, "diarize", lambda x: [{"start_ms": 0, "end_ms": 500, "speaker": "SPEAKER_1", "text": "你号", "words": []}])
-    assert [(g["text"], g.get("speaker"), g["engine"]) for g in server.engine_segs(x, [], None, "stepfun")] == \
+    async def sse(x, on):
+        return [d("你好", 100, 400), d("嗯", 5000, 5100)]
+
+    async def diarize(x):
+        return [{"start_ms": 0, "end_ms": 500, "speaker": "SPEAKER_1", "text": "你号", "words": []}]
+    monkeypatch.setattr(stepfun_asr, "sse", sse)
+    monkeypatch.setattr(server, "diarize", diarize)
+    assert [(g["text"], g.get("speaker"), g["engine"]) for g in anyio.run(server.engine_segs, x, [], None, "stepfun")] == \
         [("你好", "SPEAKER_1", "stepfun"), ("嗯", None, "stepfun")]
 
-    def slow(x):
-        time.sleep(3)
+    polled = []
+
+    async def slow(x):
+        for _ in range(3):
+            await anyio.sleep(1)
+            polled.append(1)
         return []
 
-    def refused(x, on):
+    async def refused(x, on):
+        await anyio.sleep(0.2)
         raise RuntimeError("stepfun sse HTTP 451")
     monkeypatch.setattr(server, "diarize", slow)
     monkeypatch.setattr(stepfun_asr, "sse", refused)
-    t = time.perf_counter()
-    with pytest.raises(RuntimeError, match="451"):
-        server.stepfun(x)
-    assert time.perf_counter() - t < 1, "the fallback need not wait for the file job"
+
+    async def run():
+        t = time.perf_counter()
+        with pytest.raises(RuntimeError, match=r"^stepfun: RuntimeError\('stepfun sse HTTP 451'\)$"):  # the SSE's own error
+            await server.engine_segs(x, [], None, "stepfun")
+        assert time.perf_counter() - t < 1, "the fallback need not wait for the file job"
+        await anyio.sleep(1.5)
+        assert polled == [], "the file job's polling stopped"
+    anyio.run(run)
 
 
 def test_speech_in():

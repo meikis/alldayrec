@@ -1,10 +1,11 @@
 """Remote MCP (/mcp): both protocol eras, the 2026 headers checked, every read tool answering in Markdown, a long
 transcript paged by cursor, mark_todo doing what 完成 / 不对 does; over HTTP only with the instance token."""
-import asyncio
 import datetime as dt
 import json
 import tempfile
 from pathlib import Path
+
+import anyio
 
 import db
 import mcp_server as m
@@ -137,10 +138,10 @@ def post(body, headers: dict[str, str], method="POST") -> tuple[int, dict | None
 
     async def send(x):
         out.append(x)
-    asyncio.run(server.app({"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method, "scheme": "http",
+    anyio.run(server.app, {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method, "scheme": "http",
                             "path": "/mcp", "raw_path": b"/mcp", "query_string": b"", "root_path": "",
                             "headers": [(k.lower().encode(), v.encode()) for k, v in {"host": "live.test", **headers}.items()],
-                            "client": ("127.0.0.1", 1), "server": ("test", 80)}, receive, send))
+                            "client": ("127.0.0.1", 1), "server": ("test", 80)}, receive, send)
     status = next(x for x in out if x["type"] == "http.response.start")["status"]
     body = b"".join(x.get("body", b"") for x in out)
     return status, json.loads(body) if body.startswith(b"{") else None

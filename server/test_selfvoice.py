@@ -1,10 +1,10 @@
 """「哪个是你？」(selfvoice.py, #206): candidates and their probabilities, when the card pops, which sentences it plays;
 the card's round trip on the server (only without a voiceprint, nothing taken before the user picks); a pick reaches
 the pipeline at its next conversation, never the open one."""
-import asyncio
 import datetime as dt
 import time
 
+import anyio
 import numpy as np
 import pytest
 from fastapi import HTTPException
@@ -12,7 +12,7 @@ from fastapi import HTTPException
 import db
 import selfvoice as sv
 import server
-from test_backlog import DEVICE, PIECE_S, SR, flac, heard, rig, save, tone
+from test_backlog import DEVICE, PIECE_S, SR, flac, hear, rig, save, tone
 
 rng = np.random.default_rng(0)
 unit = sv.unit
@@ -112,7 +112,7 @@ def test_card_round_trip(tmp_path, monkeypatch):
         return (np.ones(n) * amp[start]).astype(np.int16).tobytes()
     monkeypatch.setattr(server, "cut", cut)
     monkeypatch.setitem(server.state, "embed", lambda x: noisy(ME) if x.max() > 2000 else noisy(FR))
-    monkeypatch.setattr(server, "broadcast", lambda m: asyncio.sleep(0))
+    monkeypatch.setattr(server, "broadcast", lambda m: anyio.sleep(0))
     with db.tx() as t:
         for i in range(4):
             o = 600 * i
@@ -128,11 +128,11 @@ def test_card_round_trip(tmp_path, monkeypatch):
 
     npz = tmp_path / "owner-redimnet2.npz"
     np.savez(npz, mic=FR)  # a voiceprint already (the main instance): no card, nothing written
-    asyncio.run(server.self_round())
-    assert db.kv("selfvoice") is None and asyncio.run(server.self_get()) == {"card": None}
+    anyio.run(server.self_round)
+    assert db.kv("selfvoice") is None and anyio.run(server.self_get) == {"card": None}
     npz.unlink()
 
-    asyncio.run(server.self_round())
+    anyio.run(server.self_round)
     st = db.kv("selfvoice")
     card = st["card"]
     assert card["why"] == "rule" and card["convs"] == 4 and not npz.exists(), "nothing is taken before the user picks"
@@ -140,35 +140,35 @@ def test_card_round_trip(tmp_path, monkeypatch):
     assert c0["tier"] == "很可能" and c0["convs"] == 4 and float(np.asarray(c0["bank"]) @ ME) > 0.95
     assert len(c0["clips"]) == 3 and len({c["start"][:16] for c in c0["clips"]}) == 3, "3 clips from 3 conversations"
     assert all(amp[c["start"]] == 3000 and c["device"] == "mic" and c["text"] for c in c0["clips"])
-    shown = asyncio.run(server.self_get())["card"]
+    shown = anyio.run(server.self_get)["card"]
     assert "bank" not in shown["candidates"][0] and "p" not in shown["candidates"][0], "no % on the card"
 
-    asyncio.run(server.self_answer({"answer": "later"}))
+    anyio.run(server.self_answer, {"answer": "later"})
     st = db.kv("selfvoice")
     assert st["card"] is None and "until" in st["wait"] and st["log"][-1]["answer"] == "later"
-    asyncio.run(server.self_round())
+    anyio.run(server.self_round)
     assert db.kv("selfvoice")["card"] is None, "a day later"
     db.put_kv("selfvoice", {**st, "wait": {"until": T(0)}})
-    asyncio.run(server.self_round())
+    anyio.run(server.self_round)
     assert db.kv("selfvoice")["card"]["why"] == "again"
     with pytest.raises(HTTPException):
-        asyncio.run(server.self_answer({"answer": 7}))
+        anyio.run(server.self_answer, {"answer": 7})
 
-    asyncio.run(server.self_answer({"answer": 0}))
+    anyio.run(server.self_answer, {"answer": 0})
     assert float(np.load(npz)["self"] @ ME) > 0.95 and float(server.state["owner"]["self"] @ ME) > 0.95
     st = db.kv("selfvoice")
     assert st["confirmed"]["pick"] == 0 and st["card"] is None and [x["answer"] for x in st["log"]] == ["later", 0]
-    assert asyncio.run(server.self_get()) == {"card": None}
+    assert anyio.run(server.self_get) == {"card": None}
     with pytest.raises(HTTPException):
-        asyncio.run(server.self_answer({"answer": 0}))
+        anyio.run(server.self_answer, {"answer": 0})
 
 
 def test_pick_reaches_next_conversation(tmp_path, monkeypatch):
     """Picked while a conversation is open: it stays without 我 (also at its relabel at the close); the next one is 我."""
-    rig(tmp_path, monkeypatch, lambda x, partial=None: heard(x))  # every sentence's voiceprint is [0, 1, 0, 0]
+    rig(tmp_path, monkeypatch, hear)  # every sentence's voiceprint is [0, 1, 0, 0]
     (tmp_path / "owner-redimnet2.npz").unlink()
     monkeypatch.setitem(server.state, "owner", None)
-    monkeypatch.setattr(server, "broadcast", lambda m: asyncio.sleep(0))
+    monkeypatch.setattr(server, "broadcast", lambda m: anyio.sleep(0))
     db.put_kv("selfvoice", {"first_at": T(0), "card": {"why": "rule", "convs": 3, "candidates": [{"p": 0.99, "bank": [0, 1, 0, 0]}]}})
     silence = np.zeros(PIECE_S * SR, np.int16)
     speech = lambda i: flac(np.concatenate([silence[:5 * SR], tone(i, 4), silence[9 * SR:15 * SR], tone(i + 1, 4), silence[19 * SR:]]))
@@ -179,25 +179,26 @@ def test_pick_reaches_next_conversation(tmp_path, monkeypatch):
 
     async def run():
         save(t0, pieces[0])
-        task = asyncio.create_task(server.pipeline(DEVICE))
-        for _ in range(60):
-            if "1" in texts():
-                break
-            await asyncio.sleep(0.5)
-        assert "1" in texts() and db.kv(f"open_conversation:{DEVICE}"), "A is open"
-        await server.self_answer({"answer": 0})
-        for i in range(1, 16):
-            save(t0 + dt.timedelta(seconds=PIECE_S * i), pieces.get(i) or flac(silence))
-        db.put_kv(f"end_at:{DEVICE}", server.iso(t0 + dt.timedelta(seconds=16 * PIECE_S)))  # the recorder stopped: B closes
-        for _ in range(120):
-            if len(db.conversations()) == 2:
-                break
-            await asyncio.sleep(0.5)
-        task.cancel()
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(server.pipeline, DEVICE)
+            for _ in range(60):
+                if "1" in texts():
+                    break
+                await anyio.sleep(0.5)
+            assert "1" in texts() and db.kv(f"open_conversation:{DEVICE}"), "A is open"
+            await server.self_answer({"answer": 0})
+            for i in range(1, 16):
+                save(t0 + dt.timedelta(seconds=PIECE_S * i), pieces.get(i) or flac(silence))
+            db.put_kv(f"end_at:{DEVICE}", server.iso(t0 + dt.timedelta(seconds=16 * PIECE_S)))  # the recorder stopped: B closes
+            for _ in range(120):
+                if len(db.conversations()) == 2:
+                    break
+                await anyio.sleep(0.5)
+            tg.cancel_scope.cancel()
         got = texts()
         assert "我" not in {got[str(i)] for i in range(4)}, got
         assert [got[str(i)] for i in (11, 12, 13)] == ["我"] * 3, got  # 10 too, alone, is S? and in no conversation
         a, b = sorted(db.conversations(), key=lambda c: c["start"])
         assert "我" not in a["participants"] and b["participants"] == ["我"], (a, b)
 
-    asyncio.run(run())
+    anyio.run(run)

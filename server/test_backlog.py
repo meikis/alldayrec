@@ -6,14 +6,15 @@ layer goes on, it finalizes every utterance of the backlog in order, none lost, 
 goes on without seeing a sentence twice. Real audio store, streams and pipeline; FireRed's own stream postprocessor on
 frame energy for the VAD (no checkpoint in CI), a fixed voiceprint, fake engines that read back which tone they hear
 and a fake LLM that adds a topic per turn."""
-import asyncio
 import datetime as dt
 import re
 import subprocess
-import threading
 import time
 
+import anyio
+import anyio.to_thread
 import numpy as np
+import sklearn.cluster  # noqa: F401  Diarist.add imports it on its first sentence: ~30 s in a new venv (bytecode), inside the waits below
 from fireredvad import FireRedStreamVad, FireRedStreamVadConfig
 from fireredvad.core.stream_vad_postprocessor import StreamVadPostprocessor
 
@@ -56,6 +57,11 @@ def heard(x: np.ndarray, partial=None) -> list[dict]:
             for a, b in zip(edges[::2], edges[1::2])]
 
 
+async def hear(x: np.ndarray, partial=None) -> list[dict]:
+    """heard() as a provider."""
+    return heard(x)
+
+
 def rig(tmp_path, monkeypatch, final_engine):
     """A pipeline's world: the energy VAD, fake engines and LLM, a page watching; returns what the draft engine was
     sent (seconds) and what the live analysis was fed (tone numbers per turn)."""
@@ -67,13 +73,13 @@ def rig(tmp_path, monkeypatch, final_engine):
     monkeypatch.setattr(server, "LIVE_EVERY_S", 1)
     sent, fed = {"draft": 0.0}, []
 
-    def llm(messages, timeout=None, kind=None):  # each turn's new sentences (their tone numbers), one topic added
+    async def llm(messages, timeout=None, kind=None):  # each turn's new sentences (their tone numbers), one topic added
         new = [int(t) for t in re.findall(r"^\[[\d:]{8}\] [^:]+: (\d+)$", messages[-1]["content"], re.M)]
         fed.append(new)
         return {"ops": [{"op": "add", "title": f"t{new[0]}"}]}, {"choices": [{"message": {"content": "{}"}}]}
     monkeypatch.setattr(server.live, "complete", llm)
 
-    def draft_engine(x, partial=None):
+    async def draft_engine(x, partial=None):
         sent["draft"] += len(x) / SR
         return heard(x)
     monkeypatch.setitem(server.PROVIDERS, server.ENGINE, final_engine)
@@ -95,10 +101,10 @@ def st():
 
 
 def test_backlog_does_not_hold_drafts(tmp_path, monkeypatch):
-    busy = threading.Event()  # the final layer's engine answers once busy is set
+    busy = anyio.Event()  # the final layer's engine answers once busy is set
 
-    def final_engine(x, partial=None):
-        busy.wait()
+    async def final_engine(x, partial=None):
+        await busy.wait()
         return heard(x)
     sent, fed = rig(tmp_path, monkeypatch, final_engine)
     silence = np.zeros(PIECE_S * SR, np.int16)
@@ -109,19 +115,19 @@ def test_backlog_does_not_hold_drafts(tmp_path, monkeypatch):
     t0 = live0 - dt.timedelta(seconds=PIECE_S + BACKLOG_S)  # the backlog: t0 .. live0 - PIECE_S
 
     async def run():
-        try:
-            save(t0, backlog[0])  # the pipeline has started; the phone goes offline, then comes back with the rest at once
-            pipe = asyncio.create_task(server.pipeline(DEVICE))
-            await asyncio.sleep(1)
-            rest = asyncio.ensure_future(asyncio.to_thread(lambda: [save(t0 + dt.timedelta(seconds=PIECE_S * i), b) for i, b in enumerate(backlog) if i]))
-            for k, body in enumerate(now):  # meanwhile what is said now, as it is said
-                await asyncio.sleep(live0.timestamp() + k + 1 - time.time())
-                await asyncio.to_thread(save, live0 + dt.timedelta(seconds=k), body)
-            await rest
+        save(t0, backlog[0])  # the pipeline has started; the phone goes offline, then comes back with the rest at once
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(server.pipeline, DEVICE)
+            await anyio.sleep(1)
+            async with anyio.create_task_group() as rest:
+                rest.start_soon(anyio.to_thread.run_sync, lambda: [save(t0 + dt.timedelta(seconds=PIECE_S * i), b) for i, b in enumerate(backlog) if i])
+                for k, body in enumerate(now):  # meanwhile what is said now, as it is said
+                    await anyio.sleep(live0.timestamp() + k + 1 - time.time())
+                    await anyio.to_thread.run_sync(save, live0 + dt.timedelta(seconds=k), body)
             for _ in range(20):  # the last tone's pause has just come in
                 if {str(N + j) for j in range(LIVE_S // 5)} <= {r["text"] for r in st()["drafts"]}:
                     break
-                await asyncio.sleep(0.5)
+                await anyio.sleep(0.5)
             drafts = db.drafts("", None, DEVICE)
             assert [r["text"] for r in drafts if int(r["text"]) >= N] == [str(N + j) for j in range(LIVE_S // 5)], drafts
             assert st()["done_to"] is None or st()["done_to"] < t0 + dt.timedelta(seconds=PIECE_S), "the final layer was to be busy"
@@ -131,7 +137,7 @@ def test_backlog_does_not_hold_drafts(tmp_path, monkeypatch):
             for _ in range(20):  # the analysis of the last pause's drafts
                 if fed and fed[-1] and fed[-1][-1] == N + LIVE_S // 5 - 1:
                     break
-                await asyncio.sleep(0.5)
+                await anyio.sleep(0.5)
             lv = st()["live"]
             assert lv and lv["start"] >= server.iso(edge) and lv["topics"], lv and server.live.public(lv)
             assert fed and fed[-1][-1] == N + LIVE_S // 5 - 1 and min(min(f) for f in fed) >= N - server.DRAFT_BACK_S // PIECE_S - 1, fed
@@ -141,23 +147,21 @@ def test_backlog_does_not_hold_drafts(tmp_path, monkeypatch):
             for _ in range(240):
                 if len(finals()) >= N:
                     break
-                await asyncio.sleep(0.5)
+                await anyio.sleep(0.5)
             assert [r["text"] for r in finals()] == [str(i) for i in range(N)], [r["text"] for r in finals()][:20]
-            await asyncio.sleep(3)  # the final layer's turn of the live analysis, now that the conversation is final
+            await anyio.sleep(3)  # the final layer's turn of the live analysis, now that the conversation is final
             assert st()["live"]["start"] == lv["start"], "the same live analysis goes on"
             assert len(sum(fed, [])) == len(set(sum(fed, []))), fed
-            pipe.cancel()
-        finally:
-            busy.set()  # a failed check leaves the final layer's call waiting, and asyncio.run waits for its thread
+            tg.cancel_scope.cancel()
 
-    asyncio.run(run())
+    anyio.run(run)
 
 
 def test_hold_keeps_backlog_final(tmp_path, monkeypatch):
     """The phone sends what is said now first and the backlog it reads off the card after it, each upload with hold =
     where now began (#130): drafts follow now at once, finalization takes the whole backlog in order (none arrives
     behind it) and waits at the hold; once the phone lets go, now is finalized after it."""
-    sent, fed = rig(tmp_path, monkeypatch, lambda x, partial=None: heard(x))
+    sent, fed = rig(tmp_path, monkeypatch, hear)
     n = 20  # 20 min of backlog
     silence = np.zeros(PIECE_S * SR, np.int16)
     backlog = [flac(np.concatenate([silence[:10 * SR], tone(i, 3), silence[13 * SR:]])) for i in range(n)]
@@ -170,49 +174,49 @@ def test_hold_keeps_backlog_final(tmp_path, monkeypatch):
 
     async def run():
         save(t0, backlog[0])  # final up to here before the phone went away
-        pipe = asyncio.create_task(server.pipeline(DEVICE))
-        await asyncio.sleep(1)
-        late = []
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(server.pipeline, DEVICE)
+            await anyio.sleep(1)
+            late = []
 
-        def card():  # the rest of the backlog, as the phone reads it off the card meanwhile
-            for i in range(1, n):
-                time.sleep(0.2)
-                audio.hold(DEVICE, h)
-                t = t0 + dt.timedelta(seconds=PIECE_S * i)
-                if int(t.timestamp() * 1000) <= audio.read_to.get(DEVICE, -1):
-                    late.append(i)
-                save(t, backlog[i])
-        rest = None
-        for k, body in enumerate(now):
-            await asyncio.sleep(live0.timestamp() + k + 1 - time.time())
-            audio.hold(DEVICE, h)
-            await asyncio.to_thread(save, live0 + dt.timedelta(seconds=k), body)
-            if k == 4:
-                rest = asyncio.ensure_future(asyncio.to_thread(card))
-        await rest
-        for _ in range(60):
-            if len(finals()) >= n and {str(n + j) for j in range(LIVE_S // 5)} <= {r["text"] for r in st()["drafts"]}:
-                break
-            await asyncio.sleep(0.5)
-        assert not late, f"backlog pieces behind the queue: {late}"
-        assert finals() == [str(i) for i in range(n)], finals()
-        assert {str(n + j) for j in range(LIVE_S // 5)} <= {r["text"] for r in st()["drafts"]}, "drafts follow now meanwhile"
-        assert sent["draft"] < server.DRAFT_BACK_S + LIVE_S, sent
-        assert server.device_status(DEVICE, st())["hold"] == live0.isoformat(timespec="seconds")
-        await asyncio.sleep(3)
-        assert finals() == [str(i) for i in range(n)], "now waits at the hold"
+            def card():  # the rest of the backlog, as the phone reads it off the card meanwhile
+                for i in range(1, n):
+                    time.sleep(0.2)
+                    audio.hold(DEVICE, h)
+                    t = t0 + dt.timedelta(seconds=PIECE_S * i)
+                    if int(t.timestamp() * 1000) <= audio.read_to.get(DEVICE, -1):
+                        late.append(i)
+                    save(t, backlog[i])
+            async with anyio.create_task_group() as rest:
+                for k, body in enumerate(now):
+                    await anyio.sleep(live0.timestamp() + k + 1 - time.time())
+                    audio.hold(DEVICE, h)
+                    await anyio.to_thread.run_sync(save, live0 + dt.timedelta(seconds=k), body)
+                    if k == 4:
+                        rest.start_soon(anyio.to_thread.run_sync, card)
+            for _ in range(60):
+                if len(finals()) >= n and {str(n + j) for j in range(LIVE_S // 5)} <= {r["text"] for r in st()["drafts"]}:
+                    break
+                await anyio.sleep(0.5)
+            assert not late, f"backlog pieces behind the queue: {late}"
+            assert finals() == [str(i) for i in range(n)], finals()
+            assert {str(n + j) for j in range(LIVE_S // 5)} <= {r["text"] for r in st()["drafts"]}, "drafts follow now meanwhile"
+            assert sent["draft"] < server.DRAFT_BACK_S + LIVE_S, sent
+            assert server.device_status(DEVICE, st())["hold"] == live0.isoformat(timespec="seconds")
+            await anyio.sleep(3)
+            assert finals() == [str(i) for i in range(n)], "now waits at the hold"
 
-        audio.hold(DEVICE, None)  # the next upload says nothing older is coming
-        db.put_kv(f"end_at:{DEVICE}", server.iso(live0 + dt.timedelta(seconds=LIVE_S)))  # and the recorder stops
-        want = [str(i) for i in range(n + LIVE_S // 5)]
-        for _ in range(60):
-            if finals() == want:
-                break
-            await asyncio.sleep(0.5)
-        assert finals() == want, finals()
-        pipe.cancel()
+            audio.hold(DEVICE, None)  # the next upload says nothing older is coming
+            db.put_kv(f"end_at:{DEVICE}", server.iso(live0 + dt.timedelta(seconds=LIVE_S)))  # and the recorder stops
+            want = [str(i) for i in range(n + LIVE_S // 5)]
+            for _ in range(60):
+                if finals() == want:
+                    break
+                await anyio.sleep(0.5)
+            assert finals() == want, finals()
+            tg.cancel_scope.cancel()
 
-    asyncio.run(run())
+    anyio.run(run)
 
 
 def test_hold_expires(tmp_path, monkeypatch):
@@ -230,17 +234,25 @@ def test_hold_expires(tmp_path, monkeypatch):
     async def run():
         s, got = audio.stream(DEVICE, None), []
         got.append((await anext(s))[0])
-        nxt = asyncio.create_task(anext(s))
-        await asyncio.sleep(1)
-        assert not nxt.done(), "held"
-        got.append((await asyncio.wait_for(nxt, 5))[0])
-        assert got == [t(0), t(5)]
-        nxt = asyncio.create_task(anext(s))  # the reader back for more: 10:05 is done
-        await asyncio.sleep(0.5)
-        assert audio.held(DEVICE) is None and int(t(3).timestamp() * 1000) <= audio.read_to[DEVICE], "10:03 now comes too late"
-        nxt.cancel()
+        send, recv = anyio.create_memory_object_stream()
 
-    asyncio.run(run())
+        async def nxt():  # the reader back for more
+            await send.send((await anext(s))[0])
+        with send, recv:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(nxt)
+                with anyio.move_on_after(1) as wait:
+                    got.append(await recv.receive())
+                assert wait.cancelled_caught, "held"
+                with anyio.fail_after(5):
+                    got.append(await recv.receive())
+                assert got == [t(0), t(5)]
+                tg.start_soon(nxt)  # 10:05 is done
+                await anyio.sleep(0.5)
+                assert audio.held(DEVICE) is None and int(t(3).timestamp() * 1000) <= audio.read_to[DEVICE], "10:03 now comes too late"
+                tg.cancel_scope.cancel()
+
+    anyio.run(run)
 
 
 
@@ -249,7 +261,7 @@ def test_final_goes_on_after_a_gap(tmp_path, monkeypatch):
     to 17:58:55, then from 19:09): the first cut after the finalized time fell in the pause, a piece of no samples, and
     the final layer waited on it for good (370 pieces queued; restarts did not help). It goes on over the pause, in the
     same pipeline and in one started after it."""
-    rig(tmp_path, monkeypatch, lambda x, partial=None: heard(x))
+    rig(tmp_path, monkeypatch, hear)
     t0 = dt.datetime.fromtimestamp(round(time.time()) - 900)
     at = lambda k: t0 + dt.timedelta(seconds=180 * k)  # a recording every 3 min
     finals = lambda: [r["text"] for r in db.sentences(server.iso(t0), server.iso(at(5)), source=DEVICE)]
@@ -259,35 +271,37 @@ def test_final_goes_on_after_a_gap(tmp_path, monkeypatch):
         for _ in range(60):
             if finals() == want:
                 return
-            await asyncio.sleep(0.5)
+            await anyio.sleep(0.5)
         assert finals() == want, (finals(), st()["done_to"])
 
     async def run():
         save(at(0), flac(np.concatenate([tone(0, 2), np.zeros(3 * SR, np.int16)])))  # 5 s, then stopped
         stop(at(0) + dt.timedelta(seconds=5))
-        pipe = asyncio.create_task(server.pipeline(DEVICE))
-        await until(["0"])
-        assert st()["done_to"] == at(0) + dt.timedelta(seconds=5), "finalized to the very end of the recording"
-        # 45 s in 1 s pieces, quiet at first (the VAD pads an utterance's start back: across the pause into the
-        # recording before, it bridged the pause), a pause after the tone ends the final piece
-        x = np.concatenate([np.zeros(5 * SR, np.int16), tone(1, 2), np.zeros(38 * SR, np.int16)])
-        for k in range(45):
-            save(at(1) + dt.timedelta(seconds=k), flac(x[k * SR:(k + 1) * SR]))
-        await until(["0", "1"])
-        stop(at(1) + dt.timedelta(seconds=45))
-        for _ in range(20):
-            if st()["done_to"] == at(1) + dt.timedelta(seconds=45):
-                break
-            await asyncio.sleep(0.5)
-        assert st()["done_to"] == at(1) + dt.timedelta(seconds=45), st()["done_to"]
-        pipe.cancel()
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(server.pipeline, DEVICE)
+            await until(["0"])
+            assert st()["done_to"] == at(0) + dt.timedelta(seconds=5), "finalized to the very end of the recording"
+            # 45 s in 1 s pieces, quiet at first (the VAD pads an utterance's start back: across the pause into the
+            # recording before, it bridged the pause), a pause after the tone ends the final piece
+            x = np.concatenate([np.zeros(5 * SR, np.int16), tone(1, 2), np.zeros(38 * SR, np.int16)])
+            for k in range(45):
+                save(at(1) + dt.timedelta(seconds=k), flac(x[k * SR:(k + 1) * SR]))
+            await until(["0", "1"])
+            stop(at(1) + dt.timedelta(seconds=45))
+            for _ in range(20):
+                if st()["done_to"] == at(1) + dt.timedelta(seconds=45):
+                    break
+                await anyio.sleep(0.5)
+            assert st()["done_to"] == at(1) + dt.timedelta(seconds=45), st()["done_to"]
+            tg.cancel_scope.cancel()
         save(at(2), flac(np.concatenate([tone(2, 2), np.zeros(3 * SR, np.int16)])))  # while the server restarts
         stop(at(2) + dt.timedelta(seconds=5))
-        pipe = asyncio.create_task(server.pipeline(DEVICE))  # resumes at the end of a recording, the next after a pause
-        await until(["0", "1", "2"])
-        pipe.cancel()
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(server.pipeline, DEVICE)  # resumes at the end of a recording, the next after a pause
+            await until(["0", "1", "2"])
+            tg.cancel_scope.cancel()
 
-    asyncio.run(run())
+    anyio.run(run)
 
 
 def test_hold_release(tmp_path, monkeypatch):
@@ -309,6 +323,6 @@ def test_hold_release(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "LIVE_AUDIO_S", 0)
     assert not server.device_status(DEVICE, st)["recording"], "no audio came in LIVE_AUDIO_S: not recording"
 
-    asyncio.run(server.hold_release(DEVICE))
+    anyio.run(server.hold_release, DEVICE)
     d = server.device_status(DEVICE, st)
     assert d["hold"] is None and d["hold_seen"] is None and audio.held(DEVICE) is None

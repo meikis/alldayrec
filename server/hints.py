@@ -23,8 +23,8 @@ NOT_NAMES = {"我", "你", "他", "她", "您", "大家", "你们", "他们", "�
              "服务员", "同学", "先生", "女士", "亲", "亲爱的", "宝贝", "宝宝", "领导", "朋友们"}
 
 
-def ask(rows: list[dict]) -> tuple[dict, dict]:
-    return summary.complete([{"role": "system", "content": SYSTEM}, {"role": "user", "content": summary.transcript(rows)}], kind="hints")
+async def ask(rows: list[dict]) -> tuple[dict, dict]:
+    return await summary.complete([{"role": "system", "content": SYSTEM}, {"role": "user", "content": summary.transcript(rows)}], kind="hints")
 
 
 def check(res: dict, rows: list[dict], skip: set[str] = frozenset()) -> list[dict]:
@@ -55,9 +55,9 @@ def check(res: dict, rows: list[dict], skip: set[str] = frozenset()) -> list[dic
     return out
 
 
-def hints(c: dict, rows: list[dict], skip: set[str]) -> dict:
+async def hints(c: dict, rows: list[dict], skip: set[str]) -> dict:
     """The stored hints of one conversation."""
-    res, raw = ask(rows)
+    res, raw = await ask(rows)
     names = check(res, rows, skip)
     return {"conv": c["id"], "prompt_version": PROMPT_VERSION, "at": dt.datetime.now().isoformat(timespec="seconds"),
             "model": raw.get("model"), "usage": raw.get("usage"), "asked": len(res.get("names") or []), "names": names}

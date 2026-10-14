@@ -60,9 +60,9 @@ def check(res: dict, ev: dict[str, dict]) -> dict:
     return out
 
 
-def profile(name: str, convs: list[dict], todos: list[dict], mentions: list[dict]) -> dict:
+async def profile(name: str, convs: list[dict], todos: list[dict], mentions: list[dict]) -> dict:
     text, ev = evidence(name, convs, todos, mentions)
-    res, raw = summary.complete([{"role": "system", "content": SYSTEM}, {"role": "user", "content": text}], kind="profile")
+    res, raw = await summary.complete([{"role": "system", "content": SYSTEM}, {"role": "user", "content": text}], kind="profile")
     return {"name": name, "prompt_version": PROMPT_VERSION, "at": dt.datetime.now().isoformat(timespec="seconds"),
             "model": raw.get("model"), "usage": raw.get("usage"), "upto": convs[0]["start"] if convs else None,
             "inputs": {"conversations": len(convs), "todos": len(todos), "mentions": len(mentions)}, **check(res, ev)}

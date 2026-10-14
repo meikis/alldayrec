@@ -1,9 +1,10 @@
 """Due todos and 完成 / 不对: the due list holds my dated todos of today and before, a todo marked either way leaves it
 and the recap card."""
-import asyncio
 import datetime as dt
 import tempfile
 from pathlib import Path
+
+import anyio
 
 import db
 from server import add_feedback, recap_get, todos_due
@@ -25,11 +26,11 @@ def test_due_and_marks():
             db.put_summary({"conversation": cid, "status": "done", "prompt_version": v, "title": "t", "todos": todos}, c)
     db.put_kv("recap:2026-10-01", {"date": "2026-10-01", "todos": [{"conv": "c20261001100000", "text": "做完了", "short": "做完"},
                                                                     {"conv": "c20261001100000", "text": "今天的"}]})
-    asyncio.run(add_feedback("c20261001100000", {"text": db.TODO_MARKS[0] + "做完了"}))
-    asyncio.run(add_feedback("c20261001100000", {"text": db.TODO_MARKS[1] + "记错了"}))
-    asyncio.run(add_feedback("c20261001100000", {"text": "S2 其实是我"}))  # a plain correction closes nothing
-    got = asyncio.run(todos_due())
+    anyio.run(add_feedback, "c20261001100000", {"text": db.TODO_MARKS[0] + "做完了"})
+    anyio.run(add_feedback, "c20261001100000", {"text": db.TODO_MARKS[1] + "记错了"})
+    anyio.run(add_feedback, "c20261001100000", {"text": "S2 其实是我"})  # a plain correction closes nothing
+    got = anyio.run(todos_due)
     assert [t["text"] for t in got] == ["前天的", "今天的"], got
     assert got[1] == {"conv": "c20261001100000", "text": "今天的", "to": None, "due": "某天", "due_date": d(0), "at": None}
-    assert [t["text"] for t in asyncio.run(recap_get())["todos"]] == ["今天的"]
-    assert [t["text"] for t in asyncio.run(recap_get("2026-10-01"))["todos"]] == ["今天的"]
+    assert [t["text"] for t in anyio.run(recap_get)["todos"]] == ["今天的"]
+    assert [t["text"] for t in anyio.run(recap_get, "2026-10-01")["todos"]] == ["今天的"]
