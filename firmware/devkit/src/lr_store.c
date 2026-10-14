@@ -101,11 +101,17 @@ struct card_rec {
 } __packed;
 static bool card_behind;  // a batch of this segment did not fit in the queue: no more of it to the card
 
+/* The open file closed (SD mutex held). A close that fails, as a sync that does (append), may leave the file's length
+ * on the card short of what went into it, and a READ ends there: taken as a failed write while the card was working. */
 static void close_segment(void)
 {
     if (seg_open) {
-        fs_close(&seg_file);
+        int err = fs_close(&seg_file);
         seg_open = false;
+        if (err && !store_err) {
+            lr_log(LR_APPEND_ERR, 3, err, card_at);
+            store_err = err;
+        }
     }
 }
 
@@ -167,6 +173,7 @@ static int append(uint32_t len)
     int64_t t0 = k_uptime_get();
     int err = 0;
     uint32_t taken = 0;
+    bool unsynced = false;
     if (free_kb < RESERVE_KB) {
         LOG_ERR("card full (%u KB free): not recording", free_kb);
         lr_log(LR_CARD_FULL, 1, free_kb, 0);
@@ -187,7 +194,13 @@ static int append(uint32_t len)
             n += MAX(w, 0);
             err = w == k ? 0 : w < 0 ? w : -EIO;
         }
-        fs_sync(&seg_file);  // on the card now: power can go any time
+        int synced = fs_sync(&seg_file);  // on the card now, the file's length too: power can go any time
+        if (!err && synced) {
+            // the bytes went, the file's length on the card may not have: a READ would end short of them (BDAE 10-13:
+            // a card dying, READs ended 11 s to 2 min short of what had gone in, the frames there past the file's end)
+            err = synced;
+            unsynced = true;
+        }
         uint32_t ms = k_uptime_get() - t0;
         append_max = MAX(append_max, (uint16_t) MIN(ms, UINT16_MAX));
         if (ms > 1000) {  // SD_WRITES counts those over 200 ms: one event each filled LR-P1's log in 80 min (#99)
@@ -198,7 +211,7 @@ static int append(uint32_t len)
     }
     ring_buf_get(&card_rb, NULL, len - taken);  // what did not make it leaves the queue too
     if (err && !append_failed) {
-        lr_log(LR_APPEND_ERR, 0, err, len);
+        lr_log(LR_APPEND_ERR, unsynced ? 3 : 0, err, len);
         log_sd_errors();
     }
     append_failed = err;

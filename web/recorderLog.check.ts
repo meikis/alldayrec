@@ -32,6 +32,8 @@ check(
 );
 check(said(33, 1, 62333952, (23 << 4) | 7), "SDHC/SDXC，31.91 GB（62333952 扇区），2023 年 7 月生产");
 check(said(34, 4, 2 | (5 << 16), 3 | (1 << 16)), "CRC 错 2 次，超时 5 次（其中忙 3 次），其他错 1 次，重试 4 次");
+check(said(6, 3, -5, 4096), "文件长度没写上卡：-5 -EIO（4096 B）");
+check(said(6, 0, -5, 512), "-5 -EIO（512 B）");
 check(said(4, 3, 4212, 1810000), "音频批次 4212（文件 1074xxxx），剩 1767 MB；卡上的计数读不出；新计数没写进卡");  // #207
 const level = (code: number, a: number) => describe({ boot: 1, t: 100, code, x: 30, a, b: 0 });
 check(String([level(31, 0).routine, level(31, 0).level]), "true,"); // a quiet 10 minutes: hidden

@@ -210,7 +210,8 @@ static uint8_t boot_file[2];
 static uint32_t boot_len;
 static int boot_fail;  // BOOT's writes fail with this
 static int fs_open(struct fs_file_t *f, const char *path, int flags) { f->f = strstr(path, "/BOOT") ? BOOT_F : seg_of(path); f->pos = 0; return 0; }
-static int fs_close(struct fs_file_t *f) { return 0; }
+static int sync_fail, close_fail;  // fs_sync and fs_close fail with these: the file's length not on the card
+static int fs_close(struct fs_file_t *f) { return close_fail; }
 static ssize_t fs_write(struct fs_file_t *f, const void *d, size_t n)
 {
     if (f->f == BOOT_F) {
@@ -240,7 +241,7 @@ static ssize_t fs_read(struct fs_file_t *f, void *d, size_t n)
     return n;
 }
 static int fs_seek(struct fs_file_t *f, long o, int w) { f->pos = o; return 0; }
-static int fs_sync(struct fs_file_t *f) { return 0; }
+static int fs_sync(struct fs_file_t *f) { return sync_fail; }
 static void fs_file_t_init(struct fs_file_t *f) {}
 static void fs_dir_t_init(struct fs_dir_t *d) {}
 static const char *dir[4];  // /LR's files, for the boot count (none: no directory)
@@ -547,6 +548,36 @@ int main(void)
     dir_n = 1, sys_put_le16(0xFFFF, boot_file);  // both
     assert(card_init(mount_sd_card, &c) == 0 && c == 116 + BOOT_FLOOR && logged[8].x == 4);
     dir_n = 0;
+    // the file's length that does not go to the card with its bytes (fs_sync fails: a READ would end short of them, BDAE
+    // 10-13) fails the write: said (APPEND_ERR x 3), the rest left out, the card tried again, the stream on in a new file
+    {
+        assert(store_err == 0);
+        uint16_t s0 = seg;
+        uint32_t had = card_len[s0];
+        assert(s0 + 3 < FILES);
+        n_logged = 0, sync_fail = -EIO;
+        frames(rec_next, 300);
+        sync_fail = 0;
+        flush();
+        assert(store_err == -EIO && n_logged == 1 && logged[0].code == LR_APPEND_ERR && logged[0].x == 3);
+        assert((int32_t) logged[0].a == -EIO && card_len[s0] == had + logged[0].b);  // the first batch, then nothing
+        retry_card();
+        assert(store_err == 0 && seg == s0 + 1);
+        // a close that fails at a file's end, the same: said with the file's bytes, the card tried again
+        frames(rec_next, 300);
+        flush();
+        uint32_t len = card_len[seg];
+        assert(len && card_at == len);
+        next_segment();
+        n_logged = 0, close_fail = -EIO;
+        frames(rec_next, 300);
+        flush();  // the new file's first batch closes the old one
+        close_fail = 0;
+        assert(store_err == -EIO && n_logged == 1 && logged[0].code == LR_APPEND_ERR && logged[0].x == 3 && logged[0].b == len);
+        assert(card_len[seg] == 0);  // nothing of the new file until the card is back
+        retry_card();
+        assert(store_err == 0 && seg == s0 + 3);
+    }
     printf("store_check ok: %u + %u + %u B on the card\n", card_len[0], card_len[1], card_len[2]);
     return 0;
 }

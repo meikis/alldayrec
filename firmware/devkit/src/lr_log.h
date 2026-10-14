@@ -20,7 +20,9 @@
  *                   card's BOOT did not read back (2 bytes), bit 1: the new count did not write to it, bit 2: a count
  *                   on the card (BOOT, a file name) too far past the chip's own to be real was left out
  *     5 SLOW        a ms, b bytes: an SD append slower than 1000 ms
- *     6 APPEND_ERR  a error, b bytes: the first failed SD append of a run
+ *     6 APPEND_ERR  a error, b bytes: the first failed SD append of a run; x 0 the write, 1 the card writer behind
+ *                   (-EAGAIN, the rest of the segment to LIVE only), 2 a restart with the card stuck in a write
+ *                   (-EDEADLK), 3 the file's length on the card (fs_sync, or fs_close with b the file's bytes)
  *     7 CARD_FULL   x 1 recording stopped / 0 resumed, a free KB
  *     8 USB_DISK    x 1 card lent to USB / 0 back, a error
  *     9 CONNECT     a interval (1.25 ms) | latency << 16, b supervision timeout (10 ms)

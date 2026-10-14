@@ -265,6 +265,10 @@ ERRNO = {**{n: errno.errorcode[n] for n in range(1, 35) if n in errno.errorcode}
          77: "EBADMSG", 105: "ENOBUFS", 116: "ETIMEDOUT", 120: "EALREADY", 128: "ENOTCONN", 134: "ENOTSUP"}  # Zephyr's
 
 
+# APPEND_ERR's x (lr_log.h): which part of an append failed
+APPEND = ("", "writer behind, rest of the segment LIVE only: ", "restart with the card stuck: ", "file length not on the card: ")
+
+
 def err(v):
     v = struct.unpack("<i", struct.pack("<I", v))[0]
     return f"{v} {'-' + ERRNO[-v] if -v in ERRNO else ''}".strip() if v else "ok"
@@ -329,7 +333,7 @@ EVENTS = {
     3: ("MOUNT", lambda x, a, b: f"try {x}: {err(a)}"),
     4: ("STORE", lambda x, a, b: f"audio boot {a} (files {a:04X}xxxx), {b // 1024} MB free" + ", BOOT unread" * (x & 1) + ", BOOT unwritten" * (x >> 1 & 1)),
     5: ("SLOW", lambda x, a, b: f"SD append {a} ms ({b} B)"),
-    6: ("APPEND_ERR", lambda x, a, b: f"{err(a)} ({b} B)"),
+    6: ("APPEND_ERR", lambda x, a, b: f"{APPEND[x] if x < len(APPEND) else ''}{err(a)} ({b} B)"),
     7: ("CARD_FULL", lambda x, a, b: f"{'recording stopped' if x else 'resumed'}, {a} KB free"),
     8: ("USB_DISK", lambda x, a, b: f"card lent to USB" if x else f"card back: {err(a)}"),
     9: ("CONNECT", lambda x, a, b: param(a, b)),
@@ -460,6 +464,7 @@ def selftest():
     assert EVENTS[26][1](12, 409600, 10000 | 491 << 22) == \
         "400.0 KB in 10.0 s (40.0 KB/s), 491 B a packet, interval 15 ms"
     assert EVENTS[27][1](0, 3000, 6500) == "card 3000 ms, notify 6500 ms"
+    assert EVENTS[6][1](3, (-5) & 0xFFFFFFFF, 4096) == "file length not on the card: -5 -EIO (4096 B)"
     assert EVENTS[31][1](0xF6, 230 | 3 << 20, 17 | 128 << 24) == \
         "-10 °C, mic all zero 230 ms, 3 PDM errors, 17 samples at full scale, loudest -6 dBFS"
     assert EVENTS[31][1](31, 0, 0).endswith("loudest under -48 dBFS")
