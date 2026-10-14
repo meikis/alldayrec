@@ -15,7 +15,8 @@
  *   code, x, a, b  the event and its arguments:
  *     1 BOOT        x battery mV / 20, a RESETREAS (why the last boot ended), b firmware hash (lr.sh's rev; bit 28 dirty)
  *     2 FAULT       a reason, b PC of the crash that ended the previous boot
- *     3 MOUNT       x try, a error: one per SD mount try
+ *     3 MOUNT       x try, a error: one per SD mount try at boot; x 0: a failed card tried again (lr_store.c retry_card),
+ *                   when it mounts, and when a try from scratch (after an SD_RESET) fails
  *     4 STORE       a the audio's boot number (file names BBBBSSSS), b free KB: the offline store is up; x bit 0: the
  *                   card's BOOT did not read back (2 bytes), bit 1: the new count did not write to it, bit 2: a count
  *                   on the card (BOOT, a file name) too far past the chip's own to be real was left out
@@ -40,7 +41,8 @@
  *    21 DFU         x GPREGRET: 0x57 UF2 bootloader, 0xA8 OTA bootloader
  *    22 HEARTBEAT   x battery mV / 20, a free card KB, b frames dropped this boot (every 10 min)
  *    23 STACKS      a codec << 16 | pusher, b store << 16 | BT RX: bytes of stack never used (0xFFFF: no thread)
- *    24 SD_RESET    a R1 to CMD12, b R1 to CMD0 (0x01: idle) of the SPI reset before the first mount
+ *    24 SD_RESET    a R1 to CMD12, b R1 to CMD0 (0x01: idle) of the SPI reset before the first mount, and before each
+ *                   try from scratch of a failed card
  *    25 SD_WRITES   the card appends of the last 10 minutes, by the first append after them: x how many took over
  *                   200 ms (over 1000 ms each a SLOW too), a ms all took (bits 0-19) | the slowest's ms << 20, b how
  *                   many took under 20 ms | 20-49 ms << 10 | 50-200 ms << 20; every field saturates

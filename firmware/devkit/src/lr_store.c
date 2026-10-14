@@ -810,7 +810,9 @@ static int card_init(int (*mount)(void), uint16_t *counted);
  * of audio, not a minute (BDAE 10-08 14:45: back at the first try, 80 s after its EIO, with no phone to take those
  * 80 s). Then it is reset from scratch (mount_sd_card_reset: a card stuck, BDAE 10-08 11:29, back only by a reboot),
  * once a minute, RETRY_RESETS times; then every 10 minutes, so a dead or missing card is not knocked on for good. A
- * card not there at boot is tried once a minute only: each try at no card takes seconds of the store thread. */
+ * card not there at boot gets the resets alone: one put in later did not mount by plain tries (BDAE 10-14: none at
+ * boot 01:50, one put in ~02:2x was not up by 02:31, tried once a minute all the while; the next boot's reset mounted
+ * it at once): boot's own reset (sdcard.c, sd_spi_reset) is what wakes a card up properly. */
 #define RETRY_FAST 6
 #define RETRY_FAST_MS 5000
 #define RETRY_RESETS 3
@@ -818,7 +820,8 @@ static int retries;  // tries of a failed card since it last worked
 
 static int64_t retry_every(void)
 {
-    return !boot ? 60000 : retries < RETRY_FAST ? RETRY_FAST_MS : retries < RETRY_FAST + RETRY_RESETS ? 60000 : 600000;
+    int fast = boot ? RETRY_FAST : 0;
+    return retries < fast ? RETRY_FAST_MS : retries < fast + RETRY_RESETS ? 60000 : 600000;
 }
 
 /* A card that failed (a write, the mount, none at boot) is tried again (retry_every), one mount try, the SD mutex
@@ -840,7 +843,7 @@ static void retry_card(void)
     if (was) {
         err = retries < RETRY_FAST ? mount_sd_card_once() : mount_sd_card_reset();
     } else {
-        err = card_init(mount_sd_card_once, &was);  // counts the boot
+        err = card_init(mount_sd_card_reset, &was);  // counts the boot
     }
     k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
     retries = err ? retries + 1 : 0;

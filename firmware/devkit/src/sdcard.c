@@ -200,14 +200,19 @@ int mount_sd_card_once(void)
 /* A card that failed and stays failed: BDAE 10-08 11:29 was not back after 10 minutes of mounts, a reboot brought it
  * back. NCS 2.7's disk init returns at once while it holds the disk OK (drivers/disk/sdmmc_subsys.c), so a mount alone
  * goes on reading a card still stuck. What boot does instead: the supply off and on, the SPI reset (SD_RESET), sd_init
- * again on the disk's own card, then the mount; logged as MOUNT x 0 like the plain one, the SD_RESET before it. The
- * store's retry_card, once quick mounts have failed. */
+ * again on the disk's own card, then the mount; logged as MOUNT x 0 like the plain one, the SD_RESET before it, and
+ * when it fails too (a try every minute at most). The store's retry_card, once quick mounts have failed, or for a card
+ * not there at boot. */
 int mount_sd_card_reset(void)
 {
     sd_power_cycle();
     sd_spi_reset();
     int err = disk_card ? sd_init(disk_card->sdhc, disk_card) : 0;  // none: it never mounted, disk_access_init inits it
-    return err ?: mount_sd_card_once();
+    err = err ?: mount_sd_card_once();
+    if (err) {
+        lr_log(LR_MOUNT, 0, err, 0);
+    }
+    return err;
 }
 
 void unmount_sd_card(void)

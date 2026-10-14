@@ -330,7 +330,7 @@ def read_done(x, a, b):
 EVENTS = {
     1: ("BOOT", lambda x, a, b: f"reset {reas(a)} (0x{a:x}), battery {x * 20} mV, fw {b & 0xFFFFFFF:07x}{'+' * (b >> 28 & 1)}"),
     2: ("FAULT", lambda x, a, b: f"{FAULT[a] if a < len(FAULT) else a}, PC 0x{b:08x} (previous boot)"),
-    3: ("MOUNT", lambda x, a, b: f"try {x}: {err(a)}"),
+    3: ("MOUNT", lambda x, a, b: f"{f'try {x}' if x else 'again'}: {err(a)}"),  # x 0: a failed card tried again
     4: ("STORE", lambda x, a, b: f"audio boot {a} (files {a:04X}xxxx), {b // 1024} MB free" + ", BOOT unread" * (x & 1) + ", BOOT unwritten" * (x >> 1 & 1)),
     5: ("SLOW", lambda x, a, b: f"SD append {a} ms ({b} B)"),
     6: ("APPEND_ERR", lambda x, a, b: f"{APPEND[x] if x < len(APPEND) else ''}{err(a)} ({b} B)"),
@@ -456,6 +456,7 @@ def selftest():
         (5006, when(1_700_000_011_000), 8, "0x63", "x 1 a 2 b 3")], got
     assert EVENTS[25][1](1, 601 | 250 << 20, 4 | 2 << 10 | 2 << 20) == \
         "9 appends, 601 ms in all, slowest 250 ms; under 20 ms 4, 20-49 ms 2, 50-200 ms 2, over 200 ms 1"
+    assert EVENTS[3][1](0, (-116) & 0xFFFFFFFF, 0) == "again: -116 -ETIMEDOUT"
     assert EVENTS[28][1](0, 1, 0) == "off: System OFF" and EVENTS[28][1](1, 9, 0) == "on: 9"
     assert EVENTS[29][1](204, 0, 0) == "on battery, VDDH 4080 mV"
     assert EVENTS[29][1](165, 2, 0).startswith("low battery (3300 mV)")

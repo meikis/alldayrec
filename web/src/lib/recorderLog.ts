@@ -145,7 +145,9 @@ const EVENTS: Record<number, [string, string, (r: Rec) => string]> = {
     "MOUNT",
     "挂载存储卡",
     // no answer (ETIMEDOUT) or no device: no card, or one not seated (LR-P3-2420 without one, 10-07)
-    (r) => `第 ${r.x} 次：${err(r.a)}${[-116, -19].includes(r.a | 0) ? "（没插卡或没插好）" : ""}`,
+    // x 0: a failed card tried again (the store's retry_card), said when it mounts or a reset try fails
+    (r) =>
+      `${r.x ? `第 ${r.x} 次` : "重试"}：${err(r.a)}${[-116, -19].includes(r.a | 0) ? "（没插卡或没插好）" : ""}`,
   ],
   4: [
     "STORE",

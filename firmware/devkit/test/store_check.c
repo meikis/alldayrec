@@ -578,6 +578,21 @@ int main(void)
         retry_card();
         assert(store_err == 0 && seg == s0 + 3);
     }
+
+    // none at boot (BDAE 10-14: one put in later did not mount by plain tries): from scratch from the first try, once a
+    // minute 3 times, then every 10 minutes; back, it counts this boot then and starts at its segment 0
+    boot = 0, store_err = -ETIMEDOUT, retries = 0, mounts = resets = 0, mount_fails = 4, n_logged = 0;
+    assert(retry_every() == 60000);
+    for (int i = 0; i < 3; i++) {
+        retry_card();
+    }
+    assert(retry_every() == 600000);
+    retry_card();
+    assert(mounts == 0 && resets == 4 && store_err == -ETIMEDOUT && boot == 0 && n_logged == 0);
+    uint16_t counted = sys_get_le16(boot_file);
+    retry_card();
+    assert(mounts == 0 && resets == 5 && store_err == 0 && boot == counted + 1 && seg == 0 && retries == 0);
+    assert(n_logged == 2 && logged[0].code == LR_STORE && logged[1].code == LR_SEGMENT && logged[1].a == (uint32_t) boot << 16);
     printf("store_check ok: %u + %u + %u B on the card\n", card_len[0], card_len[1], card_len[2]);
     return 0;
 }
