@@ -22,8 +22,9 @@ def encode(*opts: str) -> list[bytes]:
     return audio.packets(ogg)[2:]  # OpusHead, OpusTags
 
 
-def test_join(tmp_path):
+def test_join(tmp_path, monkeypatch):
     db.open_db(tmp_path / "t.db")
+    monkeypatch.setattr(audio, "DEHUM", False)  # the noise is quiet: dehum would take its mean waveform out (test_dehum)
     rec = encode("-application", "lowdelay", "-frame_duration", "10", "-b:a", "32k")  # the recorder's codec.c
     a, b = audio.ogg(rec[:200]), audio.ogg(rec[200:400])  # 2 s each, back to back
     assert audio.save("LR-P3-test", T, a, "audio/ogg") == audio.save("LR-P3-test", T + 2000, b, "audio/ogg") == 2.0

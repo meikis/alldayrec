@@ -96,6 +96,29 @@ def ogg(audio_packets: list[bytes], frame_ms: int = 10, pre_skip: int = 0) -> by
 
 
 PREROLL = 8  # packets (80 ms, libopus's advice) of the piece before that a recorder piece's decoder hears first
+DEHUM = os.environ.get("DEHUM", "1") != "0"  # a recorder's 10 ms hum taken out of its pieces as they are read (dehum); 0: as decoded
+QUIET = 32768 * 10 ** (-60 / 20)  # a 10 ms frame under this RMS (-60 dBFS) has no one speaking in it
+DEHUM_MIN = 50  # quiet frames (0.5 s) a piece needs for its hum to be taken out
+
+
+def celt10(packet: bytes) -> bool:
+    """An Opus packet's TOC says CELT, one 10 ms frame: a recorder's encoder (firmware codec.c)."""
+    return len(packet) > 0 and packet[0] >> 3 >= 16 and (packet[0] >> 3) & 3 == 2 and packet[0] & 3 == 0
+
+
+def dehum(x: np.ndarray) -> np.ndarray:
+    """A recorder piece without its board's hum. Since the 10 ms microphone buffers (#204) the encoder's burst of work
+    in each 10 ms frame couples into the microphone (on battery: 100 Hz at about -80 dBFS, the level of a quiet room's
+    floor, and its harmonics): a waveform that repeats every 160 samples. The mean of the piece's quiet frames is that
+    waveform (the room's noise averages out) and is taken from every frame, speech too (the hum is under it as well);
+    a piece is whole frames, so whatever its offset the waveform lines up. x unchanged with fewer than DEHUM_MIN quiet
+    frames (a loud room; speech throughout). The 10 Hz flutter of the 100 ms buffers before is not a fixed waveform (the
+    noise's power rises and falls) and stays."""
+    f = x[:len(x) // 160 * 160].reshape(-1, 160).astype(np.float64)
+    quiet = np.sqrt((f * f).mean(1)) < QUIET
+    if quiet.sum() < DEHUM_MIN:
+        return x
+    return np.clip(np.round(x - np.resize(f[quiet].mean(0), len(x))), -32768, 32767).astype(np.int16)
 
 
 def primed(prev: bytes, body: bytes) -> bytes:
@@ -106,7 +129,6 @@ def primed(prev: bytes, body: bytes) -> bytes:
     second while the app is in front (10-08). Anything else (an iPhone's own microphone: SILK, 20 ms; a phone that
     starts each piece anew) is body unchanged."""
     ps, prev = packets(body), packets(prev)[2:][-PREROLL:]
-    celt10 = lambda p: len(p) > 0 and p[0] >> 3 >= 16 and (p[0] >> 3) & 3 == 2 and p[0] & 3 == 0  # TOC: CELT, one 10 ms frame
     if (len(ps) < 3 or not ps[0].startswith(b"OpusHead") or struct.unpack_from("<H", ps[0], 10)[0] != 0
             or len(prev) < PREROLL or not all(map(celt10, prev + ps[2:3]))):
         return body
@@ -213,9 +235,14 @@ def read(p) -> bytes:
 
 
 def samples(p) -> np.ndarray | None:
-    """A pieces row's audio, decoded, a recorder's going on from the piece before it (decode, primed)."""
-    return decode(read(p), aac=p["path"].endswith(".aac"), n=p["n"],
-                  prev=before(p["device"], p["start_ms"]) if p["path"].endswith(".ogg") else None)
+    """A pieces row's audio, decoded, a recorder's going on from the piece before it (decode, primed) and without its
+    board's 10 ms hum (dehum). Every reader takes pieces from here (the pipeline, playback, listening); the levels
+    stored at upload (save) stay those of the piece as it came."""
+    body, ogg = read(p), p["path"].endswith(".ogg")
+    x = decode(body, aac=p["path"].endswith(".aac"), n=p["n"], prev=before(p["device"], p["start_ms"]) if ogg else None)
+    if x is not None and DEHUM and ogg and celt10((packets(body)[2:] or [b""])[0]):
+        return dehum(x)
+    return x
 
 
 def queued(device: str) -> int:
