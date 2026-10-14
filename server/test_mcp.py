@@ -16,7 +16,7 @@ CID = "c20261001100000"
 
 
 def fake():
-    db.open_db(Path(tempfile.mkdtemp()) / "t.db")
+    t = db.open_db(Path(tempfile.mkdtemp()) / "t.db")
     rows = [dict(id=f"r{i}", start=f"2026-10-01T10:{i // 60:02d}:{i % 60:02d}.000", end=f"2026-10-01T10:{i // 60:02d}:{i % 60:02d}.900",
                  speaker="老王" if i % 2 else "我", text=f"第 {i} 句" + "存储方案细节" * 10, source="phone") for i in range(400)]
     with db.tx() as c:
@@ -30,6 +30,7 @@ def fake():
                         "tags": ["存储"], "people": [{"who": "老王", "points": ["建议按小时存"]}], "decisions": [{"text": "按小时存", "at": None}],
                         "todos": [{"owner": "我", "to": "老王", "text": "改存储", "due": "今天", "due_date": TODAY, "at": "2026-10-01T10:05:00.000",
                                    "quote": "我今天改"}]}, c)
+    return t
 
 
 def rpc(method, **params):
@@ -147,20 +148,18 @@ def post(body, headers: dict[str, str], method="POST") -> tuple[int, dict | None
     return status, json.loads(body) if body.startswith(b"{") else None
 
 
-def test_http_token():
-    fake()
+def test_http_token(monkeypatch):
+    t = fake()
+    t.token = "s3cret"
+    monkeypatch.setattr(server, "TENANTS", [t])
     call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "due", "arguments": {}}}
-    server.AUTH_TOKEN = "s3cret"
-    try:
-        assert post(call, {})[0] == 401, "no token"
-        assert post(call, {"Authorization": "Bearer wrong"})[0] == 401
-        status, r = post(call, {"Authorization": "Bearer s3cret"})
-        assert status == 200 and "改存储" in r["result"]["content"][0]["text"], r
-        assert post({"jsonrpc": "2.0", "method": "notifications/initialized"}, {"Authorization": "Bearer s3cret"}) == (202, None)
-        assert post(call, {"Authorization": "Bearer s3cret", "Origin": "https://evil.example"})[0] == 403
-        assert post(call, {"Authorization": "Bearer s3cret", "Origin": "https://live.test"})[0] == 200, "a page of this host"
-        assert post(call, {"Authorization": "Bearer s3cret"}, "GET")[0] == 405 and post(call, {"Authorization": "Bearer s3cret"}, "DELETE")[0] == 405
-        assert post(call, {"Authorization": "Bearer s3cret"}, "GET")[0] == 405
-        assert post(call, {}, "GET")[0] == 401
-    finally:
-        server.AUTH_TOKEN = ""
+    assert post(call, {})[0] == 401, "no token"
+    assert post(call, {"Authorization": "Bearer wrong"})[0] == 401
+    status, r = post(call, {"Authorization": "Bearer s3cret"})
+    assert status == 200 and "改存储" in r["result"]["content"][0]["text"], r
+    assert post({"jsonrpc": "2.0", "method": "notifications/initialized"}, {"Authorization": "Bearer s3cret"}) == (202, None)
+    assert post(call, {"Authorization": "Bearer s3cret", "Origin": "https://evil.example"})[0] == 403
+    assert post(call, {"Authorization": "Bearer s3cret", "Origin": "https://live.test"})[0] == 200, "a page of this host"
+    assert post(call, {"Authorization": "Bearer s3cret"}, "GET")[0] == 405 and post(call, {"Authorization": "Bearer s3cret"}, "DELETE")[0] == 405
+    assert post(call, {"Authorization": "Bearer s3cret"}, "GET")[0] == 405
+    assert post(call, {}, "GET")[0] == 401

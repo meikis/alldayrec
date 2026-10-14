@@ -12,7 +12,6 @@ import backfill_seconds
 def test_backfill():
     rec = Path(tempfile.mkdtemp())
     db.open_db(rec / "t.db")
-    audio.DIR = rec
     enc = lambda c, f: subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=f=440:d=5", "-c:a", c, "-f", f, "pipe:1"],
                                       capture_output=True, check=True).stdout
     T = lambda m: int(dt.datetime(2026, 10, 2, 10, m).timestamp() * 1000)

@@ -1,5 +1,6 @@
 """The calls table (#155): every ASR try and LLM call with its time, failure and size, never its text; the summary by
 kind and engine; the StepFun balance and how long it lasts."""
+import contextvars
 import datetime as dt
 import functools
 import json
@@ -55,8 +56,8 @@ def test_calls(monkeypatch):
     assert (r["n"], r["failed"], r["prompt_tokens"], r["completion_tokens"]) == (2, {"502": 1}, 900, 40) and r["ms50"] is not None
     assert db.calls(dt.datetime.now().isoformat()) == []
 
-    monkeypatch.setattr(db, "PATH", None)
-    db.add_call("final", "x", None, 1)  # a script on a read-only copy: nothing kept, nothing raised
+    contextvars.Context().run(db.add_call, "final", "x", None, 1)  # no tenant (a script on a read-only copy): nothing kept, nothing raised
+    assert db.calls(dt.datetime.now().isoformat()) == []
 
 
 def test_balance():

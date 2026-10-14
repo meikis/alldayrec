@@ -14,11 +14,11 @@ from starlette.requests import Request
 import audio
 import db
 from server import chunk, device_log, sound
+from tenant import T
 
 
 def test_sound(caplog):
-    audio.DIR = Path(tempfile.mkdtemp())
-    db.open_db(audio.DIR / "t.db")
+    db.open_db(Path(tempfile.mkdtemp()) / "t.db")
     tone = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=f=440:d=30", "-c:a", "libopus", "-f", "ogg", "pipe:1"],
                           capture_output=True, check=True).stdout
     t0 = dt.datetime.now().replace(second=0, microsecond=0) - dt.timedelta(minutes=30)
@@ -42,4 +42,4 @@ def test_sound(caplog):
     with caplog.at_level(logging.WARNING, "live"), pytest.raises(HTTPException) as e:
         anyio.run(chunk, req, "LR-P3-92D2", ms(end))
     assert e.value.status_code == 400 and "could not be decoded" in caplog.text
-    assert (audio.DIR / f"rejected/LR-P3-92D2/{ms(end)}.ogg").read_bytes() == b"not audio"
+    assert (T().recordings / f"rejected/LR-P3-92D2/{ms(end)}.ogg").read_bytes() == b"not audio"

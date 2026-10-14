@@ -3,7 +3,9 @@ a time, only with speech it has not seen. Asked once, its agent writes the final
 stays under summary.MIN_SPEECH_S; one never asked still gets its first sentence as the title and no call. The pipeline
 rig of test_backlog: real audio store, streams and pipeline, fake engines and LLM, a page watching."""
 import datetime as dt
+import tempfile
 import time
+from pathlib import Path
 
 import anyio
 import numpy as np
@@ -12,6 +14,7 @@ from fastapi import HTTPException
 
 import db
 import server
+from tenant import T
 from test_backlog import DEVICE, SR, flac, hear, rig, save, st, tone
 
 
@@ -62,10 +65,10 @@ def test_ask(tmp_path, monkeypatch):
 
             db.put_kv(f"end_at:{DEVICE}", server.iso(t0 + dt.timedelta(seconds=len(x) / SR)))  # the recorder stops
             for _ in range(20):
-                if server.summary_q.qsize():
+                if T().summaries[1].statistics().current_buffer_used:
                     break
                 await anyio.sleep(0.5)
-            c = server.summary_q.get_nowait()
+            c = T().summaries[1].receive_nowait()
             assert c["via_live"] and c["speech_s"] == speech and db.timeline(c["id"])["asked"]
             assert not st()["live"] and await asked() == "没有进行中的对话"
             res = await server.summarize(c, [])
@@ -81,7 +84,7 @@ def test_ask(tmp_path, monkeypatch):
 def test_ask_without_pipeline(monkeypatch):
     """A device without its pipeline (none, or one whose state exists but did not get as far as its ask: starting, or
     failed on the way and waiting for lasting() to restart it): 404, not a KeyError's 500."""
-    monkeypatch.setitem(server.state, "devices", {"starting": {"live": None}})
+    db.open_db(Path(tempfile.mkdtemp()) / "t.db").devices["starting"] = {"live": None}
     for device in ("nobody", "starting"):
         with pytest.raises(HTTPException) as e:
             anyio.run(server.live_ask, device)

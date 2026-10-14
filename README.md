@@ -8,10 +8,13 @@ Only speech detection and speaker identity run on this machine, both on onnxrunt
 
 ```
 cp .env.example .env   # fill in
+echo '[{"id": "main", "token": "", "data": "'$PWD/data'", "recordings": "'$PWD/recordings'"}]' > tenants.json && chmod 600 tenants.json
 cd server && uv sync && set -a && . ../.env && set +a && uv run python server.py
 ```
 
-Page: http://127.0.0.1:8770/ . Data: `LIVE_DATA/live.db` (SQLite: sentences, drafts, conversations, summaries, voices, the upload queue, the recorders' event logs and status reports — page `/device/<name>`; schema in `server/db.py`), `<date>.passes.jsonl` (raw engine output per pass).
+`tenants.json` (beside `.env`) is who the server serves: one tenant per person, each its own data and recordings dir and its own token; a lone tenant with an empty token runs without auth (`server/tenant.py`).
+
+Page: http://127.0.0.1:8770/ . Data, per tenant: `<data>/live.db` (SQLite: sentences, drafts, conversations, summaries, voices, the upload queue, the recorders' event logs and status reports — page `/device/<name>`; schema in `server/db.py`), `<date>.passes.jsonl` (raw engine output per pass).
 
 Tests and tooling in `server/`: `test_live.py`, `replay_case.py` (replay a case through candidate pipelines), `score_case.py` (score against a case's `gt.jsonl`), `eval_all.sh`.
 

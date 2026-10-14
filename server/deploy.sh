@@ -3,9 +3,10 @@
 #   server/deploy.sh            # HEAD (a clean origin/main): build, back up, install, restart, check; the friends' first
 #   server/deploy.sh check      # check what runs now (read only)
 #   server/deploy.sh rollback   # put back what the last deploy replaced (code, web, columns it added), restart, check
-# Instances are dir:unit; LR_INSTANCES replaces them (a throwaway test instance). Each deploy keeps a backup with a copy
-# of live.db in <dir>/backup-deploy-<time>, <dir>/backup-last points at it; a deploy that passes its check keeps only its
-# own and the one before.
+# Instances are dir:unit; LR_INSTANCES replaces them (a throwaway test instance). Each serves the tenants in its
+# <dir>/tenants.json (server/tenant.py; made from its .env once by server/tenants.sh), asked as them. Each deploy keeps a
+# backup with a copy of every tenant's live.db in <dir>/backup-deploy-<time>, <dir>/backup-last points at it; a deploy that
+# passes its check keeps only its own and the one before.
 set -euo pipefail
 HOST=suyiiyii@203.0.113.10
 INSTANCES=${LR_INSTANCES:-/opt/lr-prod:lr-prod /opt/lr-prod2:lr-prod2 /opt/live-record:live-record}
@@ -40,15 +41,22 @@ UV=/root/.local/bin/uv
 
 env_of() { grep "^$2=" "$1/.env" | tail -1 | cut -d= -f2-; }  # dir key: the last one wins, as in systemd
 
-get() {  # dir path: GET from the instance on loopback, with its token
-  curl -sf -m 10 -H "Authorization: Bearer $(env_of "$1" AUTH_TOKEN)" "http://127.0.0.1:$(env_of "$1" PORT)$2"
+tenants() {  # dir: its tenants, an "id data-dir" a line (the tokens stay in the file)
+  python3 -c 'import json, sys; [print(t["id"], t["data"]) for t in json.load(open(sys.argv[1]))]' "$1/tenants.json"
+}
+
+first() { tenants "$1" | head -1 | cut -d' ' -f1; }  # dir: its first tenant (the pages and the status are asked as it)
+
+get() {  # dir tenant path: GET from the instance on loopback as that tenant (its token through stdin: not in the process list)
+  python3 -c 'import json, sys; print("Authorization: Bearer " + next(t["token"] for t in json.load(open(sys.argv[1])) if t["id"] == sys.argv[2]))' \
+    "$1/tenants.json" "$2" | curl -sf -m 10 -H @- "http://127.0.0.1:$(env_of "$1" PORT)$3"
 }
 
 started() {  # dir unit log-offset (after a restart): answering within 3 min, not restarted since, no errors logged
   local d=$1 u=$2 off=$3 pid
   pid=$(systemctl show -p MainPID --value "$u")
   for _ in $(seq 90); do  # until it answers or dies
-    { get "$d" /api/status > /dev/null || [ "$(systemctl show -p MainPID --value "$u")" != "$pid" ]; } && break; sleep 2
+    { get "$d" "$(first "$d")" /api/status > /dev/null || [ "$(systemctl show -p MainPID --value "$u")" != "$pid" ]; } && break; sleep 2
   done
   sleep 20  # the pipelines start after the port is up: a failure there shows within seconds
   [ "$(systemctl show -p MainPID --value "$u")" = "$pid" ] || { echo "  FAIL $d: $u restarted while starting"; return 1; }
@@ -57,20 +65,23 @@ started() {  # dir unit log-offset (after a restart): answering within 3 min, no
   fi
 }
 
-check() {  # dir unit: active, running the commit in its COMMIT, serving the pages, each asset index.html names, the API
-  local d=$1 u=$2 dist=$1/server/static/dist want got a p n=0 bad=
+check() {  # dir unit: active, running the commit in its COMMIT, serving the pages, each asset index.html names, every tenant's API
+  local d=$1 u=$2 dist=$1/server/static/dist want got a p t n=0 bad= id data
   want=$(cat "$d/server/COMMIT" 2> /dev/null || true)
+  t=$(first "$d")
   [ "$(systemctl is-active "$u")" = active ] || bad+=" $u-not-active"
-  got=$(get "$d" /api/status | python3 -c 'import json, sys; print(json.load(sys.stdin)["commit"])') || got="(no /api/status)"
+  got=$(get "$d" "$t" /api/status | python3 -c 'import json, sys; print(json.load(sys.stdin)["commit"])') || got="(no /api/status)"
   [ "$got" = "$want" ] || bad+=" running:'$got'-not-'$want'"
-  for p in / /conversations; do get "$d" "$p" | cmp -s - "$dist/index.html" || bad+=" $p"; done
+  for p in / /conversations; do get "$d" "$t" "$p" | cmp -s - "$dist/index.html" || bad+=" $p"; done
   for a in $(grep -o '/assets/[^"]*' "$dist/index.html"); do
-    get "$d" "$a" | cmp -s - "$dist$a" || bad+=" $a"; n=$((n + 1))
+    get "$d" "$t" "$a" | cmp -s - "$dist$a" || bad+=" $a"; n=$((n + 1))
   done
   [ $n -gt 0 ] || bad+=" no-assets-in-index.html"
-  for p in /api/client-config /api/days /api/conversations; do get "$d" "$p" > /dev/null || bad+=" $p"; done
+  while read -r id data; do
+    for p in /api/client-config /api/days /api/conversations; do get "$d" "$id" "$p" > /dev/null || bad+=" $id:$p"; done
+  done < <(tenants "$d")
   [ -z "$bad" ] || { echo "  FAIL $d:$bad"; return 1; }
-  echo "  ok $d ($u): runs ${want:-(no COMMIT)}; /, /conversations, $n assets, API"
+  echo "  ok $d ($u): runs ${want:-(no COMMIT)}; /, /conversations, $n assets, the API of $(tenants "$d" | wc -l) tenant(s)"
 }
 
 deploy() {  # dir unit: back up, install the release, restart, check
@@ -86,14 +97,17 @@ deploy() {  # dir unit: back up, install the release, restart, check
   # and every model file the release pins (infer.MODELS) in the instance's MODELS_DIR, or stop here the same way (#219)
   (cd "$b/new" && MODELS_DIR="$(env_of "$d" MODELS_DIR)" "$d/server/.venv/bin/python" -c "import infer; infer.check()")
   for f in pyproject.toml uv.lock; do [ ! -f "$d/server/$f" ] || cp -a "$d/server/$f" "$b/old/"; done
-  # the columns now (rollback drops those a release adds: old code inserts whole rows) and an online copy of the db
-  "$d/server/.venv/bin/python" - "$(env_of "$d" LIVE_DATA)/live.db" "$b/old" << 'PY'
+  # per tenant, the columns now (rollback drops those a release adds: old code inserts whole rows) and an online copy of the db
+  while read -r id data; do
+    mkdir -p "$b/old/db/$id"
+    "$d/server/.venv/bin/python" - "$data/live.db" "$b/old/db/$id" << 'PY'
 import json, sqlite3, sys
 c = sqlite3.connect(sys.argv[1])
 tables = [t for (t,) in c.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
 json.dump({t: [r[1] for r in c.execute(f"PRAGMA table_info({t})")] for t in tables}, open(f"{sys.argv[2]}/columns.json", "w"))
 c.backup(sqlite3.connect(f"{sys.argv[2]}/live.db"))
 PY
+  done < <(tenants "$d")
   INSTALLED+=" $d"
   ln -sfn "$b" "$d/backup-last"  # once the backup is whole; rollback goes by it and by COMMIT, so COMMIT goes in first
   cp "$b/new/COMMIT" "$d/server/"
@@ -113,9 +127,14 @@ rollback() {  # dir unit: undo the newest deploy run, where it got to installing
   if [ "${b##*/}" != "$NEWEST" ] || ! cmp -s "$b/new/COMMIT" "$d/server/COMMIT"; then
     echo "  skip $d: not on the release of ${NEWEST:-any deploy}"; return 0
   fi
+  if [ ! -f "$b/old/tenant.py" ] && [ -z "$(env_of "$d" AUTH_TOKEN)" ]; then  # back to a server from before tenants.json
+    echo "  stop $d: the server it goes back to takes its token from .env, which has none (it would run without auth):"
+    echo "  server/tenants.sh rollback first"; return 1
+  fi
   off=$(stat -c %s "$d/data/server.log")
   systemctl stop "$u"
-  "$d/server/.venv/bin/python" - "$(env_of "$d" LIVE_DATA)/live.db" "$b/old/columns.json" << 'PY'
+  while read -r id data; do
+    "$d/server/.venv/bin/python" - "$data/live.db" "$b/old/db/$id/columns.json" << 'PY'
 import json, sqlite3, sys
 c, before = sqlite3.connect(sys.argv[1]), json.load(open(sys.argv[2]))
 for t, cols in before.items():
@@ -124,6 +143,7 @@ for t, cols in before.items():
             print(f"  drop column {t}.{col}")
             c.execute(f"ALTER TABLE {t} DROP COLUMN {col}")
 PY
+  done < <(tenants "$d")
   cp -a "$b/old/"*.py "$d/server/"
   for f in pyproject.toml uv.lock; do [ ! -f "$b/old/$f" ] || cp -a "$b/old/$f" "$d/server/"; done  # the venv keeps what came
   if [ -f "$b/old/COMMIT" ]; then cp -a "$b/old/COMMIT" "$d/server/"; else mv "$d/server/COMMIT" "$b/rolled-back-COMMIT"; fi

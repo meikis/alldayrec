@@ -23,7 +23,6 @@ def encode(*opts: str) -> list[bytes]:
 
 
 def test_join(tmp_path):
-    audio.DIR = tmp_path
     db.open_db(tmp_path / "t.db")
     rec = encode("-application", "lowdelay", "-frame_duration", "10", "-b:a", "32k")  # the recorder's codec.c
     a, b = audio.ogg(rec[:200]), audio.ogg(rec[200:400])  # 2 s each, back to back

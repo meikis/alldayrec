@@ -20,6 +20,7 @@ import audio
 import db
 import infer
 import server
+from tenant import T
 
 SR, DEVICE = 16000, "LR-TEST"
 BACKLOG_S, PIECE_S, LIVE_S = 3 * 3600, 60, 15  # the backlog in pieces of PIECE_S, a tone 10 s into each; then LIVE_S of now
@@ -60,7 +61,6 @@ def rig(tmp_path, monkeypatch, final_engine):
     """A pipeline's world: the energy VAD, fake engines and LLM, a page watching; returns what the draft engine was
     sent (seconds) and what the live analysis was fed (tone numbers per turn)."""
     monkeypatch.setattr(infer, "StreamVad", EnergyVad)
-    monkeypatch.setattr(server, "DATA", tmp_path)
     monkeypatch.setattr(server, "DRAFT_ENGINE", "stepfun-sse")
     monkeypatch.setattr(server, "ENGINE_FALLBACK", "")
     monkeypatch.setattr(server.summary, "MIN_SPEECH_S", 3)
@@ -79,10 +79,8 @@ def rig(tmp_path, monkeypatch, final_engine):
     monkeypatch.setitem(server.PROVIDERS, server.ENGINE, final_engine)
     monkeypatch.setitem(server.PROVIDERS, "stepfun-sse", draft_engine)
     np.savez(tmp_path / "owner-redimnet2.npz", owner=np.array([1.0, 0, 0, 0]))
-    audio.DIR = tmp_path
-    db.open_db(tmp_path / "live.db")
+    db.open_db(tmp_path / "live.db").watch_until = time.time() + 3600  # the tenant; a page of it watches
     monkeypatch.setitem(server.state, "embed", lambda x: np.array([0.0, 1, 0, 0]))
-    monkeypatch.setitem(server.state, "watch_until", time.time() + 3600)  # a page watches
     return sent, fed
 
 
@@ -91,7 +89,7 @@ def save(t: dt.datetime, body: bytes):
 
 
 def st():
-    return server.state["devices"][DEVICE]
+    return T().devices[DEVICE]
 
 
 def test_backlog_does_not_hold_drafts(tmp_path, monkeypatch):
@@ -178,7 +176,7 @@ def test_hold_keeps_backlog_final(tmp_path, monkeypatch):
                     time.sleep(0.2)
                     audio.hold(DEVICE, h)
                     t = t0 + dt.timedelta(seconds=PIECE_S * i)
-                    if int(t.timestamp() * 1000) <= audio.read_to.get(DEVICE, -1):
+                    if int(t.timestamp() * 1000) <= T().read_to.get(DEVICE, -1):
                         late.append(i)
                     save(t, backlog[i])
             async with anyio.create_task_group() as rest:
@@ -217,7 +215,6 @@ def test_hold_expires(tmp_path, monkeypatch):
     """A phone that never comes back: a hold not said again for HOLD_MAX_S is let go and the queue goes on; older audio
     arriving after that is kept, not finalized (as before #130)."""
     monkeypatch.setattr(audio, "HOLD_MAX_S", 2)
-    audio.DIR = tmp_path
     db.open_db(tmp_path / "live.db")
     t = lambda m: dt.datetime(2026, 10, 6, 10, m)
     piece = flac(tone(0, 3))
@@ -243,7 +240,7 @@ def test_hold_expires(tmp_path, monkeypatch):
                 assert got == [t(0), t(5)]
                 tg.start_soon(nxt)  # 10:05 is done
                 await anyio.sleep(0.5)
-                assert audio.held(DEVICE) is None and int(t(3).timestamp() * 1000) <= audio.read_to[DEVICE], "10:03 now comes too late"
+                assert audio.held(DEVICE) is None and int(t(3).timestamp() * 1000) <= T().read_to[DEVICE], "10:03 now comes too late"
                 tg.cancel_scope.cancel()
 
     anyio.run(run)
@@ -302,14 +299,13 @@ def test_hold_release(tmp_path, monkeypatch):
     """The phone no longer has the recorder (unbound, or another bound): the hold goes at once, not HOLD_MAX_S after
     the phone last said it (10-07: LR-P3-116C's 261 pieces waited from 17:47 to 05:47). Meanwhile the status says when
     the phone last said it and until when the queue waits without it, and whether the device is recording now."""
-    audio.DIR = tmp_path
     db.open_db(tmp_path / "live.db")
     monkeypatch.setattr(server, "note", lambda *a, **k: None)
     t = dt.datetime(2026, 10, 7, 17, 36)
     save(t, flac(tone(0, 3)))  # it came just now: the device records
     audio.hold(DEVICE, int(t.timestamp() * 1000))
     st = {"audio_end": None, "done_to": None, "progress": [], "latency": [], "final_latency": [], "drafting": False,
-          "last_speech": None, "refine": None, "conversation": None, "draft": None, "draft_to": None, "live_task": None}
+          "last_speech": None, "refine": None, "conversation": None, "draft": None, "draft_to": None, "analyzing": False}
     d = server.device_status(DEVICE, st)
     assert d["hold"] == "2026-10-07T17:36:00" and d["recording"], d
     seen, until = dt.datetime.fromisoformat(d["hold_seen"]), dt.datetime.fromisoformat(d["hold_until"])

@@ -1,5 +1,5 @@
 """Remote MCP at POST /mcp (Streamable HTTP, stateless, JSON responses only) for an agent the owner runs: Claude Code,
-Codex, Cursor, Cherry Studio. It takes the instance's AUTH_TOKEN like every other client (server.py's middleware).
+Codex, Cursor, Cherry Studio. It takes its tenant's token like every other client (server.py's middleware, tenants.json).
 Read tools over live.db (ask.py's where they fit) answer in compact Markdown, at most PAGE chars at a time with a
 cursor for the rest; one write, mark_todo, is the web page's 完成 / 不对. Every request is one log line: method, tool,
 how much came back, protocol version and client, never the arguments or the text.

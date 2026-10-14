@@ -11,8 +11,7 @@ import db
 
 
 def backfill(db_path: Path, rec: Path):
-    db.open_db(db_path)
-    audio.DIR = rec
+    db.open_db(db_path, rec)
     rows = db.conn().execute("SELECT * FROM pieces WHERE path LIKE '%.aac' ORDER BY device, start_ms").fetchall()
     before = after = 0.0
     changed = unreadable = 0

@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse
 
 router = APIRouter()
 DIR = Path()  # DATA/firmware, set by server.py
-TOKEN = os.environ.get("FIRMWARE_TOKEN", "")  # uploads need it on top of AUTH_TOKEN, which every phone holds; empty: no uploads
+TOKEN = os.environ.get("FIRMWARE_TOKEN", "")  # uploads need it on top of a tenant's token, which every phone holds; empty: no uploads
 MODEL = re.compile(r"LR-[A-Z0-9]{1,8}")
 VERSION = re.compile(r"\d{8}\.\d{6}-[0-9a-f]{7,40}")  # no "+": a dirty tree's build is not one commit
 

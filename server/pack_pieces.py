@@ -13,8 +13,7 @@ import db
 
 
 def pack(db_path: Path, rec: Path):
-    db.open_db(db_path)
-    audio.DIR = rec
+    db.open_db(db_path, rec)
     rows = db.conn().execute("SELECT device, start_ms, path FROM pieces WHERE pos IS NULL ORDER BY device, start_ms").fetchall()
     old = {(r["device"], r["start_ms"]): r["path"] for r in rows}
     missing = [p for p in old.values() if not (rec / p).exists()]

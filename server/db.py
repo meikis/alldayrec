@@ -1,6 +1,6 @@
-"""The server's store: one SQLite file in LIVE_DATA. Audio (uploaded pieces, voice clips) stays on disk; the passes
-trace stays a jsonl log. One connection per thread (the summary and speaker work runs in threads), WAL so reads
-never wait for a write; every multi-step change is one `tx()`.
+"""The server's store: one SQLite file per tenant (tenant.py), the current tenant's. Audio (uploaded pieces, voice
+clips) stays on disk; the passes trace stays a jsonl log. One connection per thread and file (the summary and speaker
+work runs in threads, shared by the tenants), WAL so reads never wait for a write; every multi-step change is one `tx()`.
 """
 import datetime as dt
 import json
@@ -11,6 +11,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
+
+import tenant
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sentences (       -- final rows; a finalization pass replaces the ones starting in [from, to)
@@ -65,14 +67,19 @@ CREATE INDEX IF NOT EXISTS calls_at ON calls(at);
 CREATE TABLE IF NOT EXISTS balances (at TEXT NOT NULL, provider TEXT NOT NULL, cny REAL NOT NULL);  -- a prepaid account, hourly
 """
 
-PATH: Path | None = None
-_local = threading.local()
+_local = threading.local()  # .c: this thread's connection per file
 
 
-def open_db(path: Path):
-    global PATH
-    PATH = path
-    _local.c = None  # this thread's connection was to the old path
+def open_db(path: Path, recordings: Path | None = None) -> tenant.Tenant:
+    """The store at path for the code that runs from here on (a script's, a test's): a tenant of its own, its
+    recordings beside it unless given."""
+    t = tenant.enter(tenant.Tenant("local", "", path.parent, recordings or path.parent, db=path))
+    init()
+    return t
+
+
+def init():
+    """The current tenant's store made or brought up to date (the server, for each tenant at the start)."""
     conn().executescript(SCHEMA)
     if "device" not in {r[1] for r in conn().execute("PRAGMA table_info(conversations)")}:  # 10-02: one pipeline per device
         conn().execute("ALTER TABLE conversations ADD COLUMN device TEXT")
@@ -89,9 +96,12 @@ def open_db(path: Path):
 
 
 def conn() -> sqlite3.Connection:
-    c = getattr(_local, "c", None)
-    if c is None:
-        c = _local.c = sqlite3.connect(PATH, isolation_level=None, timeout=30)  # autocommit outside tx()
+    """The current tenant's store, on this thread's connection to it."""
+    path = tenant.T().db
+    if not hasattr(_local, "c"):
+        _local.c = {}
+    if (c := _local.c.get(path)) is None:
+        c = _local.c[path] = sqlite3.connect(path, isolation_level=None, timeout=30)  # autocommit outside tx()
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA synchronous=NORMAL")
@@ -424,7 +434,7 @@ def device_status(device: str) -> dict | None:
 
 def add_call(kind: str, engine: str, device: str | None, ms: int, error: str | None = None, audio_s: float | None = None,
              sent_s: float | None = None, prompt_tokens: int | None = None, completion_tokens: int | None = None):
-    if PATH is None:  # a script on a read-only copy (db._local.c set by hand), a test without a db: no ledger
+    if tenant.current.get(None) is None:  # a script on a read-only copy (db.conn replaced), a test without a store: no ledger
         return
     conn().execute("INSERT INTO calls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                    (dt.datetime.now().isoformat(timespec="milliseconds"), kind, engine, device, ms, error, audio_s, sent_s,

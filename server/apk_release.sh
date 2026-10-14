@@ -20,7 +20,8 @@ fi
 d=$2 new=$3
 TMP=/mnt/c/Users/me/lr-app.apk  # where scp put it (the Windows home)
 env_of() { grep "^$1=" "$d/.env" | tail -1 | cut -d= -f2-; }
-apk=$(env_of LIVE_DATA)/live-record.apk
+first() { python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[0][sys.argv[2]])' "$d/tenants.json" "$1"; }  # the first tenant's (its data has the APK)
+apk=$(first data)/live-record.apk
 if [ -f "$apk" ]; then
   old=$("$d/server/.venv/bin/python" "$d/server/apk.py" "$apk")
   [ "${old#*+}" -lt "${new#*+}" ] || { echo "the server has $old: $new is not newer, nothing changed" >&2; rm -f "$TMP"; exit 1; }
@@ -29,6 +30,6 @@ fi
 install -m 644 "$TMP" "$apk.new" && mv "$apk.new" "$apk"  # a rename: a download under way goes on reading the old file
 rm -f "$TMP"
 # what the phones now get (the token through stdin: not in the process list)
-got=$(echo "Authorization: Bearer $(env_of AUTH_TOKEN)" | curl -sf -m 10 -H @- "http://127.0.0.1:$(env_of PORT)/api/app/latest")
+got=$(echo "Authorization: Bearer $(first token)" | curl -sf -m 10 -H @- "http://127.0.0.1:$(env_of PORT)/api/app/latest")
 echo "$got" | grep -q "\"versionCode\":${new#*+}[,}]" || { echo "FAIL: /api/app/latest says $got" >&2; exit 1; }
 echo "ok: /app.apk is $new${old:+ (was $old, kept as ${apk##*/}.prev-$old)}"

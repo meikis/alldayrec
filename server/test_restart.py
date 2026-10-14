@@ -9,6 +9,7 @@ import numpy as np
 
 import db
 import server
+from tenant import T
 from test_backlog import DEVICE, PIECE_S, SR, flac, hear, rig, save, tone
 
 
@@ -31,7 +32,7 @@ def test_no_voiceprint_and_restart(tmp_path, monkeypatch):
     finals = lambda: db.sentences(server.iso(t0), server.iso(t0 + dt.timedelta(seconds=3 * PIECE_S)), source=DEVICE)
 
     async def run():
-        dias = len(server.state["dias"])
+        dias = len(T().dias)
         async with anyio.create_task_group() as tg:
             tg.start_soon(server.lasting, DEVICE)
             for _ in range(120):
@@ -43,7 +44,7 @@ def test_no_voiceprint_and_restart(tmp_path, monkeypatch):
             assert failed, "the write was to fail once"
             assert "我" not in {r["speaker"] for r in rows}, rows
             assert [t.name for t in anyio.get_running_tasks()].count(f"feed:{DEVICE}") == 1, "the failed pipeline's reader is gone"
-            assert len(server.state["dias"]) == dias + 2, "the failed pipeline's diarists are gone"
+            assert len(T().dias) == dias + 2, "the failed pipeline's diarists are gone"
             tg.cancel_scope.cancel()
 
     anyio.run(run)

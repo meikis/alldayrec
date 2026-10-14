@@ -11,8 +11,7 @@ import db
 
 
 def backfill(db_path: Path, rec: Path):
-    db.open_db(db_path)
-    audio.DIR = rec
+    db.open_db(db_path, rec)
     rows = db.conn().execute("SELECT * FROM pieces WHERE rms IS NULL ORDER BY start_ms DESC").fetchall()
     unreadable = 0
     for i, r in enumerate(rows):

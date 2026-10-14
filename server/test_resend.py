@@ -6,15 +6,15 @@ from pathlib import Path
 
 import audio
 import db
+from tenant import T
 
 
 def test_resend():
-    audio.DIR = Path(tempfile.mkdtemp())
-    db.open_db(audio.DIR / "t.db")
+    db.open_db(Path(tempfile.mkdtemp()) / "t.db")
     tone = lambda s: subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"sine=f=440:d={s}", "-c:a", "libopus", "-f", "ogg", "pipe:1"],
                                     capture_output=True, check=True).stdout
     start = int(dt.datetime(2026, 10, 2, 10, 0).timestamp() * 1000)
-    hour = audio.DIR / "chunks/phone/2026-10-02/10.ogg"
+    hour = T().recordings / "chunks/phone/2026-10-02/10.ogg"
     row = lambda: db.conn().execute("SELECT * FROM pieces WHERE device = 'phone' AND start_ms = ?", (start,)).fetchone()
     first = tone(60)
     assert audio.save("phone", start, first, "audio/ogg") > 59

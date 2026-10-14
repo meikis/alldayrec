@@ -9,22 +9,6 @@ HERE = Path(__file__).resolve().parent
 
 # file: lines (stripped) that may still use them, and why
 ALLOWED = {
-    "server.py": {  # step 2 (anyio with the tenants, #200): the background loops, their queues and the pipeline's tasks
-        "import asyncio": "",
-        "asyncio.ensure_future(broadcast(e))": "note(): becomes a broadcaster task per tenant",
-        "summary_q: asyncio.Queue = asyncio.Queue()": "becomes a memory object stream per tenant",
-        "await asyncio.gather(*(summarize_loop() for _ in range(SUMMARY_WORKERS)))": "summary workers: a TaskGroup",
-        "running: dict[str, asyncio.Task] = {}": "pipelines(): the tenant's TaskGroup",
-        'running[d] = asyncio.create_task(lasting(d), name=f"pipeline:{d}")': "pipelines(): the tenant's TaskGroup",
-        '"vad_to": None, "wake": asyncio.Event(), "draft": None, "drafting": False,': "anyio.Event cannot be cleared",
-        'await asyncio.wait_for(st["wake"].wait(), REFINE_EVERY_S)': "with the wake Event",
-        "except asyncio.TimeoutError:": "with the wake Event",
-        'st["live_task"] = asyncio.create_task(live_update(), name=f"live:{device}")': "the pipeline's TaskGroup",
-        'st["live_task"] = asyncio.create_task(live_update(asked=True), name=f"live:{device}")': "the pipeline's TaskGroup",
-        'parts = [asyncio.create_task(coro, name=f"{name}:{device}")': "the pipeline's four parts: a TaskGroup",
-        "t = (await asyncio.wait(parts, return_when=asyncio.FIRST_COMPLETED))[0].pop()": "the pipeline's four parts",
-        "asyncio.create_task(coro, name=name).add_done_callback(": "startup: the lifespan's TaskGroup",
-    },
     "replay_case.py": {  # an offline replay of recorded cases: sync urllib calls in a pool, each window on its own loop
         "import concurrent.futures as cf": "",
         'with cf.ThreadPoolExecutor(2) as ex, open(self.cache_path, "a") as f:  # the live service shares the key': "",

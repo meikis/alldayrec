@@ -12,6 +12,7 @@ from fastapi import HTTPException
 import db
 import selfvoice as sv
 import server
+import tenant
 from test_backlog import DEVICE, PIECE_S, SR, flac, hear, rig, save, tone
 
 rng = np.random.default_rng(0)
@@ -102,8 +103,6 @@ def test_clips():
 
 
 def test_card_round_trip(tmp_path, monkeypatch):
-    monkeypatch.setattr(server, "DATA", tmp_path)
-    monkeypatch.setitem(server.state, "owner", None)
     db.open_db(tmp_path / "live.db")
     amp = {}  # a sentence's start -> how loud its tone is: S1 3000, others 1000
 
@@ -155,7 +154,7 @@ def test_card_round_trip(tmp_path, monkeypatch):
         anyio.run(server.self_answer, {"answer": 7})
 
     anyio.run(server.self_answer, {"answer": 0})
-    assert float(np.load(npz)["self"] @ ME) > 0.95 and float(server.state["owner"]["self"] @ ME) > 0.95
+    assert float(np.load(npz)["self"] @ ME) > 0.95 and float(tenant.T().owner["self"] @ ME) > 0.95
     st = db.kv("selfvoice")
     assert st["confirmed"]["pick"] == 0 and st["card"] is None and [x["answer"] for x in st["log"]] == ["later", 0]
     assert anyio.run(server.self_get) == {"card": None}
@@ -167,7 +166,6 @@ def test_pick_reaches_next_conversation(tmp_path, monkeypatch):
     """Picked while a conversation is open: it stays without 我 (also at its relabel at the close); the next one is 我."""
     rig(tmp_path, monkeypatch, hear)  # every sentence's voiceprint is [0, 1, 0, 0]
     (tmp_path / "owner-redimnet2.npz").unlink()
-    monkeypatch.setitem(server.state, "owner", None)
     monkeypatch.setattr(server, "broadcast", lambda m: anyio.sleep(0))
     db.put_kv("selfvoice", {"first_at": T(0), "card": {"why": "rule", "convs": 3, "candidates": [{"p": 0.99, "bank": [0, 1, 0, 0]}]}})
     silence = np.zeros(PIECE_S * SR, np.int16)

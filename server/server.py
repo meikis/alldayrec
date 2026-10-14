@@ -1,6 +1,6 @@
 """Live transcript of the phone's recording.
 
-    set -a; . .env; set +a; uv run python server.py [--dir <recordings>] [--port 8770]   (variables: .env.example)
+    set -a; . .env; set +a; uv run python server.py [--port 8770]   (variables: .env.example; tenants: ../tenants.json, tenant.py)
 
 Takes the audio pieces the app and the /record page upload, keeps them on disk as a queue and feeds them in time
 order (only as fast as finalization keeps up), finds speech with FireRed Stream-VAD and transcribes in two layers:
@@ -8,12 +8,11 @@ final pieces of up to CHUNK_S cut in pauses (sentences, conversations, summaries
 each pause for the minutes not final yet; all state is in data/live.db.
 """
 import argparse
-import asyncio
 import base64
+import contextlib
 import copy
 import datetime as dt
 import hashlib
-import hmac
 import json
 import logging
 import math
@@ -29,6 +28,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
+from starlette.requests import HTTPConnection
 
 import apk
 import ask
@@ -47,8 +47,10 @@ import speakers
 import squeeze
 import stepfun_asr
 import summary
+import tenant
 import threads
 from conversations import IGNORE, Grouper
+from tenant import T
 
 HERE = Path(__file__).resolve().parent
 def env(name: str) -> str:
@@ -58,7 +60,6 @@ def env(name: str) -> str:
     return v
 
 
-DATA = Path(env("LIVE_DATA"))                     # live.db, the passes trace, owner-redimnet2.npz, voice clips
 SR = 16000
 FRAME_LEN, FRAME_SHIFT = 400, 160          # FireRed fbank: 25 ms window, 10 ms shift
 MERGE_GAP_S = 0.6                          # VAD utterances closer than this are one
@@ -87,7 +88,8 @@ TURN_GAP_S = float(os.environ.get("TURN_GAP_S", "1.0"))  # same speaker, closer 
 EDGE_S = 3.0                               # rows touching the window edges may be cut: left to the next pass
 BRIDGE = env("ASR_UPLOAD_BRIDGE_URL")             # returns {upload_url, download_url} for a file name
 DIARIZE = env("ASR_SERVICE_URL")                   # file-mode ASR service: POST /audio/transcriptions, GET /jobs/{id}
-AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")      # empty: no auth (loopback only); set when a proxy exposes the server
+TENANTS: list[tenant.Tenant] = []  # every tenant of this process (tenant.load at the start); the first one's data has the
+                                   # firmware, the APK and the StepFun balance, shared by all
 
 log = logging.getLogger("live")
 
@@ -414,28 +416,72 @@ def merge_drafts(finals: list[dict], drafts: list[dict], final_to: dict[str, str
     return sorted(finals + [r for r in drafts if r["start"] >= (final_to.get(r.get("source")) or "")], key=lambda r: r["start"])
 
 
-app = FastAPI()
-firmware.DIR = DATA / "firmware"
-app.include_router(firmware.router)  # the recorders' firmware packages
-clients: set[WebSocket] = set()
-state = {"chunks": None, "events": [], "commit": "", "devices": {}, "embed": None, "dias": [],
-         "watch_until": 0.0, "wake_at": 0.0}  # devices: one pipeline's state each; watch: a page in front wants the live analysis
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    """The process's tasks (the voiceprint model, the metrics, the balance) and each tenant's (run_tenant), until the
+    server stops: then all of them are cancelled."""
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(load_model, name="model")
+        tg.start_soon(supervised, "metrics", metrics_loop, name="metrics")
+        if os.environ.get("STEPFUN_API_KEY"):
+            tg.start_soon(supervised, "balance", balance_loop, name="balance")
+        for t in TENANTS:
+            tg.start_soon(run_tenant, t, name=f"tenant:{t.id}")
+        yield
+        tg.cancel_scope.cancel()
+
+
+app = FastAPI(lifespan=lifespan)
+app.include_router(firmware.router)  # the recorders' firmware packages (firmware.DIR: the first tenant's, set by main)
+state = {"commit": "", "embed": None}  # the process's: what runs, and the voiceprint model every tenant uses
+MODEL = anyio.Event()  # the model is loaded
+
+
+async def load_model():
+    from diarist import load_embedder
+    state["embed"] = await anyio.to_thread.run_sync(load_embedder, limiter=threads.INFER)
+    MODEL.set()
+
+
+async def run_tenant(t: tenant.Tenant):
+    """A tenant's loops, each started again after a failure; the tenant's pipelines and live analyses run in its task
+    group too, so cancelling t.scope stops all of it."""
+    tenant.enter(t)
+    t.recordings.mkdir(parents=True, exist_ok=True)
+    with anyio.CancelScope() as t.scope:
+        async with anyio.create_task_group() as t.tg:
+            for name, fn in (("pipeline", pipelines), ("status", status_loop), ("summary", summary_worker), ("voices", voices_loop),
+                             *((("recap", recap_loop),) if RECAP_AT else ())):
+                t.tg.start_soon(supervised, name, fn, name=f"{name}:{t.id}")
+
+
+async def supervised(name: str, fn):
+    """fn for good: one that ends (a bug, a returned loop) is logged and started again RESTART_S later, without the
+    tasks beside it (a TaskGroup would otherwise cancel them all)."""
+    while True:
+        try:
+            await fn()
+            log.error("task %s ended: returned", name)
+        except Exception as e:
+            log.exception("task %s ended: %r", name, threads.first(e))
+        await anyio.sleep(RESTART_S)
 
 
 async def broadcast(msg: dict):
-    for ws in list(clients):
+    for ws in list(T().clients):
         try:
             await ws.send_json(msg)
         except Exception:
-            clients.discard(ws)
+            T().clients.discard(ws)
 
 
 def note(text: str, kind: str = "info"):
     """One line of the system log the page shows: what arrived, what each pass did, state changes."""
     e = {"type": "event", "at": dt.datetime.now().isoformat(timespec="seconds"), "kind": kind, "text": text}
-    state["events"].append(e)
-    del state["events"][:-300]
-    asyncio.ensure_future(broadcast(e))
+    T().events.append(e)
+    del T().events[:-300]
+    if T().tg:  # none: a test without the tenant's tasks, nobody to send it to
+        T().tg.start_soon(broadcast, e)
 
 
 def find_conversation(conv_id: str) -> dict | None:
@@ -447,14 +493,11 @@ def conversation_rows(c: dict) -> list[dict]:
     return db.sentences(c["start"], c["end"], inclusive=True, source=c.get("device"))
 
 
-summary_q: asyncio.Queue = asyncio.Queue()
-
-
 def queue_summary(c: dict, keep: bool = False):
     """keep: the current summary stays on the page until the new one is written (a rename redoes it)."""
     if not keep:
         db.put_summary({"conversation": c["id"], "status": "pending", "error": None})
-    summary_q.put_nowait(c)
+    T().summaries[0].send_nowait(c)
 
 
 def all_conversations() -> list[dict]:
@@ -462,11 +505,9 @@ def all_conversations() -> list[dict]:
     return db.conversations()
 
 
-_tags = {"at": 0.0, "counts": {}}
-
-
 def tag_counts() -> dict[str, int]:
     """Recounted at most once a minute: a backfill summarizes thousands in a row."""
+    _tags = T().tags
     if time.time() - _tags["at"] < 60:
         return _tags["counts"]
     n = {}
@@ -487,7 +528,9 @@ async def summary_worker():
         s = c["summary"]
         if not s or s["status"] == "pending":
             queue_summary(c)
-    await asyncio.gather(*(summarize_loop() for _ in range(SUMMARY_WORKERS)))
+    async with anyio.create_task_group() as tg:
+        for _ in range(SUMMARY_WORKERS):
+            tg.start_soon(summarize_loop)
 
 
 async def summarize(c: dict, tags: list[str]) -> dict:
@@ -502,7 +545,7 @@ async def summarize(c: dict, tags: list[str]) -> dict:
 
 async def summarize_loop():
     while True:
-        c = await summary_q.get()
+        c = await T().summaries[1].receive()
         for delay in (10, 60, 300, None):
             try:
                 res = await summarize(c, list(tag_counts())[:60])
@@ -523,7 +566,7 @@ async def summarize_loop():
             if media:  # a redone summary found media: its voices leave the voiceprint bank
                 t.executemany("DELETE FROM voices WHERE conv = ? AND label = ?", [(c["id"], m) for m in media])
         if media:
-            _speakers["at"] = 0.0
+            T().speakers["at"] = 0.0
         note(f"对话 {c['start'][11:19]} 的摘要" + (f"：{res['title']}" if res["status"] == "done" else f"生成失败：{res['error']}"),
              "state" if res["status"] == "done" else "error")
         await broadcast({"type": "summary", **res})
@@ -550,7 +593,7 @@ async def name_hints(c: dict, media: set[str]):
         return
     db.put_name_hints(h)
     if h["names"]:
-        _speakers["at"] = 0.0
+        T().speakers["at"] = 0.0
         note(f"对话 {c['start'][11:19]}：听出 {len(h['names'])} 个称呼，可在对话页确认", "state")
 
 
@@ -565,17 +608,17 @@ async def write_recap(day: str) -> dict | None:
 
 
 async def balance_loop():
-    """The StepFun balance every hour (#155): what transcription costs a day, and when the money runs out."""
+    """The StepFun balance every hour (#155): what transcription costs a day, and when the money runs out. One account
+    for every tenant: kept in the first one's store, the others' pages show none."""
     while True:
         try:
-            db.add_balance("stepfun", await stepfun_asr.balance())
+            tenant.call(TENANTS[0], db.add_balance, "stepfun", await stepfun_asr.balance())
         except Exception as e:
             log.warning("stepfun balance: %r", e)
         await anyio.sleep(3600)
 
 
 VM_INGEST_URL = os.environ.get("VM_INGEST_URL", "")  # .../api/v1/import/prometheus: metrics_loop pushes there; empty: nothing
-INSTANCE = os.environ.get("LR_INSTANCE") or ("friend" if "friend" in str(DATA) else "main")  # every series' instance label
 STARTED = dt.datetime.now().isoformat()  # lr_calls_total counts from here: a restart resets it, as a counter may
 CHARGE = {"battery": 0, "charging": 1, "full": 2}  # a recorder's hw charge (firmware lr_power.h)
 
@@ -586,13 +629,14 @@ def prom_line(name: str, labels: dict, v) -> str:
 
 
 def metrics() -> str:
-    """This instance's numbers in Prometheus text (#155): status(), db.calls and db.balance. Devices by their LR-… name,
-    a phone (named by its owner) by a hash of it; never what was said, nor a name of anyone."""
+    """The current tenant's numbers in Prometheus text (#155), its id the instance label: status(), db.calls and
+    db.balance. Devices by their LR-… name, a phone (named by its owner) by a hash of it; never what was said, nor a name
+    of anyone."""
     s, now, out = status(), dt.datetime.now(), []
 
     def m(name, v, **labels):
         if v is not None:
-            out.append(prom_line(name, {"instance": INSTANCE, **labels}, v))
+            out.append(prom_line(name, {"instance": T().id, **labels}, v))
     m("lr_up", 1, commit=s["commit"])
     m("lr_summaries_pending", s["summaries_pending"])
     for d in s["devices"]:
@@ -622,13 +666,13 @@ def metrics() -> str:
 
 
 async def metrics_loop():
-    """metrics() to VictoriaMetrics every minute (basic auth VM_INGEST_USER / VM_INGEST_PASSWORD); a failed push is a
+    """Every tenant's metrics() to VictoriaMetrics every minute (basic auth VM_INGEST_USER / VM_INGEST_PASSWORD); a failed push is a
     warning, the next minute tries again."""
     while True:
         if VM_INGEST_URL:
             try:
                 auth = base64.b64encode(f"{os.environ.get('VM_INGEST_USER', '')}:{os.environ.get('VM_INGEST_PASSWORD', '')}".encode()).decode()
-                body = metrics().encode()
+                body = "".join(tenant.call(t, metrics) for t in TENANTS).encode()
                 await _http(VM_INGEST_URL, body, {"Authorization": f"Basic {auth}", "Content-Type": "text/plain"})
             except Exception as e:
                 log.warning("metrics push: %s", failure(e))  # the class and code, never the URL or credentials
@@ -659,16 +703,16 @@ def iso(t: dt.datetime) -> str:
 
 async def pipelines():
     """One pipeline per device with audio after its finalized time: a phone sending last night's backlog while an
-    iPhone records today is transcribed on its own timeline. A device's pipeline lives on once started."""
-    from diarist import load_embedder
-    state["embed"] = await anyio.to_thread.run_sync(load_embedder, limiter=threads.INFER)
-    running: dict[str, asyncio.Task] = {}
+    iPhone records today is transcribed on its own timeline. A device's pipeline lives on once started, in the
+    tenant's task group."""
+    await MODEL.wait()
     while True:
         devices = [r[0] for r in db.conn().execute("SELECT DISTINCT device FROM pieces")]
         after = {d: dt.datetime.fromisoformat(v) for d in devices if (v := db.kv(f"finalized_to:{d}"))}
         for d in audio.pending(after):
-            if d not in running:
-                running[d] = asyncio.create_task(lasting(d), name=f"pipeline:{d}")
+            if d not in T().pipelines:
+                T().pipelines.add(d)
+                T().tg.start_soon(lasting, d, name=f"pipeline:{d}")
         await anyio.sleep(5)
 
 
@@ -684,7 +728,7 @@ async def lasting(device: str):
             await pipeline(device)
         except Exception as e:
             log.exception("pipeline %s ended", device)
-            note(f"{device} 的处理任务退出：{e!r}"[:140] + f"，{RESTART_S} s 后重来", "error")
+            note(f"{device} 的处理任务退出：{threads.first(e)!r}"[:140] + f"，{RESTART_S} s 后重来", "error")
         await anyio.sleep(RESTART_S)
 
 
@@ -698,14 +742,14 @@ async def pipeline(device: str):
     resume = db.kv(f"finalized_to:{device}")
     done0 = dt.datetime.fromisoformat(resume) if resume else None
     draft0 = db.kv(f"draft_to:{device}")
-    st = state["devices"][device] = {"seg": seg, "done_to": done0, "audio_end": None, "edge_end": None, "last_speech": None, "refine": None,
+    st = T().devices[device] = {"seg": seg, "done_to": done0, "audio_end": None, "edge_end": None, "last_speech": None, "refine": None,
                                      "conversation": None, "latency": [], "final_latency": [], "live": None,
-                                     "live_task": None,  # the live analysis running
+                                     "analyzing": False,  # the live analysis running
                                      "progress": [],  # (wall time, finalized time) per commit, the last 10 min: the rate
                                      "utts": [],  # VAD utterances after the finalized time: where the final layer cuts
                                      # the draft layer: its own progress, VAD utterances, last pause, wake-up, and its rows not yet covered
                                      "draft_to": dt.datetime.fromisoformat(draft0) if draft0 else None, "draft_utts": [],
-                                     "vad_to": None, "wake": asyncio.Event(), "draft": None, "drafting": False,
+                                     "vad_to": None, "wake": anyio.Event(), "draft": None, "drafting": False,
                                      "voiced": [],  # the open conversation's final sentences with their voiceprints: relabelled at its close
                                      "drafts": db.drafts(iso(done0) if done0 else "", None, device)}
     if resume:
@@ -753,7 +797,7 @@ async def pipeline(device: str):
     owner = dict(np.load(vp)) if vp.exists() else {}  # a new instance has nobody's voiceprint yet: nobody is 我 (selfvoice)
     embed, dia, grouper = state["embed"], Diarist(owner, people=bank), Grouper(open_=db.kv(f"open_conversation:{device}"))
     ddia = Diarist(owner, people=bank)  # the drafts' own clustering: it never touches the final labels
-    state["dias"] += [dia, ddia]  # a rename on the conversation page teaches every diarist a name
+    T().dias.extend([dia, ddia])  # a rename on the conversation page teaches every diarist of the tenant a name
     live_failed = 0.0
 
     def open_view() -> dict | None:
@@ -858,7 +902,7 @@ async def pipeline(device: str):
         for rec in recs:
             dia.reset()
             ddia.reset()
-            summary_q.put_nowait(rec)
+            T().summaries[0].send_nowait(rec)
             log.info("%s conversation closed %s", device, rec)
             note(f"对话结束：{rec['start'][11:19]} 到 {rec['end'][11:19]}，{rec['sentences']} 句，参与 {'、'.join(rec['participants']) or '—'}", "state")
             await broadcast({"type": "conversation", **db.conversation(rec["id"])})
@@ -878,16 +922,18 @@ async def pipeline(device: str):
         """A page is in front, the conversation going on has a minute of speech and is the present, and LIVE_EVERY_S of
         new speech came (or any, when a page just came to the front)."""
         o, lv, now = open_view(), st["live"], time.time()
-        if not o or o["speech_s"] < summary.MIN_SPEECH_S or now > state["watch_until"] or now - live_failed < 120 or not present(o):
+        if not o or o["speech_s"] < summary.MIN_SPEECH_S or now > T().watch_until or now - live_failed < 120 or not present(o):
             return False
         if not lv or not overlaps(lv, o):
             return True
         grown = o["speech_s"] - lv["speech_s"]
-        return grown >= LIVE_EVERY_S or (grown > 0 and state["wake_at"] > lv["wall"])
+        return grown >= LIVE_EVERY_S or (grown > 0 and T().wake_at > lv["wall"])
 
     async def live_update(asked: bool = False):
         nonlocal live_failed
         o = open_view()
+        if o is None:  # it closed between the start and now
+            return
         lv = st["live"] if st["live"] and overlaps(st["live"], o) else live.new(o["start"], device, db.conversations(o["start"][:10], o["start"]))
         rows, speech = [r for r in o["sentences"] if r.get("text")], o["speech_s"]
         try:
@@ -907,12 +953,22 @@ async def pipeline(device: str):
                                     (device, res["upto"], res["start"])).fetchone():
             db.put_timeline(r[0], res)  # it closed while the call ran
 
-    def running() -> bool:
-        return bool(st["live_task"]) and not st["live_task"].done()
+    async def analysis(asked: bool = False):
+        try:
+            await live_update(asked)
+        except Exception:  # a bug here must not end the pipeline beside it (its task group would)
+            log.exception("%s live analysis", device)
+        finally:
+            st["analyzing"] = False
+
+    def start_analysis(asked: bool = False):
+        """One at a time, in the pipeline's task group: it ends with the pipeline."""
+        st["analyzing"] = True
+        ptg.start_soon(analysis, asked, name=f"live:{device}")
 
     def maybe_live():
-        if not running() and live_due():
-            st["live_task"] = asyncio.create_task(live_update(), name=f"live:{device}")
+        if not st["analyzing"] and live_due():
+            start_analysis()
 
     def ask() -> str | None:
         """立即总结: the live analysis of the conversation going on, now: before its minute of speech, before LIVE_EVERY_S
@@ -920,22 +976,20 @@ async def pipeline(device: str):
         after a press). None when it started, else why not. Asked once, its agent writes the final summary however short
         it stays (summarize)."""
         o, lv = open_view(), st["live"]
-        if running():
+        if st["analyzing"]:
             return "正在分析"
         if not o or not present(o):
             return "没有进行中的对话"
         if o["speech_s"] <= (lv["speech_s"] if lv and overlaps(lv, o) else 0):
             return "没有新的语音"
-        st["live_task"] = asyncio.create_task(live_update(asked=True), name=f"live:{device}")
+        start_analysis(asked=True)
         return None
-
-    st["ask"] = ask
 
     async def final_piece() -> bool:
         """Cut and finalize the next piece when there is one; True when a piece was done (look for the next at once)."""
         nonlocal owner
-        if not grouper.open and state.get("owner") is not None and state["owner"] is not owner:
-            owner = state["owner"]  # 我 picked on the card (self_answer): from the next conversation on, never the open one
+        if not grouper.open and T().owner is not None and T().owner is not owner:
+            owner = T().owner  # 我 picked on the card (self_answer): from the next conversation on, never the open one
             dia.set_bank(owner)
             ddia.set_bank(owner)
         if not seg.anchors:
@@ -987,7 +1041,7 @@ async def pipeline(device: str):
         st["voiced"] += [{"start": iso(at(g["start_ms"] / 1000)), "dur": (g["end_ms"] - g["start_ms"]) / 1000,
                           "e": dia.E[m[0] - 1] if m else None, "key": (iso(base), g["engine_speaker"]) if g.get("engine_speaker") else None}
                          for g, m in zip(segs, marks)]
-        with open(DATA / f"{lo.date()}.passes.jsonl", "a") as f:  # every piece's raw engine output, for tracing lost rows
+        with open(T().data / f"{lo.date()}.passes.jsonl", "a") as f:  # every piece's raw engine output, for tracing lost rows
             f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"), "layer": "final", "t0": iso(base), "since": 0.0,
                                 "from": iso(lo), "to": iso(hi), "segs": segs}, ensure_ascii=False) + "\n")
         shown = dt.datetime.now()
@@ -1031,7 +1085,7 @@ async def pipeline(device: str):
 
     def drafting() -> bool:
         """A page watches and this device is recording now (its newest audio is recent, backlog or not)."""
-        return (time.time() < state["watch_until"] and bool(dseg.anchors) and st["edge_end"] is not None
+        return (time.time() < T().watch_until and bool(dseg.anchors) and st["edge_end"] is not None
                 and (dt.datetime.now() - st["edge_end"]).total_seconds() < LIVE_AUDIO_S)
 
     async def draft_pass(end: dt.datetime | None = None) -> bool:
@@ -1121,7 +1175,7 @@ async def pipeline(device: str):
         kept = [m for g, m in zip(segs, marks) if m and at(g["start_ms"] / 1000) < hi]  # sentences left open come back next pass
         ddia.rollback(kept[-1] if kept else m0)
         hi = max(hi, at(sent))  # rows that went out early near the window's end: never draft them twice
-        with open(DATA / f"{lo.date()}.passes.jsonl", "a") as f:
+        with open(T().data / f"{lo.date()}.passes.jsonl", "a") as f:
             f.write(json.dumps({"at": dt.datetime.now().isoformat(timespec="seconds"), "layer": "draft", "t0": iso(t0), "since": since,
                                 "early_to": sent, "from": iso(at(since)), "to": iso(hi), "segs": raw}, ensure_ascii=False) + "\n")
         engine = raw[0]["engine"] if raw else DRAFT_ENGINE
@@ -1135,12 +1189,10 @@ async def pipeline(device: str):
 
     async def draft_loop():
         while True:
-            try:  # a pause after speech drafts at once; the timer covers pause-less speech
-                await asyncio.wait_for(st["wake"].wait(), REFINE_EVERY_S)
-                by_vad = True
-            except asyncio.TimeoutError:
-                by_vad = False
-            st["wake"].clear()
+            with anyio.move_on_after(REFINE_EVERY_S):  # a pause after speech drafts at once; the timer covers pause-less speech
+                await st["wake"].wait()
+            by_vad = st["wake"].is_set()
+            st["wake"] = anyio.Event()  # an anyio.Event is not cleared: a new one for the next pause
             if not drafting():
                 st["drafting"] = False
                 continue
@@ -1160,16 +1212,22 @@ async def pipeline(device: str):
                 while await draft_pass():
                     pass
 
-    parts = [asyncio.create_task(coro, name=f"{name}:{device}")
-             for name, coro in (("feed", feed()), ("edge", edge_feed()), ("draft", draft_loop()), ("final", final_loop()))]
-    try:  # each runs for good: the first to end (an exception) ends the pipeline, and lasting() starts it again whole
-        t = (await asyncio.wait(parts, return_when=asyncio.FIRST_COMPLETED))[0].pop()
-        raise t.exception() or RuntimeError(f"{t.get_name()} returned")
-    finally:  # nothing left behind: two readers on one device would both move its queue (audio.read_to)
-        for p in parts + ([st["live_task"]] if st["live_task"] else []):
-            p.cancel()
-        state["dias"].remove(dia)
-        state["dias"].remove(ddia)
+    async def forever(part):
+        await part()
+        raise RuntimeError(f"{part.__name__} returned")
+
+    # each part runs for good: the first to end (an exception) ends the pipeline, its task group taking the others and
+    # the live analysis with it (nothing left behind: two readers on one device would both move its queue), and
+    # lasting() starts it again whole
+    try:
+        async with anyio.create_task_group() as ptg:
+            st["ask"] = ask
+            for name, part in (("feed", feed), ("edge", edge_feed), ("draft", draft_loop), ("final", final_loop)):
+                ptg.start_soon(forever, part, name=f"{name}:{device}")
+    finally:
+        st.pop("ask", None)  # 立即总结 has no pipeline to run in until lasting() starts it again
+        T().dias.remove(dia)
+        T().dias.remove(ddia)
 
 
 def device_status(device: str, st: dict) -> dict:
@@ -1194,7 +1252,7 @@ def device_status(device: str, st: dict) -> dict:
             "rate": round(rate, 1) if rate else None, "eta_s": round(left / rate) if rate and rate > 0.1 and left > 30 else None,
             "last_speech": st["last_speech"].isoformat(timespec="seconds") if st["last_speech"] else None,
             "refine": st["refine"], "conversation": st["conversation"], "drafting": st["drafting"], "draft": st["draft"],
-            "analyzing": bool(st["live_task"]) and not st["live_task"].done(),  # the live analysis is running
+            "analyzing": st["analyzing"],  # the live analysis is running
             "draft_to": st["draft_to"].isoformat(timespec="seconds") if st["draft_to"] else None,
             "latency_s": sorted(lat)[len(lat) // 2] if lat else None,
             "arrival": arrived, "sound": sound(device, received_to)}
@@ -1211,43 +1269,53 @@ def sound(device: str, end: dt.datetime | None) -> dict | None:
 def status() -> dict:
     """What the page's status line shows (the device whose audio came in last), every device's pipeline, and the
     pieces still queued over all devices."""
-    ds = [{**device_status(d, st), "hw": db.device_status(d)} for d, st in state["devices"].items()]
+    ds = [{**device_status(d, st), "hw": db.device_status(d)} for d, st in T().devices.items()]
     top = max(ds, key=lambda d: d["audio_end"] or "", default={"device": None, "audio_end": None, "behind_s": None, "done_to": None,
                                                                  "last_speech": None, "refine": None, "conversation": None, "latency_s": None})
     summaries = db.conn().execute("SELECT count(*) FROM summaries WHERE status = 'pending'").fetchone()[0]
-    return {**top, "queued": sum(d["queued"] for d in ds), "devices": ds, "summaries_pending": summaries, "summary_queue": summary_q.qsize(),
+    return {**top, "queued": sum(d["queued"] for d in ds), "devices": ds, "summaries_pending": summaries, "summary_queue": T().summaries[1].statistics().current_buffer_used,
             "recording": any(d["recording"] for d in ds), "last_audio": max((d["received_to"] for d in ds if d["received_to"]), default=None),
             "balance": db.balance("stepfun"),
-            "commit": state["commit"], "chunks": state["chunks"],
+            "commit": state["commit"], "chunks": T().chunks,
             "engine": f"{ENGINE} · 初稿 {DRAFT_ENGINE}" + (f" · 兜底 {ENGINE_FALLBACK}" if ENGINE_FALLBACK else "")}
 
 
 async def status_loop():
     while True:
-        await broadcast({"type": "status", **status()})
+        if T().clients:  # a tenant with no page open has nobody to tell
+            await broadcast({"type": "status", **status()})
         await anyio.sleep(2)
 
 
-def authorized(cookies, headers) -> bool:
-    ok = lambda v: bool(v) and hmac.compare_digest(v, AUTH_TOKEN)
-    return ok(cookies.get("token")) or ok(headers.get("authorization", "")[7:])
+class Tenants:
+    """Every request and WebSocket runs as the tenant its token is (tenant.current), Bearer or the cookie; none: 401
+    (a WebSocket closed with 4401). Open any page once with ?token=<its token>: a year-long cookie replaces the browser's
+    basic-auth prompt that Android Chrome forgets on every reload. A process of one tenant without a token: no auth
+    (loopback only)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):  # lifespan
+            return await self.app(scope, receive, send)
+        c = HTTPConnection(scope)
+        q = c.query_params.get("token")
+        if scope["type"] == "http" and q and (t := tenant.by_token(TENANTS, q)) and t.token:
+            u = c.url.remove_query_params("token")
+            resp = RedirectResponse(u.path + (f"?{u.query}" if u.query else ""), status_code=303)  # relative: the proxy owns the scheme
+            resp.set_cookie("token", t.token, max_age=365 * 86400, httponly=True, samesite="lax")
+            return await resp(scope, receive, send)
+        t = tenant.by_token(TENANTS, c.headers.get("authorization", "")[7:]) or tenant.by_token(TENANTS, c.cookies.get("token"))
+        if t is None:
+            if scope["type"] == "websocket":
+                return await send({"type": "websocket.close", "code": 4401})
+            return await Response("token required: open /?token=<your token> once", 401)(scope, receive, send)
+        tenant.enter(t)  # this request's task and what it starts
+        await self.app(scope, receive, send)
 
 
-@app.middleware("http")
-async def auth(request: Request, call_next):
-    """Open any page once with ?token=<AUTH_TOKEN>: a year-long cookie replaces the browser's basic-auth prompt
-    that Android Chrome forgets on every reload."""
-    if not AUTH_TOKEN:
-        return await call_next(request)
-    t = request.query_params.get("token")
-    if t and hmac.compare_digest(t, AUTH_TOKEN):
-        u = request.url.remove_query_params("token")
-        resp = RedirectResponse(u.path + (f"?{u.query}" if u.query else ""), status_code=303)  # relative: the proxy owns the scheme
-        resp.set_cookie("token", AUTH_TOKEN, max_age=365 * 86400, httponly=True, samesite="lax")
-        return resp
-    if authorized(request.cookies, request.headers):
-        return await call_next(request)
-    return Response("token required: open /?token=<AUTH_TOKEN> once", 401)
+app.add_middleware(Tenants)
 
 
 NO_CACHE = {"Cache-Control": "no-cache"}  # pages change with deploys; revalidate by etag instead of heuristic caching
@@ -1282,7 +1350,7 @@ async def asset(name: str):
 @app.get("/app.apk")
 async def app_apk():
     """The Android client, for installing from the phone's browser."""
-    p = DATA / "live-record.apk"
+    p = TENANTS[0].data / "live-record.apk"  # every tenant's: the first one's
     if not p.exists():
         raise HTTPException(404, "no apk uploaded")
     return FileResponse(p, media_type="application/vnd.android.package-archive", filename="live-record.apk")
@@ -1291,7 +1359,7 @@ async def app_apk():
 @app.get("/api/app/latest")
 async def apk_latest():
     """What /app.apk is: the Android app compares versionCode with its own build number and offers the update."""
-    p = DATA / "live-record.apk"
+    p = TENANTS[0].data / "live-record.apk"  # every tenant's: the first one's
     if not p.exists():
         raise HTTPException(404, "no apk uploaded")
     return {**await anyio.to_thread.run_sync(apk.version, p, limiter=threads.DB), "size": p.stat().st_size}
@@ -1313,8 +1381,8 @@ async def chunk(request: Request, device: str, start: int, n: int | None = None,
         log.warning("%s: piece at %s (%s, %d bytes) could not be decoded", device, dt.datetime.fromtimestamp(start / 1000), kind, len(body))
         note(f"{device} 的一块音频（起于 {dt.datetime.fromtimestamp(start / 1000).strftime('%H:%M:%S')}）无法解码，客户端收到 400 会丢弃它；原始字节留在 recordings/rejected/", "error")
         raise HTTPException(400, "could not decode")
-    state["chunks"] = {"device": device, "at": time.time()}
-    late = "（早于这台设备已处理的位置，只存不转写）" if start <= audio.read_to.get(device, -1) else ""
+    T().chunks = {"device": device, "at": time.time()}
+    late = "（早于这台设备已处理的位置，只存不转写）" if start <= T().read_to.get(device, -1) else ""
     note(f"收到 {device} 的块 {seconds:.1f} s，起于 {dt.datetime.fromtimestamp(start / 1000).strftime('%H:%M:%S')}{late}", "warn" if late else "info")
     return {"seconds": round(seconds, 2)}
 
@@ -1393,26 +1461,26 @@ async def client_config():
 
 @app.get("/api/app-setup")
 async def app_setup():
-    """For the web page's QR: the token to hand the app, so it doesn't need typing in by hand. Empty in no-auth
-    mode (AUTH_TOKEN unset), same as everywhere else."""
-    return {"token": AUTH_TOKEN}
+    """For the web page's QR: the token to hand the app (its tenant's, the one the page sent), so it doesn't need
+    typing in by hand. Empty in no-auth mode, same as everywhere else."""
+    return {"token": T().token}
 
 
 @app.get("/api/events")
 async def events():
-    return state["events"]
+    return T().events
 
 
 @app.get("/api/live")
 async def live_now():
     """Each device's live analysis of its open conversation."""
-    return [live.public(st["live"]) for st in state["devices"].values() if st.get("live")]
+    return [live.public(st["live"]) for st in T().devices.values() if st.get("live")]
 
 
 @app.post("/api/live/{device}")
 async def live_ask(device: str):
     """立即总结 (the live page's button): the device's live analysis now; 409 with why not."""
-    ask = state["devices"].get(device, {}).get("ask")  # none yet: its pipeline is starting (lasting() restarts a failed one)
+    ask = T().devices.get(device, {}).get("ask")  # none yet: its pipeline is starting (lasting() restarts a failed one)
     if not ask:
         raise HTTPException(404, "没有这台设备的处理流程")
     if why := ask():
@@ -1437,7 +1505,7 @@ async def sentences(date: str | None = None):
 async def conversations(date: str | None = None):
     day = dt.date.fromisoformat(date) if date else dt.date.today()
     closed = db.conversations(day.isoformat(), (day + dt.timedelta(days=1)).isoformat())
-    return closed + [{**st["conversation"], "state": "open"} for st in state["devices"].values()
+    return closed + [{**st["conversation"], "state": "open"} for st in T().devices.values()
                      if st["conversation"] and st["conversation"]["start"][:10] == day.isoformat()]
 
 
@@ -1616,7 +1684,7 @@ async def apply_rename(conv_id: str, frm: str, to: str) -> dict:
         if h := db.name_hints(conv_id).get(conv_id):  # the names it was called go with it
             h["names"] = [{**x, **{k: to for k in ("who", "by") if x.get(k) == frm}} for x in h["names"]]
             db.put_name_hints(h, t)
-    _speakers["at"] = 0.0
+    T().speakers["at"] = 0.0
     queue_summary(c, keep=True)
     learnt = 0
     if to != "我" and not re.fullmatch(r"S\d+", to) and state.get("embed"):  # S<n> means "not known": nothing to learn
@@ -1634,7 +1702,7 @@ async def apply_rename(conv_id: str, frm: str, to: str) -> dict:
             n = n0 + len(es)
             mean = (e0 * n0 + np.sum(es, 0)) / n
             db.conn().execute("INSERT OR REPLACE INTO people VALUES (?, ?, ?)", (to, n, db.blob(mean)))
-            for dia in state["dias"]:
+            for dia in T().dias:
                 dia.people[to] = mean / np.linalg.norm(mean)
             learnt = len(es)
     note(f"对话 {c['start'][11:19]}：{frm} 改名为 {to}" + (f"，记住了 {learnt} 句的声纹" if learnt else ""), "state")
@@ -1645,13 +1713,11 @@ ENROLL = 20
 
 # speakers page: one voiceprint per conversation x label (history ones computed from the old recorder's audio and
 # uploaded with a clip each; live ones computed here), grouped across conversations by speakers.py
-VOICES = DATA / "voices"  # clips/: the history voices' samples
 SPEAKER_LINK = float(os.environ.get("SPEAKER_LINK", "0.5"))  # cosine (device-centred) to join an anonymous group
 SPEAKER_SUGGEST = float(os.environ.get("SPEAKER_SUGGEST", "0.6"))  # cosine to offer an anonymous group to a name
 # cosine (device-centred) to offer merging two labels of one conversation: in the history's named voices 0.4 % of
 # two people's pairs reach 0.45, and 36 % of one person's (10-05)
 MERGE_SUGGEST = float(os.environ.get("MERGE_SUGGEST", "0.45"))
-_speakers = {"at": 0.0, "groups": None, "vec": {}}
 
 
 def conv_start(conv_id: str) -> str:
@@ -1661,6 +1727,7 @@ def conv_start(conv_id: str) -> str:
 
 def speaker_groups() -> list[dict]:
     """Takes seconds (every conversation and voice): kept 10 min, redone after a rename or new voices."""
+    _speakers = T().speakers
     if _speakers["groups"] is not None and time.time() - _speakers["at"] < 600:
         return _speakers["groups"]
     convs = {c["id"]: c for c in all_conversations()}
@@ -1763,7 +1830,7 @@ async def speaker_detach(body: dict):
         await apply_rename(conv, label, new)
         key = f"{conv}|{new}"
     db.conn().execute("INSERT OR IGNORE INTO apart VALUES (?, ?)", (key, group))
-    _speakers["at"] = 0.0
+    T().speakers["at"] = 0.0
     return {"key": key}
 
 
@@ -1827,7 +1894,7 @@ async def conversation_speakers(conv_id: str):
     if not c:
         raise HTTPException(404, "no such conversation")
     groups = await anyio.to_thread.run_sync(speaker_groups, limiter=threads.DB)
-    return label_suggestions(c, groups, _speakers["vec"], db.name_hints(conv_id).get(conv_id), db.aliases())
+    return label_suggestions(c, groups, T().speakers["vec"], db.name_hints(conv_id).get(conv_id), db.aliases())
 
 
 @app.get("/api/aliases")
@@ -1846,7 +1913,7 @@ async def alias_set(body: dict):
         db.conn().execute("INSERT OR REPLACE INTO aliases VALUES (?, ?)", (alias, name))
     else:
         db.conn().execute("DELETE FROM aliases WHERE alias = ?", (alias,))
-    _speakers["at"] = 0.0
+    T().speakers["at"] = 0.0
     return db.aliases()
 
 
@@ -1926,7 +1993,7 @@ async def person_profile(name: str):
 
 @app.get("/api/voice-clip/{name}")
 async def voice_clip(name: str):
-    p = VOICES / "clips" / name
+    p = T().data / "voices" / "clips" / name  # the history voices' samples
     if not re.fullmatch(r"[\w.-]+\.ogg", name) or not p.is_file():
         raise HTTPException(404, "no such clip")
     return FileResponse(p, media_type="audio/ogg", headers={"Cache-Control": "public, max-age=31536000, immutable"})
@@ -1976,7 +2043,7 @@ async def voices_loop():
                                 "clip_text": best.get("text")})
             with db.tx() as t:
                 db.insert_voices(t, out or [{"conv": c["id"]}])
-            _speakers["at"] = 0.0
+            T().speakers["at"] = 0.0
         try:
             await self_round()
         except Exception:
@@ -1989,7 +2056,7 @@ CLIP_CONVS = 6  # a candidate's clips come from its biggest conversations: a sen
 
 
 def owner_npz() -> Path:
-    return DATA / "owner-redimnet2.npz"
+    return T().data / "owner-redimnet2.npz"
 
 
 async def self_round():
@@ -2062,10 +2129,10 @@ async def self_answer(body: dict):
         st["wait"] = {"until": (now + dt.timedelta(seconds=selfvoice.LATER_S)).isoformat(timespec="seconds")}
     elif isinstance(a, int) and not isinstance(a, bool) and 0 <= a < len(card["candidates"]):
         bank = selfvoice.unit(card["candidates"][a]["bank"]).astype(np.float32)
-        tmp = DATA / "owner-redimnet2.tmp.npz"
+        tmp = T().data / "owner-redimnet2.tmp.npz"
         np.savez(tmp, self=bank)
         os.replace(tmp, owner_npz())  # whole or not at all: a restart loads it like a hand-made one
-        state["owner"] = {"self": bank}
+        T().owner = {"self": bank}
         st["confirmed"] = {"at": now.isoformat(timespec="seconds"), "pick": a}
     else:
         raise HTTPException(400, "bad answer")
@@ -2109,11 +2176,9 @@ async def cut(start: str, end: str, fmt: str, device: str | None = None) -> byte
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    if AUTH_TOKEN and not authorized(ws.cookies, ws.headers):
-        await ws.close(code=4401)
-        return
+    """Its tenant's pushes (Tenants let it in by its token)."""
     await ws.accept()
-    clients.add(ws)
+    T().clients.add(ws)
     try:
         while True:
             try:
@@ -2121,16 +2186,25 @@ async def ws_endpoint(ws: WebSocket):
             except ValueError:
                 continue
             if isinstance(m, dict) and m.get("type") == "watch":  # a page in front: every 20 s; wake: it just came to the front
-                state["watch_until"] = time.time() + 60
+                T().watch_until = time.time() + 60
                 if m.get("wake"):
-                    state["wake_at"] = time.time()
+                    T().wake_at = time.time()
     except WebSocketDisconnect:
-        clients.discard(ws)
+        T().clients.discard(ws)
+
+
+class TenantTag(logging.Filter):
+    """%(tenant)s: "[<id>] " of the tenant a line is about when the process has several, else nothing (one tenant's
+    log reads as before)."""
+
+    def filter(self, record):
+        t = tenant.current.get(None)
+        record.tenant = f"[{t.id}] " if t and len(TENANTS) > 1 else ""
+        return True
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", type=Path, default=Path(env("RECORDINGS_DIR")))
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8770")))
     args = ap.parse_args()
     missing = [k for k in ("ASR_UPLOAD_BRIDGE_TOKEN", "ASR_SERVICE_BASIC_AUTH") if not os.environ.get(k)]
@@ -2145,24 +2219,22 @@ def main():
     if missing:
         raise SystemExit(f"not set: {', '.join(missing)} (see .env.example)")
     infer.check()  # every model file there and the pinned one, before anything starts (#219)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    args.dir.mkdir(parents=True, exist_ok=True)
-    audio.DIR = args.dir
-    db.open_db(DATA / "live.db")
+    h = logging.StreamHandler()
+    h.addFilter(TenantTag())
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(tenant)s%(message)s", handlers=[h])
+    TENANTS[:] = tenant.load()
+    for t in TENANTS:
+        tenant.call(t, db.init)
+    firmware.DIR = TENANTS[0].data / "firmware"  # every tenant's: the first one's
     commit = HERE / "COMMIT"  # written by deploy.sh: the server has no git checkout
     state["commit"] = commit.read_text().strip() if commit.exists() else \
         subprocess.run(["git", "-C", str(HERE), "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
-
-    @app.on_event("startup")
-    async def start():
-        for name, coro in (("pipeline", pipelines()), ("status", status_loop()), ("summary", summary_worker()),
-                           ("voices", voices_loop()), ("metrics", metrics_loop()), *((("recap", recap_loop()),) if RECAP_AT else ()),
-                           *((("balance", balance_loop()),) if os.environ.get("STEPFUN_API_KEY") else ())):
-            asyncio.create_task(coro, name=name).add_done_callback(
-                lambda t, n=name: log.error("task %s ended: %r", n, t.exception()) if not t.cancelled() else None)
+    log.info("tenants: %s", ", ".join(t.id for t in TENANTS))
 
     import uvicorn
-    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=args.port, log_level="warning")
+    # a page's WebSocket would hold a stop for good: 5 s, then the lifespan cancels every task (pipelines resume from
+    # their finalized time on the next start)
+    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=args.port, log_level="warning", timeout_graceful_shutdown=5)
 
 
 if __name__ == "__main__":

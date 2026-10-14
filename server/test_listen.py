@@ -42,9 +42,9 @@ def seconds(body: bytes) -> float:
         return w.getnframes() / w.getframerate()
 
 
-def test_listen():
-    audio.DIR = Path(tempfile.mkdtemp())
-    db.open_db(audio.DIR / "t.db")
+def test_listen(monkeypatch):
+    t = db.open_db(Path(tempfile.mkdtemp()) / "t.db")
+    monkeypatch.setattr(server, "TENANTS", [t])  # no token: no auth
     assert get("device=phone")[0] == 204, "no audio yet"
     for i in range(3):  # 10:00:00, 01, 02: one second each, as the apps send them in front
         audio.save("phone", T + i * 1000, tone(1), "audio/ogg")
@@ -65,11 +65,8 @@ def test_listen():
     status, h, body = get(f"device=phone&after={T + 4000}")
     assert h["x-start"] == str(T + 60_000) and 19.9 < seconds(body) <= 20, "the AAC piece decoded; a page far behind skips ahead"
 
-    server.AUTH_TOKEN = "s3cret"
-    try:
-        assert get("device=phone")[0] == 401, "no token: refused like every other API"
-        assert get("device=phone", {"Authorization": "Bearer wrong"})[0] == 401
-        assert get("device=phone", {"Cookie": "token=s3cret"})[0] == 200
-        assert get("device=phone", {"Authorization": "Bearer s3cret"})[0] == 200
-    finally:
-        server.AUTH_TOKEN = ""
+    t.token = "s3cret"
+    assert get("device=phone")[0] == 401, "no token: refused like every other API"
+    assert get("device=phone", {"Authorization": "Bearer wrong"})[0] == 401
+    assert get("device=phone", {"Cookie": "token=s3cret"})[0] == 200
+    assert get("device=phone", {"Authorization": "Bearer s3cret"})[0] == 200

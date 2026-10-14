@@ -25,11 +25,12 @@ import numpy as np
 
 import db
 import threads
+from tenant import T
 
 log = logging.getLogger("live")
 SR = 16000
-DIR: Path | None = None  # the recordings dir
-read_to: dict[str, int] = {}  # per device: start of the last piece its reader has finished with; later ones are queued
+# the current tenant's recordings dir: T().recordings; per device, the start of the last piece its reader has finished
+# with (later ones are queued): T().read_to
 HOLD_MAX_S = 12 * 3600  # a hold not said again for this long is let go: a phone that never comes back must not stop finals for good
 _append = threading.Lock()  # uploads are saved in threads (threads.MEDIA): one append (and its index row) at a time
 
@@ -153,14 +154,14 @@ def health(x: np.ndarray) -> tuple[float, float, int, int]:
 
 
 def hour_file(device: str, start_ms: int, ext: str) -> Path:
-    """Where a piece starting at start_ms goes, relative to DIR: its device's file for that (local) hour."""
+    """Where a piece starting at start_ms goes, relative to the recordings dir: its device's file for that (local) hour."""
     t = dt.datetime.fromtimestamp(start_ms / 1000)
     return Path("chunks") / re.sub(r"[^\w.-]", "_", device) / f"{t:%Y-%m-%d}" / f"{t:%H}.{ext}"
 
 
 def append(path: Path, body: bytes) -> int:
-    """Appends body to DIR / path and returns where it starts; on disk (fsync) when this returns. Hold _append."""
-    f = DIR / path
+    """Appends body to the recordings dir / path and returns where it starts; on disk (fsync) when this returns. Hold _append."""
+    f = T().recordings / path
     new = not f.exists()
     f.parent.mkdir(parents=True, exist_ok=True)
     with open(f, "ab") as h:
@@ -188,7 +189,7 @@ def save(device: str, start_ms: int, body: bytes, content_type: str, n: int | No
     ext = {"audio/ogg": "ogg", "audio/webm": "webm", "audio/aac": "aac"}.get(content_type.split(";")[0], "bin")
     x = decode(body, aac=ext == "aac", n=n, prev=before(device, start_ms) if ext == "ogg" else None)
     if x is None:  # the client drops it on the 400 that follows: its bytes stay here, for a look later (#155)
-        f = DIR / "rejected" / re.sub(r"[^\w.-]", "_", device) / f"{start_ms}.{ext}"
+        f = T().recordings / "rejected" / re.sub(r"[^\w.-]", "_", device) / f"{start_ms}.{ext}"
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_bytes(body)
         return None
@@ -206,7 +207,7 @@ def save(device: str, start_ms: int, body: bytes, content_type: str, n: int | No
 
 def read(p) -> bytes:
     """A pieces row's bytes, as uploaded."""
-    with open(DIR / p["path"], "rb") as f:
+    with open(T().recordings / p["path"], "rb") as f:
         f.seek(p["pos"])
         return f.read(p["size"])
 
@@ -219,7 +220,7 @@ def samples(p) -> np.ndarray | None:
 
 def queued(device: str) -> int:
     """Pieces of a device its stream has not handed out yet."""
-    return db.conn().execute("SELECT count(*) FROM pieces WHERE device = ? AND start_ms > ?", (device, read_to.get(device, -1))).fetchone()[0]
+    return db.conn().execute("SELECT count(*) FROM pieces WHERE device = ? AND start_ms > ?", (device, T().read_to.get(device, -1))).fetchone()[0]
 
 
 def backlog(device: str, after: dt.datetime | None) -> tuple[float, dt.datetime | None]:
@@ -298,7 +299,7 @@ async def stream(device: str, after: dt.datetime | None, edge_s: float | None = 
     at, lo = min(p["start_ms"] - 1, ms) if p else ms, 0
     while True:
         if edge_s is None:
-            read_to[device] = at  # the reader came back for more, so the piece it had is done
+            T().read_to[device] = at  # the reader came back for more, so the piece it had is done
         else:
             last = db.conn().execute("SELECT start_ms + seconds * 1000 FROM pieces WHERE device = ? ORDER BY start_ms DESC LIMIT 1", (device,)).fetchone()
             lo = max(last[0] if last else 0, time.time() * 1000) - edge_s * 1000
@@ -366,13 +367,13 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     db.open_db(DIR / "t.db")
     tone = lambda s: subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"sine=f=440:d={s}", "-c:a", "libopus", "-f", "ogg", "pipe:1"],
                                     capture_output=True, check=True).stdout
-    T = lambda m: int(dt.datetime(2026, 10, 2, 10, m).timestamp() * 1000)
+    M = lambda m: int(dt.datetime(2026, 10, 2, 10, m).timestamp() * 1000)
     for m in (0, 1, 5):  # 10:00, 10:01, a gap, 10:05
-        assert save("phone", T(m), tone(60), "audio/ogg") > 59
-    assert save("phone", T(9), b"not audio", "audio/ogg") is None
-    assert (DIR / f"rejected/phone/{T(9)}.ogg").read_bytes() == b"not audio", "an undecodable piece's bytes are kept"
-    assert 0 < save("phone", T(8), tone(0.02), "audio/ogg") < 0.1, "a 20 ms piece is audio too"
-    db.conn().execute("DELETE FROM pieces WHERE start_ms = ?", (T(8),))
+        assert save("phone", M(m), tone(60), "audio/ogg") > 59
+    assert save("phone", M(9), b"not audio", "audio/ogg") is None
+    assert (DIR / f"rejected/phone/{M(9)}.ogg").read_bytes() == b"not audio", "an undecodable piece's bytes are kept"
+    assert 0 < save("phone", M(8), tone(0.02), "audio/ogg") < 0.1, "a 20 ms piece is audio too"
+    db.conn().execute("DELETE FROM pieces WHERE start_ms = ?", (M(8),))
     files = [p.relative_to(DIR).as_posix() for p in (DIR / "chunks").rglob("*.ogg")]
     assert files == ["chunks/phone/2026-10-02/10.ogg"], files
     # how pieces sound (no content): ffmpeg's sine is at 1/8 of full scale (-21 dBFS RMS); 50 Hz is hum, 440 Hz is not
@@ -384,14 +385,14 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     broken[1000:1800], broken[5000:5100], broken[9000:9010], broken[9500] = 0, 0, 32767, -32768
     assert health(broken)[2:] == (50, 11), "50 ms of zero runs >= 10 ms (the 6 ms one does not count), 11 full-scale samples"
     assert health(np.zeros(1, np.int16)) == (-120.3, -120.3, 0, 0)
-    p = db.conn().execute("SELECT * FROM pieces WHERE start_ms = ?", (T(0),)).fetchone()
+    p = db.conn().execute("SELECT * FROM pieces WHERE start_ms = ?", (M(0),)).fetchone()
     assert abs(p["rms"] + 21.1) < 0.3 and p["hum"] < -60 and p["zero_ms"] == p["full"] == 0, dict(p)
     assert 0 <= time.time() * 1000 - p["received_ms"] < 60_000, "when it came"
-    m = minutes("phone", T(0), T(2))
+    m = minutes("phone", M(0), M(2))
     assert [r["t"][11:16] for r in m] == ["10:00", "10:01"] and m[0]["s"] > 59 and abs(m[0]["rms"] + 21.1) < 0.3, m
     assert m[0]["lag_s"] > 3600, "arrived long after (this test runs after 2026-10-02 10:01)"
-    db.conn().execute("UPDATE pieces SET rms = -40, hum = -40, zero_ms = 1500, full = 3, received_ms = start_ms + 61000 WHERE start_ms = ?", (T(1),))
-    assert minutes("phone", T(1), T(2))[0] | {"t": 0, "s": 0} == {"t": 0, "s": 0, "rms": -40.0, "hum": -40.0, "zero_s": 1.5, "full": 3, "lag_s": 1.0}
+    db.conn().execute("UPDATE pieces SET rms = -40, hum = -40, zero_ms = 1500, full = 3, received_ms = start_ms + 61000 WHERE start_ms = ?", (M(1),))
+    assert minutes("phone", M(1), M(2))[0] | {"t": 0, "s": 0} == {"t": 0, "s": 0, "rms": -40.0, "hum": -40.0, "zero_s": 1.5, "full": 3, "lag_s": 1.0}
     assert arrival("phone")["lag_s"] > 3600 and arrival("nobody") is None
     x = np.arange(16000, dtype=np.int16)
     assert len(unpad(x)) == 16000 - AAC_DELAY - AAC_FRAME // 2 and unpad(x)[0] == AAC_DELAY, "AAC: the encoder's delay and half a frame go"
@@ -401,8 +402,8 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     aac = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=f=440:r=16000", "-af", "atrim=end_sample=16333,adelay=1088S",
                           "-c:a", "aac", "-b:a", "24k", "-f", "adts", "pipe:1"], capture_output=True, check=True).stdout
     assert len(decode(aac)) == 19 * AAC_FRAME, len(decode(aac))  # 2112 + 16333, padded to whole frames
-    assert save("iphone", T(20), aac, "audio/aac", n=16333) == 16333 / SR
-    assert len(samples(db.conn().execute("SELECT * FROM pieces WHERE start_ms = ?", (T(20),)).fetchone())) == 16333
+    assert save("iphone", M(20), aac, "audio/aac", n=16333) == 16333 / SR
+    assert len(samples(db.conn().execute("SELECT * FROM pieces WHERE start_ms = ?", (M(20),)).fetchone())) == 16333
     assert len(decode(aac, aac=True)) == len(decode(aac)) - AAC_DELAY - AAC_FRAME // 2, "no n: unpadded as before"
 
     async def take(after, n, device="phone"):
@@ -416,7 +417,7 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
     assert anyio.run(take, None, 3) == [0, 1, 5]
     assert anyio.run(take, dt.datetime(2026, 10, 2, 10, 1, 30), 2) == [1, 5], "resumes from the piece holding `after`"
     assert queued("phone") == 1, "the last piece handed out counts until the reader comes back"
-    assert save("iphone", T(2), tone(30), "audio/aac") > 29  # another device, inside phone's gap
+    assert save("iphone", M(2), tone(30), "audio/aac") > 29  # another device, inside phone's gap
     assert anyio.run(take, None, 1, "iphone") == [2], "each device streams on its own"
     assert set(pending({"phone": dt.datetime(2026, 10, 2, 10, 6)})) == {"iphone"}, "phone done, iphone has none finalized"
     assert cut(dt.datetime(2026, 10, 2, 10, 2, 5), dt.datetime(2026, 10, 2, 10, 2, 6), "s16le", "phone") is None
@@ -440,13 +441,13 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
 
     async def held_back():  # 10:05 came first, the phone still has older audio: 10:03 is to go before it
         send, got = anyio.create_memory_object_stream()
-        hold("phone", T(5))
+        hold("phone", M(5))
         with send, got:
             async with anyio.create_task_group() as tg:
                 tg.start_soon(pieces, None, send)
                 out = [await next_in(got, 5) for _ in range(2)]
                 assert out == [0, 1] and await next_in(got, 2.5) is None, "10:05 waits"
-                assert save("phone", T(3), tone(60), "audio/ogg") > 59
+                assert save("phone", M(3), tone(60), "audio/ogg") > 59
                 out.append(await next_in(got, 5))
                 assert out == [0, 1, 3] and await next_in(got, 2.5) is None, "still held"
                 hold("phone", None)
@@ -454,8 +455,8 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
                 assert out == [0, 1, 3, 5], out
                 tg.cancel_scope.cancel()
     anyio.run(held_back)
-    hold("phone", T(5))
-    assert held("phone") == T(5) and anyio.run(take, dt.datetime(2026, 10, 2, 10, 4), 1, "iphone") == [20], "a hold is the device's own"
+    hold("phone", M(5))
+    assert held("phone") == M(5) and anyio.run(take, dt.datetime(2026, 10, 2, 10, 4), 1, "iphone") == [20], "a hold is the device's own"
 
     async def started_held():  # the reader starts while all there is after `after` is held: older audio still goes first
         send, got = anyio.create_memory_object_stream()
@@ -463,12 +464,12 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
             async with anyio.create_task_group() as tg:
                 tg.start_soon(pieces, dt.datetime(2026, 10, 2, 10, 4), send)
                 assert await next_in(got, 1.5) is None, "10:05 is held"
-                assert save("phone", T(4) + 30_000, tone(20), "audio/ogg") > 19  # 10:04:30, after `after`, before 10:05
+                assert save("phone", M(4) + 30_000, tone(20), "audio/ogg") > 19  # 10:04:30, after `after`, before 10:05
                 t = await got.receive()
                 tg.cancel_scope.cancel()
         return t
     assert anyio.run(started_held) == dt.datetime(2026, 10, 2, 10, 4, 30), "not passed over for the held piece"
-    db.put_kv("hold:phone", {"at": T(5), "seen": time.time() - HOLD_MAX_S - 1})
+    db.put_kv("hold:phone", {"at": M(5), "seen": time.time() - HOLD_MAX_S - 1})
     assert held("phone") is None, "a hold not said again for HOLD_MAX_S is let go"
     assert anyio.run(take, dt.datetime(2026, 10, 2, 10, 4), 2) == [4, 5]
     print("ok")
