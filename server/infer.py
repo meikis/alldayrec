@@ -37,6 +37,9 @@ def check(d: Path = DIR):
 def session(name: str, threads: int) -> ort.InferenceSession:
     o = ort.SessionOptions()
     o.intra_op_num_threads, o.inter_op_num_threads = threads, 1
+    # No arena: it grows to the biggest calls (voiceprints of 15 s, 2 at once) and never gives back, 2.65 GB after 600 of
+    # them; without it 0.6 GB idle, ~10 % slower (deploy host, the main instance's lengths). kSameAsRequested kept 3.5 GB.
+    o.enable_cpu_mem_arena = False
     return ort.InferenceSession(str(DIR / name), o, providers=["CPUExecutionProvider"])
 
 
