@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS summaries (        -- body: the summary as the API re
     conversation TEXT PRIMARY KEY, status TEXT NOT NULL, prompt_version INTEGER, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS voices (           -- one label of one conversation; label and e NULL: no recording, not retried
     conv TEXT NOT NULL, label TEXT, device TEXT, n INTEGER, speech_s REAL, k INTEGER, e BLOB,
-    clip TEXT, clip_start TEXT, clip_end TEXT, clip_text TEXT, UNIQUE (conv, label));
+    clip TEXT, clip_start TEXT, clip_end TEXT, clip_text TEXT, level REAL,  -- level: dBFS of its sentences (selfvoice.level)
+    UNIQUE (conv, label));
 CREATE TABLE IF NOT EXISTS apart (voice TEXT NOT NULL, grp TEXT NOT NULL, PRIMARY KEY (voice, grp));
 CREATE TABLE IF NOT EXISTS people (name TEXT PRIMARY KEY, n INTEGER NOT NULL, e BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS aliases (alias TEXT PRIMARY KEY, name TEXT NOT NULL);  -- another way a person is called (A哥 = A)
@@ -83,6 +84,8 @@ def open_db(path: Path):
     if "received_ms" not in {r[1] for r in conn().execute("PRAGMA table_info(pieces)")}:  # 10-07: when each came, how it sounds (#155)
         for col in ("received_ms INTEGER", "rms REAL", "hum REAL", "zero_ms INTEGER", "full INTEGER"):
             conn().execute(f"ALTER TABLE pieces ADD COLUMN {col}")
+    if "level" not in {r[1] for r in conn().execute("PRAGMA table_info(voices)")}:  # 10-14: how loud each voice is (#206)
+        conn().execute("ALTER TABLE voices ADD COLUMN level REAL")
 
 
 def conn() -> sqlite3.Connection:
@@ -275,7 +278,7 @@ def due_todos(day: str) -> list[dict]:
 
 # voices, apart pins, people bank, aliases, name hints
 
-V_COLS = ("conv", "label", "device", "n", "speech_s", "k", "e", "clip", "clip_start", "clip_end", "clip_text")
+V_COLS = ("conv", "label", "device", "n", "speech_s", "k", "e", "clip", "clip_start", "clip_end", "clip_text", "level")
 
 
 def voices() -> list[dict]:

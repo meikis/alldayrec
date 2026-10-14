@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from "vu
 import { useRoute, useRouter } from "vue-router";
 import AppHeader from "../components/AppHeader.vue";
 import DayPicker from "../components/DayPicker.vue";
+import SelfVoice from "../components/SelfVoice.vue";
 import TodoMarks from "../components/TodoMarks.vue";
 import { get, hhmm, minutes, MOSTLY_MEDIA, post, type Conversation, type Status } from "../lib/api";
 import { shiftDay, today } from "../lib/calendar";
@@ -25,7 +26,8 @@ const tags = ref<[string, number][]>([]),
   open = ref<Status["conversation"]>(null);
 const loading = ref(false),
   done = ref(false);
-const more = useTemplateRef<HTMLElement>("more");
+const more = useTemplateRef<HTMLElement>("more"),
+  selfCard = useTemplateRef<InstanceType<typeof SelfVoice>>("selfCard");
 let seq = 0;
 
 // 问 AI: the words in the search box as a question (POST /api/ask, 10-30 s); [c…] in the answer link to the conversation.
@@ -121,6 +123,7 @@ async function restart() {
   const my = ++seq,
     plain = !q.value && !tag.value && kind.value === "对话" && !day.value;
   loading.value = true;
+  if (plain) selfCard.value?.load(); // after a reconnect too: it may have popped meanwhile
   const [st, cs] = await Promise.all([plain ? get<Status>("/api/status") : null, search("")]);
   if (my !== seq) return; // a newer search started meanwhile
   open.value = st?.conversation ?? null;
@@ -180,7 +183,8 @@ onUnmounted(() => {
 });
 useSocket((m) => {
   // summaries arrive every few seconds while old ones are redone: patch the card, never reload the list
-  if (m.type === "summary") {
+  if (m.type === "self") selfCard.value?.load(); // 「哪个是你？」 popped or was answered
+  else if (m.type === "summary") {
     const c = items.value.find((x) => x.id === m.conversation);
     if (c) c.summary = { ...m };
   } else if (
@@ -257,6 +261,7 @@ useSocket((m) => {
         >
       </div>
     </div>
+    <SelfVoice v-show="!q && !tag && !day" ref="selfCard" />
     <div v-if="due.length && !q && !tag && !day" class="card due">
       <div class="meta">到期的待办 · {{ due.length }} 条</div>
       <ul>

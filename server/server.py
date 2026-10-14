@@ -38,6 +38,7 @@ import live
 import mcp_server
 import profiles
 import recap
+import selfvoice
 import speakers
 import squeeze
 import stepfun_asr
@@ -734,8 +735,8 @@ async def pipeline(device: str):
 
     from diarist import Diarist, relabel
     bank = {k: e for k, (_, e) in db.people().items()}
-    vp = DATA / "owner-redimnet2.npz"
-    owner = dict(np.load(vp)) if vp.exists() else {}  # a new instance has nobody's voiceprint yet: nobody is 我
+    vp = owner_npz()
+    owner = dict(np.load(vp)) if vp.exists() else {}  # a new instance has nobody's voiceprint yet: nobody is 我 (selfvoice)
     embed, dia, grouper = state["embed"], Diarist(owner, people=bank), Grouper(open_=db.kv(f"open_conversation:{device}"))
     ddia = Diarist(owner, people=bank)  # the drafts' own clustering: it never touches the final labels
     state["dias"] += [dia, ddia]  # a rename on the conversation page teaches every diarist a name
@@ -918,6 +919,11 @@ async def pipeline(device: str):
 
     async def final_piece() -> bool:
         """Cut and finalize the next piece when there is one; True when a piece was done (look for the next at once)."""
+        nonlocal owner
+        if not grouper.open and state.get("owner") is not None and state["owner"] is not owner:
+            owner = state["owner"]  # 我 picked on the card (self_answer): from the next conversation on, never the open one
+            dia.set_bank(owner)
+            ddia.set_bank(owner)
         if not seg.anchors:
             return False
         done = st["done_to"]
@@ -1936,23 +1942,125 @@ async def voices_loop():
                     continue
                 dur = lambda r: (dt.datetime.fromisoformat(r["end"]) - dt.datetime.fromisoformat(r["start"])).total_seconds()
                 long = sorted((r for r in rs if dur(r) >= 1.5), key=dur, reverse=True)[:4]
-                es = []
+                es, ls = [], []
                 for r in long:
                     try:
                         x = np.frombuffer(await cut(r["start"], min(r["end"], (dt.datetime.fromisoformat(r["start"]) + dt.timedelta(seconds=15)).isoformat()), "s16le", r.get("source")), np.int16)
                     except HTTPException:
                         continue
                     es.append(await asyncio.to_thread(state["embed"], x))
+                    if (lv := selfvoice.level(x)) is not None:
+                        ls.append(lv)
                 if es:
                     e = np.mean(es, 0)
                     best = min(long, key=lambda r: abs(dur(r) - 6))
                     out.append({"conv": c["id"], "label": label, "device": "live", "n": len(rs), "speech_s": round(sum(map(dur, rs)), 1),
-                                "k": len(es), "e": e / np.linalg.norm(e),
+                                "k": len(es), "e": e / np.linalg.norm(e), "level": round(float(np.median(ls)), 2) if ls else None,
                                 "clip_start": best["start"], "clip_end": min(best["end"], (dt.datetime.fromisoformat(best["start"]) + dt.timedelta(seconds=10)).isoformat()),
                                 "clip_text": best.get("text")})
             with db.tx() as t:
                 db.insert_voices(t, out or [{"conv": c["id"]}])
             _speakers["at"] = 0.0
+        try:
+            await self_round()
+        except Exception:
+            log.exception("self voice round")
+
+
+# 「哪个是你？」(selfvoice.py, #206): on an instance without 我's voiceprint a card lets the user pick their own voice;
+# the pick is written as that voiceprint and the pipelines take it from their next conversation on
+CLIP_CONVS = 6  # a candidate's clips come from its biggest conversations: a sentence decoded costs ~5 CPU-s of ReDimNet2
+
+
+def owner_npz() -> Path:
+    return DATA / "owner-redimnet2.npz"
+
+
+async def self_round():
+    """After the voices of closed conversations came in: pop the card when it is due (selfvoice.due). Off while 我 has a
+    voiceprint (a hand-made npz, or the one picked here)."""
+    st = db.kv("selfvoice") or {}
+    if owner_npz().exists() or st.get("card"):  # the card up waits for the user; nothing else changes st meanwhile
+        return
+    vs = db.voices()
+    if not vs:
+        return
+    now = dt.datetime.now()
+    st.setdefault("first_at", now.isoformat(timespec="seconds"))
+    cands, n = await asyncio.to_thread(selfvoice.candidates, vs)
+    if why := selfvoice.due(st, cands, n, now):
+        st["card"] = await self_card(cands[:selfvoice.SHOW], vs, why, n)
+        st.pop("wait", None)
+        log.info("self voice card (%s): %s", why, [(c["p"], c["convs"], len(c["clips"])) for c in st["card"]["candidates"]])
+    db.put_kv("selfvoice", st)
+    if why:
+        note("「哪个是你？」可以确认了：到「对话」页听一听，选出你自己的声音", "state")
+        await broadcast({"type": "self"})
+
+
+async def self_card(cands: list[dict], vs: list[dict], why: str, n: int) -> dict:
+    """The card: per candidate its tier, conversations, speech, voiceprint and 3 clips (selfvoice.pick) from its
+    biggest conversations, decoded and embedded here (a few minutes of CPU, once per card)."""
+    lvl = {(v["conv"], v["label"]): v.get("level") for v in vs}
+    banks, out = [c["bank"] for c in cands], []
+    for c in cands:
+        pool = []
+        for m in sorted(c["members"], key=lambda m: -m["speech_s"])[:CLIP_CONVS]:
+            if not (conv := db.conversation(m["conv"])):
+                continue
+            for r in await asyncio.to_thread(selfvoice.shortlist, conversation_rows(conv), m["label"]):
+                try:
+                    x = np.frombuffer(await cut(r["start"], r["end"], "s16le", r.get("source")), np.int16)
+                except HTTPException:
+                    continue
+                pool.append({**r, "conv": m["conv"], "lvl": selfvoice.level(x), "lmed": lvl.get((m["conv"], m["label"])),
+                             "e": await asyncio.to_thread(state["embed"], x)})
+        clips = selfvoice.pick(pool, c["bank"], [b for b in banks if b is not c["bank"]])
+        out.append({"tier": selfvoice.tier(c["p"]), "p": round(c["p"], 3), "convs": c["convs"], "speech_s": round(c["speech_s"]),
+                    "bank": [float(x) for x in c["bank"]],
+                    "clips": [{"start": r["start"], "end": r["end"], "device": r.get("source"), "text": r.get("text")} for r in clips]})
+    return {"at": dt.datetime.now().isoformat(timespec="seconds"), "why": why, "convs": n, "candidates": out}
+
+
+@app.get("/api/self")
+async def self_get():
+    """The card while it is up: candidates most likely first (none preselected), each with a tier instead of a %."""
+    st = db.kv("selfvoice") or {}
+    c = None if owner_npz().exists() else st.get("card")
+    return {"card": c and {**c, "candidates": [{k: v for k, v in x.items() if k not in ("bank", "p")} for x in c["candidates"]]}}
+
+
+@app.post("/api/self")
+async def self_answer(body: dict):
+    """The answer to the card: a candidate's index becomes 我's voiceprint (owner-redimnet2.npz), taken by every
+    pipeline from its next conversation on: the conversations before keep their labels and summaries. "none" (都不是)
+    and "later" (以后再说) put the card away until selfvoice.due brings it again. Every answer is logged with the card's
+    probabilities: what POP_P and the tiers are to be checked against."""
+    st = db.kv("selfvoice") or {}
+    card, a, now = st.get("card"), body.get("answer"), dt.datetime.now()
+    if not card or owner_npz().exists():
+        raise HTTPException(409, "没有待确认的声音，刷新页面再试")
+    if a == "none":
+        st["wait"] = {"convs": len({v["conv"] for v in db.voices()})}
+    elif a == "later":
+        st["wait"] = {"until": (now + dt.timedelta(seconds=selfvoice.LATER_S)).isoformat(timespec="seconds")}
+    elif isinstance(a, int) and not isinstance(a, bool) and 0 <= a < len(card["candidates"]):
+        bank = selfvoice.unit(card["candidates"][a]["bank"]).astype(np.float32)
+        tmp = DATA / "owner-redimnet2.tmp.npz"
+        np.savez(tmp, self=bank)
+        os.replace(tmp, owner_npz())  # whole or not at all: a restart loads it like a hand-made one
+        state["owner"] = {"self": bank}
+        st["confirmed"] = {"at": now.isoformat(timespec="seconds"), "pick": a}
+    else:
+        raise HTTPException(400, "bad answer")
+    st["log"] = st.get("log", []) + [{"at": now.isoformat(timespec="seconds"), "why": card["why"], "convs": card["convs"],
+                                      "p": [x["p"] for x in card["candidates"]], "answer": a}]
+    st["card"] = None
+    db.put_kv("selfvoice", st)
+    if "confirmed" in st:
+        note(f"「我」的声音已确认（第 {a + 1} 个）：从下一段对话起认出「我」，已有的对话不变", "state")
+    await broadcast({"type": "self"})
+    return {"ok": True}
 
 
 @app.get("/api/audio")

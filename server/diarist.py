@@ -51,9 +51,14 @@ def _me(owner: float, near: tuple[float, str | None]) -> bool:
 
 class Diarist:
     def __init__(self, bank: dict[str, np.ndarray], th: float = TH, people: dict[str, np.ndarray] | None = None):
-        self.bank, self.th = [_unit(v) for v in bank.values()], th
+        self.th = th
+        self.set_bank(bank)
         self.people = {k: _unit(v) for k, v in (people or {}).items()}  # the server adds names as they are given
         self.reset()
+
+    def set_bank(self, bank: dict[str, np.ndarray]):
+        """The owner bank: 我 confirmed on the card (selfvoice) comes in between conversations, without a restart."""
+        self.bank = [_unit(v) for v in bank.values()]
 
     def reset(self):
         self.E, self.dur, self.ids, self.nid = [], [], [], 0
