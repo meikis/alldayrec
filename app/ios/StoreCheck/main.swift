@@ -133,6 +133,52 @@ do {
   check(m.files[old]!.closed, true, "short LIST: old closed")
 }
 
+// #207: a boot number counted before. 10-10's boot 1 (StoreTest.bootReused's case): file 3 uploaded, file 4 cut but
+// for its last frames; boot 1 again on 10-13 (the card's count read as 0), at frame 1000. The mirror's boot 1, read
+// back from its state.txt, is that earlier boot's: file 4's last frames go up by 10-10's 'T', both files and the 'T'
+// go, and today's file 3 (the same name) is taken from 0 and dated by today's 'T', not 10-10's
+do {
+  let dir = tmp(), out = tmp(), undated = tmp()
+  let old: Int64 = 1_791_000_000_000, now = old + 3 * 86_400_000
+  let f3: Int64 = 1 << 16 | 3, f4: Int64 = 1 << 16 | 4
+  let m0 = Mirror(dir)
+  _ = try m0.put(f3, 0, t(7_000_000, old) + a(7_000_000, 10))
+  _ = try m0.put(f4, 0, a(7_000_010, 10) + a(7_000_020, 10) + a(7_000_030, 5))
+  m0.listed([f3: 49, f4: 108], open: f4)
+  check(try m0.pieces(out, undated, tag: "X", liveFrames: 15, boot: 1), 2, "10-10's pieces")
+  clear(out)  // uploaded
+  check(m0.done(out), [f3], "10-10's file 3 deletable")
+  let m = Mirror(dir)  // the state as the app left it
+  check(try m.reused(boot: 1, frame: 1000, at: now, out: out, undated: undated, tag: "X"), true, "boot 1 again: an earlier boot's")
+  check(names(out), ["\(old + 300)@X.ogg"], "file 4's last frames, dated by 10-10's 'T'")
+  check([m.files.count, Int(m.have(f3)), Int(m.have(f4))], [0, 0, 0], "boot 1's files gone")
+  check(m.done(out), [], "nothing of the card's to delete")
+  clear(out)
+  let today = t(900, now - 1000) + a(1000, 10) + a(1010, 10)
+  check(try m.put(f3, 0, today), nil, "today's file 3 from offset 0")
+  check(m.have(f3), Int64(today.count), "taken, not passed over as bytes the mirror had")
+  m.listed([f3: Int64(today.count)], open: f3)
+  check(try m.pieces(out, undated, tag: "X", liveFrames: 15, boot: 1), 1, "today's piece")
+  check(names(out), ["\(now)@X.ogg"], "dated by today's 'T'")
+  // the same boot later: its start 30 s off the 'T' it wrote (lost frames, drift) is still it
+  check(try Mirror(dir).reused(boot: 1, frame: 7000, at: now + 90_000, out: out, undated: undated, tag: "X"), false, "the same boot")
+  check(Mirror(dir).have(f3), Int64(today.count), "kept")
+
+  // a boot that began within the margin of the last one (10-13 11:18 and 11:24 were both boot 1): its frames are behind
+  let n = Mirror(tmp()), g: Int64 = 7 << 16
+  _ = try n.put(g, 0, t(5000, old + 50_000) + a(5000, 10))
+  check(try n.reused(boot: 7, frame: 3000, at: old + 55_000 + 30_000, out: out, undated: undated, tag: "X"), true, "frames went back")
+  // the same boot, the link gone before the READ reached its 'T' (firmware before #135: the 'T' at the end of a file
+  // recorded for hours): the mirror has its frames and no 'T'. Reconnected, they stay, and are dated once it comes
+  let u = Mirror(tmp()), offline = a(0, 10) + a(10, 10)
+  _ = try u.put(g, 0, offline)
+  check(try u.reused(boot: 7, frame: 360_000, at: now, out: out, undated: undated, tag: "X"), false, "no 'T' yet: this boot's")
+  check(u.have(g), Int64(offline.count), "its frames kept")
+  _ = try u.put(g, Int64(offline.count), t(359_000, now - 10_000))
+  check(try u.reused(boot: 7, frame: 360_100, at: now + 1000, out: out, undated: undated, tag: "X"), false, "its 'T' agrees")
+  check(try u.reused(boot: 0, frame: 100, at: now, out: out, undated: undated, tag: "X"), false, "boot 0: no count to reuse")
+}
+
 // lr_sync.py's selftest data. boot 1: a gap at 5..8, a cut-short tail; its 'T' in the middle of the stream, after the
 // frames it dates. boot 2: rebooted, never synced: time unknown. boot 3: the open file, its 'T' (this connection's) last
 do {

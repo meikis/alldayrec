@@ -343,6 +343,11 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             }
             val m = Mirror(File(ctx.filesDir, "recorder/${Ble.tag(name)}"))
             mirrorName = Ble.tag(name); boot = st.boot
+            if (m.reused(st.boot.toLong(), st.frame, st.at, chunks, undated, mirrorName)) {
+                Log.w("live-record", "ble boot ${st.boot} was counted before: the mirror's files and 'T' records of it dropped (#207)")
+                DeviceLog.app(mirrorName, "boot_reused", "开机号 ${st.boot} 以前用过：手机上这个开机号的旧 TIME 记录和文件状态作废，卡上的文件从头再取",
+                              "warn", mapOf("boot" to st.boot, "frame" to st.frame))
+            }
             open = -1; liveFloor = -1; ahead = -1; reading = null; needList = true; listFull = false; liveRead = true; stalls.clear()
             holeAt = -1; refollow = false; abandoned = -1; liveGaps = 0; settleUntil = android.os.SystemClock.elapsedRealtime() + 3000
             caught = 0; caughtSince = 0
@@ -414,7 +419,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         return now
     }
 
-    private class Status(val boot: Int, val frame: Long, val store: Int)
+    private class Status(val boot: Int, val frame: Long, val store: Int, val at: Long)  // at: the phone's clock as it was read
 
     /** The recorder no longer knows this phone: no pairing behind the person's back, no reconnecting. */
     private fun kicked(g: BluetoothGatt, why: String) {
@@ -500,7 +505,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
     private fun status(g: BluetoothGatt, name: String): Status {
         val raw = read(g, Ble.STORE, Ble.TIME)
         val t = le(raw)
-        val s = Status(t.getShort(0).toInt() and 0xffff, t.getInt(2).toLong() and 0xffffffffL, t.getShort(6).toInt())
+        val s = Status(t.getShort(0).toInt() and 0xffff, t.getInt(2).toLong() and 0xffffffffL, t.getShort(6).toInt(), System.currentTimeMillis())
         noCard = s.store < 0 && t.getInt(12) == 0
         val left = syncTotalKb - syncDoneKb
         val rate = if (caughtSince > 0) caught * 1000.0 / maxOf(1000L, android.os.SystemClock.elapsedRealtime() - caughtSince) else 0.0

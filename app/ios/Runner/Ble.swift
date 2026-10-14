@@ -467,6 +467,11 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         Ble.log("bound \(name)")
       }
       let m = Mirror(mirrors.appendingPathComponent(Ble.tag(name)))
+      if try m.reused(boot: Int64(st.boot), frame: st.frame, at: st.at, out: chunks, undated: undated, tag: Ble.tag(name)) {
+        Ble.log("boot \(st.boot) was counted before: the mirror's files and 'T' records of it dropped (#207)")
+        DeviceLog.app(Ble.tag(name), "boot_reused", "开机号 \(st.boot) 以前用过：手机上这个开机号的旧 TIME 记录和文件状态作废，卡上的文件从头再取",
+                      level: "warn", fields: ["boot": st.boot, "frame": st.frame])
+      }
       boot = st.boot
       open = -1; liveFloor = -1; ahead = -1; reading = nil; needList = true; listFull = false; liveRead = true; stalls = [:]
       holeAt = -1; refollow = false; abandoned = -1; liveGaps = 0; settleUntil = Date(timeIntervalSinceNow: 3)
@@ -544,13 +549,13 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     return now
   }
 
-  private struct Status { let boot: Int, frame: Int64, store: Int }
+  private struct Status { let boot: Int, frame: Int64, store: Int, at: Int64 }  // at: the phone's clock as it was read
 
   /// The board's state, kept for the app's page and sent to the server under the board's name.
   private func status(_ p: Conn, _ name: String) throws -> Status {
     let t = try read(p, Ble.store, Ble.time)
     guard t.count >= 16 else { throw Fail(description: "状态只有 \(t.count) 字节") }
-    let s = Status(boot: Int(Store.le(t, 0, 2)), frame: Ble.u32(t, 2), store: Int(Int16(truncatingIfNeeded: Store.le(t, 6, 2))))
+    let s = Status(boot: Int(Store.le(t, 0, 2)), frame: Ble.u32(t, 2), store: Int(Int16(truncatingIfNeeded: Store.le(t, 6, 2))), at: Recorder.now())
     noCard = s.store < 0 && Ble.u32(t, 12) == 0
     let left = syncTotalKb - syncDoneKb, rate = caughtSince.map { Double(caught) / max(1, -$0.timeIntervalSinceNow) } ?? 0
     let dbm = try rssi(p)

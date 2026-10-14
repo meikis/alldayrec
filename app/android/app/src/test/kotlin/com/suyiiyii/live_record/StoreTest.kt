@@ -75,6 +75,52 @@ class StoreTest {
         assertTrue(m.up(out, live))
     }
 
+    /** #207: a boot number counted before. 10-10's boot 1: file 3 uploaded, file 4 cut but for its last frames; boot 1
+     *  again on 10-13 (the card's count read as 0), at frame 1000. The mirror's boot 1, read back from its state.txt,
+     *  is that earlier boot's: file 4's last frames go up by 10-10's 'T', both files and the 'T' go, and today's file 3
+     *  (the same name) is taken from 0 and dated by today's 'T', not 10-10's. */
+    @Test fun bootReused() {
+        val dir = tmp(); val out = tmp(); val undated = tmp()
+        val old = 1_791_000_000_000L; val now = old + 3 * 86_400_000
+        val f3 = 1L shl 16 or 3; val f4 = 1L shl 16 or 4
+        val m0 = Mirror(dir)
+        m0.put(f3, 0, t(7_000_000, old) + a(7_000_000, 10))
+        m0.put(f4, 0, a(7_000_010, 10) + a(7_000_020, 10) + a(7_000_030, 5))
+        m0.listed(mapOf(f3 to 49L, f4 to 108L), f4)
+        assertEquals(2, m0.pieces(out, undated, "X", 15, 1))  // 10-10's pieces
+        out.listFiles()!!.forEach { it.delete() }  // uploaded
+        assertEquals(listOf(f3), m0.done(out))
+        val m = Mirror(dir)  // the state as the app left it
+        assertTrue("boot 1 again: an earlier boot's", m.reused(1, 1000, now, out, undated, "X"))
+        assertEquals(listOf("${old + 300}@X.ogg"), names(out))  // file 4's last frames, dated by 10-10's 'T'
+        assertEquals(listOf(0L, 0L, 0L), listOf(m.files.size.toLong(), m.have(f3), m.have(f4)))  // boot 1's files gone
+        assertEquals(emptyList<Long>(), m.done(out))  // nothing of the card's to delete
+        out.listFiles()!!.forEach { it.delete() }
+        val today = t(900, now - 1000) + a(1000, 10) + a(1010, 10)
+        assertNull(m.put(f3, 0, today))  // today's file 3 from offset 0
+        assertEquals(today.size.toLong(), m.have(f3))  // taken, not passed over as bytes the mirror had
+        m.listed(mapOf(f3 to today.size.toLong()), f3)
+        assertEquals(1, m.pieces(out, undated, "X", 15, 1))
+        assertEquals(listOf("$now@X.ogg"), names(out))  // dated by today's 'T'
+        // the same boot later: its start 30 s off the 'T' it wrote (lost frames, drift) is still it
+        assertFalse(Mirror(dir).reused(1, 7000, now + 90_000, out, undated, "X"))
+        assertEquals(today.size.toLong(), Mirror(dir).have(f3))
+
+        // a boot that began within the margin of the last one (10-13 11:18 and 11:24 were both boot 1): its frames are behind
+        val n = Mirror(tmp()); val g = 7L shl 16
+        n.put(g, 0, t(5000, old + 50_000) + a(5000, 10))
+        assertTrue("frames went back", n.reused(7, 3000, old + 55_000 + 30_000, out, undated, "X"))
+        // the same boot, the link gone before the READ reached its 'T' (firmware before #135: the 'T' at the end of a
+        // file recorded for hours): the mirror has its frames and no 'T'. Reconnected, they stay, and are dated once it comes
+        val u = Mirror(tmp()); val offline = a(0, 10) + a(10, 10)
+        u.put(g, 0, offline)
+        assertFalse("no 'T' yet: this boot's", u.reused(7, 360_000, now, out, undated, "X"))
+        assertEquals(offline.size.toLong(), u.have(g))  // its frames kept
+        u.put(g, offline.size.toLong(), t(359_000, now - 10_000))
+        assertFalse("its 'T' agrees", u.reused(7, 360_100, now + 1000, out, undated, "X"))
+        assertFalse("boot 0: no count to reuse", u.reused(0, 100, now, out, undated, "X"))
+    }
+
     /** What is said now sent ahead of a backlog still on the card (#130): where its first piece starts, before it is made. */
     @Test fun nextStart() {
         val dir = tmp(); val out = tmp(); val undated = tmp()

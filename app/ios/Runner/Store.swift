@@ -348,4 +348,30 @@ final class Mirror {
     files[f] = nil
     save()
   }
+
+  /// How far one boot's 'T' records may disagree on when it began (epochMs - frame * 10 ms): the frame clock runs
+  /// within ~30 ppm of the phone's (59998-60000 frames in 10 min, #208), frames a stalled codec lost move it on.
+  static let sameBootMs: Int64 = 60_000
+
+  /// The board is on boot `b` at `frame` now (`at`: the phone's clock then). A boot number can come back: the card's
+  /// count read as 0 and it counted from 1 again (#207, 10-13: the new audio dated by 10-10's 'T' records of boot 1,
+  /// three days back; its files taken for 10-10's of the same name: not READ, deleted from the card). Firmware e4cefed
+  /// counts past the chip's own count too, which an erased chip still loses. The mirror's files and 'T' records of
+  /// boot `b` are an earlier boot's when a 'T' is at a later frame than now (a boot's frames only go on) or puts the
+  /// boot's start elsewhere. Files of `b` with no 'T' at all are taken for this boot's: a link that dropped before the
+  /// READ reached this boot's 'T' leaves just that (firmware before #135 wrote it at the end of a file of hours).
+  /// Those files are cut into pieces as far as the mirror has them, by their own 'T' records, then gone with the 'T'
+  /// records: the card's files of that name are this boot's, READ from 0. True: there was such a boot.
+  func reused(boot b: Int64, frame: Int64, at: Int64, out: URL, undated: URL, tag: String) throws -> Bool {
+    if b == 0 { return false }  // no card at boot: each file is its own clock
+    scanSyncs()
+    let mine = files.keys.filter { $0 >> 16 == b }, ts = syncs[b] ?? [], began = at - frame * Store.frameMs
+    if !ts.contains(where: { $0.frame > frame || abs($0.epochMs - $0.frame * Store.frameMs - began) > Mirror.sameBootMs }) { return false }
+    for f in mine { files[f]!.closed = true; files[f]!.size = have(f) }
+    _ = try pieces(out, undated, tag: tag, liveFrames: Store.oldPieceFrames, boot: Int(b) + 1)  // that boot is over
+    for f in mine { try? fm.removeItem(at: bin(f)); files[f] = nil }
+    syncs[b] = nil
+    save()
+    return true
+  }
 }

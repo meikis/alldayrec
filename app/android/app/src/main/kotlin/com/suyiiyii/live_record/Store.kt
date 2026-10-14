@@ -101,7 +101,12 @@ object Store {
  *                                                  card to count boots: each such boot has its own files)
  *    C file cut [piece]                            a piece made since (or frames passed over): appended, see cut() */
 class Mirror(private val dir: File) {
-    companion object { const val LIST_MAX = 64 }
+    companion object {
+        const val LIST_MAX = 64
+        /** How far one boot's 'T' records may disagree on when it began (epochMs - frame * 10 ms): the frame clock runs
+         *  within ~30 ppm of the phone's (59998-60000 frames in 10 min, #208), frames a stalled codec lost move it on. */
+        const val SAME_BOOT_MS = 60_000L
+    }
 
     class F(var closed: Boolean = false, var size: Long = -1, var cut: Long = 0, var tscan: Long = 0,
             val pieces: MutableList<String> = mutableListOf(), var finished: Boolean = false)
@@ -286,5 +291,27 @@ class Mirror(private val dir: File) {
         bin(f).delete()
         files.remove(f)
         save()
+    }
+
+    /** The board is on boot [b] at [frame] now ([at]: the phone's clock then). A boot number can come back: the card's
+     *  count read as 0 and it counted from 1 again (#207, 10-13: the new audio dated by 10-10's 'T' records of boot 1,
+     *  three days back; its files taken for 10-10's of the same name: not READ, deleted from the card). Firmware e4cefed
+     *  counts past the chip's own count too, which an erased chip still loses. The mirror's files and 'T' records of
+     *  boot [b] are an earlier boot's when a 'T' is at a later frame than now (a boot's frames only go on) or puts the
+     *  boot's start elsewhere. Files of [b] with no 'T' at all are taken for this boot's: a link that dropped before the
+     *  READ reached this boot's 'T' leaves just that (firmware before #135 wrote it at the end of a file of hours).
+     *  Those files are cut into pieces as far as the mirror has them, by their own 'T' records, then gone with the 'T'
+     *  records: the card's files of that name are this boot's, READ from 0. True: there was such a boot. */
+    fun reused(b: Long, frame: Long, at: Long, out: File, undated: File, tag: String): Boolean {
+        if (b == 0L) return false  // no card at boot: each file is its own clock
+        scanSyncs()
+        val mine = files.keys.filter { it shr 16 == b }; val ts = syncs[b].orEmpty(); val began = at - frame * Store.FRAME_MS
+        if (ts.none { it[0] > frame || Math.abs(it[1] - it[0] * Store.FRAME_MS - began) > SAME_BOOT_MS }) return false
+        for (f in mine) files[f]!!.apply { closed = true; size = have(f) }
+        pieces(out, undated, tag, Store.OLD_PIECE_FRAMES, (b + 1).toInt())  // that boot is over
+        for (f in mine) { bin(f).delete(); files.remove(f) }
+        syncs.remove(b)
+        save()
+        return true
     }
 }
