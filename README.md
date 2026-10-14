@@ -4,7 +4,7 @@ A continuous audio stream in, conversations out, within a minute.
 
 The phone app uploads Opus pieces; the server keeps them on disk as a queue and feeds them in time order, detects speech locally (FireRedVAD), and transcribes in two layers (issue #9). The final layer always runs: pieces of up to 5 min, cut in pauses, go to the ASR engine once each; it decides locally who is the owner and keeps conversation-local speaker ids (ReDimNet2 voiceprints), closes a conversation after a silence and summarizes it. While a page shows today, the draft layer also sends each stretch at its pause, so text shows within seconds; drafts are kept (table `drafts`) and the page shows them only where final rows do not cover the time yet.
 
-Only speech detection and speaker identity run on this machine; sentence splitting, diarization and transcription come from the ASR engine behind `ASR_SERVICE_URL`.
+Only speech detection and speaker identity run on this machine, both on onnxruntime (`server/infer.py`, no torch; the model files in `MODELS_DIR`, default `/opt/lr-models`, pinned by sha256: `uv run --group export python export_onnx.py` makes them); sentence splitting, diarization and transcription come from the ASR engine behind `ASR_SERVICE_URL`.
 
 ```
 cp .env.example .env   # fill in

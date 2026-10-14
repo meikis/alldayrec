@@ -50,7 +50,7 @@ started() {  # dir unit log-offset (after a restart): answering within 3 min, no
   for _ in $(seq 90); do  # until it answers or dies
     { get "$d" /api/status > /dev/null || [ "$(systemctl show -p MainPID --value "$u")" != "$pid" ]; } && break; sleep 2
   done
-  sleep 20  # the pipelines load their models after the port is up (a torch hub check has failed there)
+  sleep 20  # the pipelines start after the port is up: a failure there shows within seconds
   [ "$(systemctl show -p MainPID --value "$u")" = "$pid" ] || { echo "  FAIL $d: $u restarted while starting"; return 1; }
   if tail -c +$((off + 1)) "$d/data/server.log" | grep -E 'Traceback|task .* ended'; then
     echo "  FAIL $d: errors in data/server.log since the restart"; return 1
@@ -83,6 +83,8 @@ deploy() {  # dir unit: back up, install the release, restart, check
   # the release's packages (its uv.lock) into the instance's venv first: added or changed, none removed (--inexact), so
   # the code running now and a rollback's run on them too; a failure stops here, nothing installed, nothing restarted
   (cd "$b/new" && UV_PROJECT_ENVIRONMENT="$d/server/.venv" "$UV" sync --frozen --inexact -q)
+  # and every model file the release pins (infer.MODELS) in the instance's MODELS_DIR, or stop here the same way (#219)
+  (cd "$b/new" && MODELS_DIR="$(env_of "$d" MODELS_DIR)" "$d/server/.venv/bin/python" -c "import infer; infer.check()")
   for f in pyproject.toml uv.lock; do [ ! -f "$d/server/$f" ] || cp -a "$d/server/$f" "$b/old/"; done
   # the columns now (rollback drops those a release adds: old code inserts whole rows) and an online copy of the db
   "$d/server/.venv/bin/python" - "$(env_of "$d" LIVE_DATA)/live.db" "$b/old" << 'PY'

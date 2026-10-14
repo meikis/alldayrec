@@ -36,6 +36,7 @@ import audio
 import db
 import firmware
 import hints
+import infer
 import live
 import mcp_server
 import net
@@ -57,7 +58,6 @@ def env(name: str) -> str:
     return v
 
 
-VAD_MODEL = Path(env("VAD_MODEL_DIR"))            # FireRedVAD Stream-VAD checkpoint directory
 DATA = Path(env("LIVE_DATA"))                     # live.db, the passes trace, owner-redimnet2.npz, voice clips
 SR = 16000
 FRAME_LEN, FRAME_SHIFT = 400, 160          # FireRed fbank: 25 ms window, 10 ms shift
@@ -98,8 +98,7 @@ class Segmenter:
     """FireRed Stream-VAD over a continuous sample stream; emits (start, end, samples) utterances."""
 
     def __init__(self):
-        from fireredvad import FireRedStreamVad, FireRedStreamVadConfig
-        self.vad = FireRedStreamVad.from_pretrained(str(VAD_MODEL), FireRedStreamVadConfig())
+        self.vad = infer.StreamVad()
         self.loose = copy.deepcopy(self.vad.postprocessor)  # the same frames at SQUEEZE_VAD: only what the engine is sent
         self.loose.speech_threshold = SQUEEZE_VAD
         self.speech: list[tuple[int, int]] = []  # its speech in the buffer (stream samples)
@@ -662,7 +661,7 @@ async def pipelines():
     """One pipeline per device with audio after its finalized time: a phone sending last night's backlog while an
     iPhone records today is transcribed on its own timeline. A device's pipeline lives on once started."""
     from diarist import load_embedder
-    state["embed"] = await anyio.to_thread.run_sync(load_embedder, limiter=threads.TORCH)
+    state["embed"] = await anyio.to_thread.run_sync(load_embedder, limiter=threads.INFER)
     running: dict[str, asyncio.Task] = {}
     while True:
         devices = [r[0] for r in db.conn().execute("SELECT DISTINCT device FROM pieces")]
@@ -973,7 +972,7 @@ async def pipeline(device: str):
         try:
             segs = await engine_segs(x, speech_in(seg, a0, len(x)), device=device)
             engine = segs[0]["engine"] if segs else None
-            marks = await anyio.to_thread.run_sync(label_sentences, dia, embed, segs, x, limiter=threads.TORCH)
+            marks = await anyio.to_thread.run_sync(label_sentences, dia, embed, segs, x, limiter=threads.INFER)
         except Exception as e:
             dia.rollback(m0)
             log.warning("%s final piece failed: %r", device, e)
@@ -1087,7 +1086,7 @@ async def pipeline(device: str):
             segs = clip_turns(segs[:-1], sent)
             if not segs:
                 return
-            await anyio.to_thread.run_sync(label_sentences, ddia, embed, segs, x, limiter=threads.TORCH)
+            await anyio.to_thread.run_sync(label_sentences, ddia, embed, segs, x, limiter=threads.INFER)
             rows = final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, t0, len(x) / SR, None, sent, at, 0.0)[2]
             sent = segs[-1]["end_ms"] / 1000
             await publish(rows, at(sent), segs[0]["engine"])
@@ -1108,7 +1107,7 @@ async def pipeline(device: str):
                         m0 = ddia.mark()
             raw = got[0]
             segs = clip_turns(raw, sent)
-            marks = await anyio.to_thread.run_sync(label_sentences, ddia, embed, segs, x, limiter=threads.TORCH)
+            marks = await anyio.to_thread.run_sync(label_sentences, ddia, embed, segs, x, limiter=threads.INFER)
         except Exception as e:
             e = threads.first(e)
             ddia.rollback(m0)
@@ -1629,7 +1628,7 @@ async def apply_rename(conv_id: str, frm: str, to: str) -> dict:
                 x = np.frombuffer(await cut(r["start"], min(r["end"], (dt.datetime.fromisoformat(r["start"]) + dt.timedelta(seconds=15)).isoformat()), "s16le", r.get("source")), np.int16)
             except HTTPException:  # history conversations have no recording here
                 continue
-            es.append(await anyio.to_thread.run_sync(state["embed"], x, limiter=threads.TORCH))
+            es.append(await anyio.to_thread.run_sync(state["embed"], x, limiter=threads.INFER))
         if es:
             n0, e0 = db.people().get(to, (0, np.zeros(len(es[0]))))
             n = n0 + len(es)
@@ -1965,7 +1964,7 @@ async def voices_loop():
                         x = np.frombuffer(await cut(r["start"], min(r["end"], (dt.datetime.fromisoformat(r["start"]) + dt.timedelta(seconds=15)).isoformat()), "s16le", r.get("source")), np.int16)
                     except HTTPException:
                         continue
-                    es.append(await anyio.to_thread.run_sync(state["embed"], x, limiter=threads.TORCH))
+                    es.append(await anyio.to_thread.run_sync(state["embed"], x, limiter=threads.INFER))
                     if (lv := selfvoice.level(x)) is not None:
                         ls.append(lv)
                 if es:
@@ -2031,7 +2030,7 @@ async def self_card(cands: list[dict], vs: list[dict], why: str, n: int) -> dict
                 except HTTPException:
                     continue
                 pool.append({**r, "conv": m["conv"], "lvl": selfvoice.level(x), "lmed": lvl.get((m["conv"], m["label"])),
-                             "e": await anyio.to_thread.run_sync(state["embed"], x, limiter=threads.TORCH)})
+                             "e": await anyio.to_thread.run_sync(state["embed"], x, limiter=threads.INFER)})
         clips = selfvoice.pick(pool, c["bank"], [b for b in banks if b is not c["bank"]])
         out.append({"tier": selfvoice.tier(c["p"]), "p": round(c["p"], 3), "convs": c["convs"], "speech_s": round(c["speech_s"]),
                     "bank": [float(x) for x in c["bank"]],
@@ -2145,6 +2144,7 @@ def main():
     missing += [k for k in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL") if not os.environ.get(k)]
     if missing:
         raise SystemExit(f"not set: {', '.join(missing)} (see .env.example)")
+    infer.check()  # every model file there and the pinned one, before anything starts (#219)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     args.dir.mkdir(parents=True, exist_ok=True)
     audio.DIR = args.dir

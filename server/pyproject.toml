@@ -7,12 +7,8 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.32",
     "numpy==1.26.4",
-    "torch==2.5.1",
-    "torchaudio==2.5.1",
     "kaldi-native-fbank==1.22.3",
-    "fireredvad==0.0.2",
-    "sherpa-onnx==1.13.8",
-    "sherpa-onnx-core==1.13.8",
+    "onnxruntime==1.30.0",
     "websockets>=17.1",
     "scikit-learn>=1.9.1",
     "scipy>=1.17.1",
@@ -20,11 +16,15 @@ dependencies = [
     "anyio>=4.15.1",
 ]
 
+[dependency-groups]
+export = ["torch==2.5.1", "torchaudio==2.5.1", "onnx==1.17.0"]  # export_onnx.py only: the server runs the models on onnxruntime (#219)
+tools = ["sherpa-onnx==1.13.8", "sherpa-onnx-core==1.13.8"]  # owner.py, replay_case.py's local candidates
+
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]  # the VAD runs on CPU; the PyPI Linux wheel drags in 2 GB of CUDA
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]  # the export runs on CPU; the PyPI Linux wheel drags in 2 GB of CUDA
 torchaudio = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]  # ReDimNet2's feature layer

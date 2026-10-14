@@ -15,7 +15,6 @@ jobs:
       run:
         working-directory: server
     env:  # server.py refuses to import without these; the tests never reach the model or the services
-      VAD_MODEL_DIR: unused
       LIVE_DATA: unused
       ASR_UPLOAD_BRIDGE_URL: unused
       ASR_SERVICE_URL: unused

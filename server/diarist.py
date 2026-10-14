@@ -22,16 +22,9 @@ SR = 16000
 
 
 def load_embedder():
-    """ReDimNet2 B6, VoxBlink2 + VoxCeleb2 + CN-Celeb (Interspeech 2026); int16 audio -> unit vector."""
-    import torch
-    m = torch.hub.load("PalabraAI/redimnet2", "redimnet2", model_name="b6", train_type="lm",
-                       dataset="vb2+vox2+cnc2_v0", pretrained=True, trust_repo=True).eval()
-
-    def embed(x: np.ndarray) -> np.ndarray:
-        with torch.no_grad():
-            e = m(torch.from_numpy(x.astype(np.float32) / 32768)[None]).numpy()[0]
-        return e / np.linalg.norm(e)
-    return embed
+    """ReDimNet2 B6, VoxBlink2 + VoxCeleb2 + CN-Celeb (Interspeech 2026), on onnxruntime (infer.py); int16 audio -> unit vector."""
+    import infer
+    return infer.embedder()
 
 
 def _unit(v):

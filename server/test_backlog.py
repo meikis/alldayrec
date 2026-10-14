@@ -15,11 +15,10 @@ import anyio
 import anyio.to_thread
 import numpy as np
 import sklearn.cluster  # noqa: F401  Diarist.add imports it on its first sentence: ~30 s in a new venv (bytecode), inside the waits below
-from fireredvad import FireRedStreamVad, FireRedStreamVadConfig
-from fireredvad.core.stream_vad_postprocessor import StreamVadPostprocessor
 
 import audio
 import db
+import infer
 import server
 
 SR, DEVICE = 16000, "LR-TEST"
@@ -27,15 +26,10 @@ BACKLOG_S, PIECE_S, LIVE_S = 3 * 3600, 60, 15  # the backlog in pieces of PIECE_
 N = BACKLOG_S // PIECE_S
 
 
-class EnergyVad(FireRedStreamVad):
+class EnergyVad(infer.StreamVad):
     def detect_chunk(self, x):
         loud = np.lib.stride_tricks.sliding_window_view(np.abs(x.astype(np.int32)), 400)[::160].mean(1) > 500
         return [self.postprocessor.process_one_frame(float(v)) for v in loud]
-
-
-def energy_vad(cls, model_dir, c=FireRedStreamVadConfig()):
-    return EnergyVad(None, None, StreamVadPostprocessor(c.smooth_window_size, c.speech_threshold, c.pad_start_frame,
-                                                         c.min_speech_frame, c.max_speech_frame, c.min_silence_frame), c)
 
 
 def tone(idx: int, s: float) -> np.ndarray:
@@ -65,7 +59,7 @@ async def hear(x: np.ndarray, partial=None) -> list[dict]:
 def rig(tmp_path, monkeypatch, final_engine):
     """A pipeline's world: the energy VAD, fake engines and LLM, a page watching; returns what the draft engine was
     sent (seconds) and what the live analysis was fed (tone numbers per turn)."""
-    monkeypatch.setattr(FireRedStreamVad, "from_pretrained", classmethod(energy_vad))
+    monkeypatch.setattr(infer, "StreamVad", EnergyVad)
     monkeypatch.setattr(server, "DATA", tmp_path)
     monkeypatch.setattr(server, "DRAFT_ENGINE", "stepfun-sse")
     monkeypatch.setattr(server, "ENGINE_FALLBACK", "")
