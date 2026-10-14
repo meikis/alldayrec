@@ -7,7 +7,8 @@
 # <dir>/tenants.json (server/tenant.py; made from its .env once by server/tenants.sh), asked as them; a deploy installs
 # nothing anywhere unless the new server reads every instance's tenants.json (a server without one stops at its start).
 # Each deploy keeps a backup with a copy of every tenant's live.db in <dir>/backup-deploy-<time>, <dir>/backup-last points
-# at it; a deploy that passes its check keeps only its own and the one before.
+# at it; a deploy that passes its check keeps only its own and the one before. An instance whose unit is disabled is
+# left alone: another one serves its tenants (server/tenants.sh merge).
 set -euo pipefail
 HOST=suyiiyii@203.0.113.10
 INSTANCES=${LR_INSTANCES:-/opt/lr-prod:lr-prod /opt/lr-prod2:lr-prod2 /opt/live-record:live-record}
@@ -39,6 +40,9 @@ mode=$2; shift 2
 RUN=$(date +%Y%m%d-%H%M%S)
 TGZ=${LR_TGZ:-/mnt/c/Users/me/lr-deploy.tgz}  # where scp put it (the Windows home); LR_TGZ: test_deploy.py's
 UV=/root/.local/bin/uv
+set -- $(for i in "$@"; do  # without the instances whose unit is disabled (merged into another one: not started again)
+  if [ "$(systemctl is-enabled "${i#*:}" 2> /dev/null)" = enabled ]; then echo "$i"; else echo "  skip ${i%%:*}: ${i#*:} is disabled" >&2; fi
+done)
 
 env_of() { grep "^$2=" "$1/.env" | tail -1 | cut -d= -f2-; }  # dir key: the last one wins, as in systemd
 

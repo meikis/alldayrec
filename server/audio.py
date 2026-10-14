@@ -259,18 +259,38 @@ def fresh(p, end: float) -> tuple[float, np.ndarray] | None:
     return None if x is None or k >= len(x) else (p["start_ms"] + k * 1000 / SR, x[k:])
 
 
+def covered(device: str, ms: int) -> float:
+    """Where the device's pieces starting at or before ms end (unix ms; each piece is far shorter than an hour): what a
+    reader that has had them has heard."""
+    return db.conn().execute("SELECT max(start_ms + seconds * 1000) FROM pieces WHERE device = ? AND start_ms <= ? AND start_ms > ?",
+                             (device, ms, ms - 3600_000)).fetchone()[0] or 0.0
+
+
+def once(rows, end: float) -> tuple[int, float]:
+    """Of (start_ms, seconds) rows in start order, how many add audio after `end` (unix ms) and how many seconds they
+    add: overlapping pieces counted once, as fresh() hands them out."""
+    n, s = 0, 0.0
+    for a, sec in rows:
+        if (b := a + sec * 1000) > end:
+            n, s, end = n + 1, s + (b - max(a, end)) / 1000, b
+    return n, s
+
+
 def queued(device: str) -> int:
-    """Pieces of a device its stream has not handed out yet."""
-    return db.conn().execute("SELECT count(*) FROM pieces WHERE device = ? AND start_ms > ?", (device, T().read_to.get(device, -1))).fetchone()[0]
+    """Pieces of a device its stream has not handed out yet (and will: one another piece covers is not)."""
+    at = T().read_to.get(device, -1)
+    return once(db.conn().execute("SELECT start_ms, seconds FROM pieces WHERE device = ? AND start_ms > ? ORDER BY start_ms", (device, at)),
+                covered(device, at))[0]
 
 
 def backlog(device: str, after: dt.datetime | None) -> tuple[float, dt.datetime | None]:
-    """Seconds of a device's stored audio after `after` (its finalized time), and where its stored audio ends."""
+    """Seconds of a device's stored audio after `after` (its finalized time), overlaps once, and where its stored
+    audio ends."""
     ms = int(after.timestamp() * 1000) if after else 0
-    s, end = db.conn().execute("SELECT sum(min(seconds, (start_ms + seconds * 1000 - ?) / 1000.0)), max(start_ms + seconds * 1000) "
-                               "FROM pieces WHERE device = ? AND start_ms + seconds * 1000 > ?", (ms, device, ms)).fetchone()
+    _, s = once(db.conn().execute("SELECT start_ms, seconds FROM pieces WHERE device = ? AND start_ms + seconds * 1000 > ? ORDER BY start_ms",
+                                  (device, ms)), ms)
     last = db.conn().execute("SELECT max(start_ms + seconds * 1000) FROM pieces WHERE device = ?", (device,)).fetchone()[0]
-    return round(s or 0.0, 1), dt.datetime.fromtimestamp(last / 1000) if last else None
+    return round(s, 1), dt.datetime.fromtimestamp(last / 1000) if last else None
 
 
 def minutes(device: str, lo_ms: int, hi_ms: int) -> list[dict]:
@@ -405,10 +425,7 @@ def newer(device: str, after: int | None) -> tuple[int, int, np.ndarray] | None:
     lo = last["start_ms"] + last["seconds"] * 1000 - LISTEN_BACK_S * 1000
     ps = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms > ? AND start_ms + seconds * 1000 > ? ORDER BY start_ms",
                            (device, last["start_ms"] - 1 if after is None else after, lo)).fetchall()
-    end, xs = 0.0, []
-    if after is not None:  # where the pieces up to `after` end (each far shorter than an hour)
-        end = db.conn().execute("SELECT max(start_ms + seconds * 1000) FROM pieces WHERE device = ? AND start_ms <= ? AND start_ms > ?",
-                                (device, after, after - 3600_000)).fetchone()[0] or 0.0
+    end, xs = covered(device, after) if after is not None else 0.0, []
     for p in ps:
         if got := fresh(p, end):
             end = got[0] + len(got[1]) * 1000 / SR

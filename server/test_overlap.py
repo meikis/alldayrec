@@ -10,6 +10,7 @@ import numpy as np
 import audio
 import db
 import server
+from tenant import T
 from test_backlog import DEVICE, SR, flac, hear, rig, save, tone
 
 N, SLOT = 28, 20  # tones, one 10 s into each 20 s slot, then silence: 607 s
@@ -60,3 +61,15 @@ def test_playback_and_listening_once(tmp_path):
         assert len(got) == int(10.4 * SR) and same(got, s - 0.2), s
     start, _, got = audio.newer(DEVICE, int(at(540).timestamp() * 1000))  # a listener had the live piece up to 560 s
     assert start == int(at(560).timestamp() * 1000) and len(got) == 47 * SR and same(got, 560)
+
+
+def test_backlog_counts_once(tmp_path):
+    """What the pages and the metrics say is left: seconds and pieces, overlaps once."""
+    db.open_db(tmp_path / "live.db")
+    x, t0 = day(tmp_path)
+    assert audio.backlog(DEVICE, None)[0] == len(x) / SR == 607
+    assert audio.backlog(DEVICE, t0 + dt.timedelta(seconds=100))[0] == 507
+    # handed out: the card's 10 and the live pieces reaching past each card piece's end (0 s, then 60 s, 120 s, ... 540 s)
+    assert audio.queued(DEVICE) == 20, "a live piece the card's cover whole is not handed out"
+    T().read_to[DEVICE] = int(t0.timestamp() * 1000) + 60_000  # its reader has had the pieces to the live one at 60 s
+    assert audio.queued(DEVICE) == 9 + 8, "the card's from 67 s on, the live ones from 120 s on"

@@ -1,4 +1,5 @@
-"""deploy.sh installs nothing anywhere while an instance's tenants.json is one its new server would not start with."""
+"""deploy.sh installs nothing anywhere while an instance's tenants.json is one its new server would not start with; it
+leaves an instance whose unit is disabled alone (merged into another one)."""
 import json
 import os
 import subprocess
@@ -21,11 +22,14 @@ def instance(tmp: Path, name: str, tenants: str | None = None, mode: int = 0o600
     return f"{d}:lr-{name}"
 
 
-def deploy(tmp: Path, *instances: str) -> subprocess.CompletedProcess:
+def deploy(tmp: Path, *instances: str, disabled: str = "") -> subprocess.CompletedProcess:
     tgz = tmp / "release.tgz"  # as deploy.sh packs it
     subprocess.run(["tar", "-czf", tgz, "-C", HERE, "./tenant.py"], check=True)
-    return subprocess.run(["bash", HERE / "deploy.sh", "remote", "deploy", *instances], env={**os.environ, "LR_TGZ": str(tgz)},
-                          capture_output=True, text=True)
+    (tmp / "bin").mkdir(exist_ok=True)  # systemctl: every unit enabled but those in $DISABLED
+    (tmp / "bin/systemctl").write_text('#!/bin/sh\ncase " $DISABLED " in *" $2 "*) echo disabled; exit 1;; esac; echo enabled\n')
+    (tmp / "bin/systemctl").chmod(0o755)
+    return subprocess.run(["bash", HERE / "deploy.sh", "remote", "deploy", *instances], capture_output=True, text=True,
+                          env={**os.environ, "LR_TGZ": str(tgz), "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "DISABLED": disabled})
 
 
 def test_stops_before_installing(tmp_path):
@@ -37,3 +41,10 @@ def test_stops_before_installing(tmp_path):
         assert not list(tmp_path.glob("*/backup-*"))
     r = deploy(tmp_path, good)  # passes the check, then fails installing: this fake instance has no server
     assert "migrate first" not in r.stdout and list(tmp_path.glob("good/backup-deploy-*")), r.stdout + r.stderr
+
+
+def test_leaves_disabled_alone(tmp_path):
+    good, merged = instance(tmp_path, "good", GOOD), instance(tmp_path, "merged")  # merged: its tenants in good's tenants.json
+    r = deploy(tmp_path, merged, good, disabled="lr-merged")
+    assert "skip" in r.stderr and "migrate first" not in r.stdout and list(tmp_path.glob("good/backup-deploy-*")), r.stdout + r.stderr
+    assert not list(tmp_path.glob("merged/backup-*"))
