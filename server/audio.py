@@ -5,7 +5,9 @@ hour it starts in, chunks/<device>/<date>/<HH>.<ext>, and indexed in the pieces 
 piece made 3600 tiny files an hour while the app was in front). Each device is its own stream: the pipeline of a device reads `stream(device, after)`, the playback reads `cut()`;
 neither cares about formats, files or piece lengths. A stream pauses when nothing new has arrived and when its reader
 stops asking (it pulls at its own pace), and a gap between two pieces is only a jump in their start times. A device
-that sends a backlog of older audio while another one is recording is streamed on its own, not dropped.
+that sends a backlog of older audio while another one is recording is streamed on its own, not dropped. A device's
+pieces may overlap (a recorder's card read again over what its phone sent live: both kept); each reader takes every
+moment once (fresh).
 """
 import datetime as dt
 import io
@@ -245,6 +247,18 @@ def samples(p) -> np.ndarray | None:
     return x
 
 
+def fresh(p, end: float) -> tuple[float, np.ndarray] | None:
+    """A pieces row's audio after `end` (unix ms: where its device's audio a reader has taken so far ends) and where
+    that starts (unix ms); None when the piece adds nothing (all of it before `end`: not decoded; not audio). Pieces
+    of a device may overlap (#217: 10-12 859 of 3184 of LR-P3-BDAE's, by 22 s median, up to 60 s): a reader taking
+    them in start order whole went back in time at the second copy and heard what was said there twice."""
+    if p["start_ms"] + p["seconds"] * 1000 <= end:
+        return None
+    x = samples(p)
+    k = max(0, round((end - p["start_ms"]) * SR / 1000))
+    return None if x is None or k >= len(x) else (p["start_ms"] + k * 1000 / SR, x[k:])
+
+
 def queued(device: str) -> int:
     """Pieces of a device its stream has not handed out yet."""
     return db.conn().execute("SELECT count(*) FROM pieces WHERE device = ? AND start_ms > ?", (device, T().read_to.get(device, -1))).fetchone()[0]
@@ -314,16 +328,16 @@ def hold_seen(device: str) -> float | None:
 
 async def stream(device: str, after: dt.datetime | None, edge_s: float | None = None):
     """(start time, samples) of one device in time order, from the piece holding `after` (its first piece when None),
-    forever. A piece arriving older than one already handed out is kept for playback but not streamed: a phone that
-    sends what is said now ahead of older audio holds the queue (hold()) until the older audio is in. edge_s: only
-    the device's newest edge_s seconds (before its newest piece's end or the clock, whichever is later), for a reader
-    of what is said now: older pieces, a backlog arriving, are skipped; such a reader is not the device's queue
-    (read_to, queued)."""
+    forever, each moment once (fresh). A piece arriving older than one already handed out is kept for playback but not
+    streamed: a phone that sends what is said now ahead of older audio holds the queue (hold()) until the older audio
+    is in. edge_s: only the device's newest edge_s seconds (before its newest piece's end or the clock, whichever is
+    later), for a reader of what is said now: older pieces, a backlog arriving, are skipped; such a reader is not the
+    device's queue (read_to, queued)."""
     ms = int(after.timestamp() * 1000) if after else 0
     p = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms + seconds * 1000 > ? ORDER BY start_ms LIMIT 1", (device, ms)).fetchone()
     # from `after` (or the piece holding it), not from the first piece there is now: that one may be held, older
     # audio after `after` still on its way (#130: a pipeline started mid catch-up took 3 such pieces as late)
-    at, lo = min(p["start_ms"] - 1, ms) if p else ms, 0
+    at, lo, end = min(p["start_ms"] - 1, ms) if p else ms, 0, 0.0
     while True:
         if edge_s is None:
             T().read_to[device] = at  # the reader came back for more, so the piece it had is done
@@ -337,10 +351,12 @@ async def stream(device: str, after: dt.datetime | None, edge_s: float | None = 
         if p is None:
             await anyio.sleep(1)
             continue
-        x = await anyio.to_thread.run_sync(samples, p, limiter=threads.MEDIA)
-        if x is not None:
-            yield dt.datetime.fromtimestamp(p["start_ms"] / 1000), x
+        got = await anyio.to_thread.run_sync(fresh, p, end, limiter=threads.MEDIA)
         at = p["start_ms"]
+        if got is not None:
+            s, x = got
+            end = s + len(x) * 1000 / SR
+            yield dt.datetime.fromtimestamp(s / 1000), x
 
 
 def cut(a: dt.datetime, b: dt.datetime, fmt: str, device: str | None = None) -> bytes | None:
@@ -350,12 +366,16 @@ def cut(a: dt.datetime, b: dt.datetime, fmt: str, device: str | None = None) -> 
     pieces = db.conn().execute(
         "SELECT * FROM pieces WHERE start_ms <= ? AND start_ms + seconds * 1000 >= ? AND (? IS NULL OR device = ?) ORDER BY start_ms",
         (b_ms, a_ms, device, device)).fetchall()
-    xs = [x for x in map(samples, pieces) if x is not None]
+    xs, end = [], {}
+    for p in pieces:
+        if got := fresh(p, end.get(p["device"], 0.0)):
+            end[p["device"]] = got[0] + len(got[1]) * 1000 / SR
+            xs.append(got)
     if not xs:
         return None
     # concatenated back to back (the small gaps between pieces are ignored)
-    i = int(max(0.0, (a_ms - pieces[0]["start_ms"]) / 1000 - 0.2) * SR)
-    x = np.concatenate(xs)[i:i + int(((b - a).total_seconds() + 0.4) * SR)]
+    i = int(max(0.0, (a_ms - xs[0][0]) / 1000 - 0.2) * SR)
+    x = np.concatenate([x for _, x in xs])[i:i + int(((b - a).total_seconds() + 0.4) * SR)]
     if not len(x):
         return None
     return x.tobytes() if fmt == "s16le" else wav(x)
@@ -377,15 +397,23 @@ LISTEN_BACK_S = 30  # a listener asking from further back than this before a dev
 def newer(device: str, after: int | None) -> tuple[int, int, np.ndarray] | None:
     """For listening in on a device: its pieces starting after `after` (unix ms; None: its newest piece only), within
     LISTEN_BACK_S of its newest audio (a page back from the background, a backlog arriving), back to back; with the
-    first one's start and the last one's (the next `after`). None when there is none."""
+    first one's start and the last one's (the next `after`); each moment once (fresh), also across calls: what the
+    pieces up to `after` covered is not sent again. None when there is none."""
     last = db.conn().execute("SELECT start_ms, seconds FROM pieces WHERE device = ? ORDER BY start_ms DESC LIMIT 1", (device,)).fetchone()
     if last is None:
         return None
     lo = last["start_ms"] + last["seconds"] * 1000 - LISTEN_BACK_S * 1000
     ps = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms > ? AND start_ms + seconds * 1000 > ? ORDER BY start_ms",
                            (device, last["start_ms"] - 1 if after is None else after, lo)).fetchall()
-    xs = [x for x in map(samples, ps) if x is not None]
-    return (ps[0]["start_ms"], ps[-1]["start_ms"], np.concatenate(xs)) if xs else None
+    end, xs = 0.0, []
+    if after is not None:  # where the pieces up to `after` end (each far shorter than an hour)
+        end = db.conn().execute("SELECT max(start_ms + seconds * 1000) FROM pieces WHERE device = ? AND start_ms <= ? AND start_ms > ?",
+                                (device, after, after - 3600_000)).fetchone()[0] or 0.0
+    for p in ps:
+        if got := fresh(p, end):
+            end = got[0] + len(got[1]) * 1000 / SR
+            xs.append(got)
+    return (round(xs[0][0]), ps[-1]["start_ms"], np.concatenate([x for _, x in xs])) if xs else None
 
 
 if __name__ == "__main__":  # the stream's order, resume point and late pieces, on synthetic tones
