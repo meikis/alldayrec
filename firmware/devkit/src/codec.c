@@ -29,6 +29,7 @@ void set_codec_callback(codec_callback callback)
 //
 
 uint8_t codec_ring_buffer_data[AUDIO_BUFFER_SAMPLES * 2]; // 2 bytes per sample
+static K_SEM_DEFINE(codec_sem, 0, 1);  // given with each mic buffer
 struct ring_buf codec_ring_buf;
 int codec_receive_pcm(int16_t *data, size_t len) // this gets called after mic data is finished
 {
@@ -38,6 +39,7 @@ int codec_receive_pcm(int16_t *data, size_t len) // this gets called after mic d
         LOG_ERR("Failed to write %d bytes to codec ring buffer", len * 2);
         return -1;
     }
+    k_sem_give(&codec_sem);
 
     return 0;
 }
@@ -74,8 +76,8 @@ void codec_entry()
 
         // Check if we have enough data
         if (ring_buf_size_get(&codec_ring_buf) < CODEC_PACKAGE_SAMPLES * 2) {
-            // LOG_PRINTK("waiting on data....\n");
-            k_sleep(K_MSEC(10));
+            // woken by the next mic buffer, not polled: a frame is encoded as it comes, not up to 10 ms later
+            k_sem_take(&codec_sem, K_MSEC(100));
             continue;
         }
         // Read package

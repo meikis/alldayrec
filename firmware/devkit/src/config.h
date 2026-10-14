@@ -7,7 +7,10 @@
 #define MIC_GAIN 0x28
 #define MIC_HPF_HZ 80              // 4th-order Butterworth high-pass before the codec: the PDM path carries 2-20 Hz at up to -8 dBFS
 #define MIC_IRC_PRIORITY 7
-#define MIC_BUFFER_SAMPLES 1600    // 100ms
+// 10 ms, one codec frame: each frame is encoded as it comes (~6 ms of CPU). With 100 ms buffers the codec encoded ten
+// back to back, the CPU busy ~65 of every 100 ms, and on battery that load reached the mic: the 2-7.5 kHz noise floor
+// in those 65 ms was up to 1.7x (+2.4 dB) the rest's, an audible 10 Hz flutter in a quiet room. On USB it does not show.
+#define MIC_BUFFER_SAMPLES 160
 #define AUDIO_BUFFER_SAMPLES 16000 // 1s
 #define NETWORK_RING_BUF_SIZE 32   // number of frames * CODEC_OUTPUT_MAX_BYTES
 #define MINIMAL_PACKET_SIZE 100    // Less than that doesn't make sence to send anything at all
