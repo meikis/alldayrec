@@ -116,6 +116,7 @@ static void close_segment(void)
 }
 
 static bool append_failed;  // only the first failure of a run goes to the event log
+static int retries;  // tries of the card (retry_card) since it last took a write (append): a mount alone is not a card that works (#198)
 
 /* Appends summed up for 10 minutes into one SD_WRITES event: how long the card keeps the chip busy (power, #95) */
 static struct {
@@ -215,6 +216,9 @@ static int append(uint32_t len)
         log_sd_errors();
     }
     append_failed = err;
+    if (!err) {
+        retries = 0;
+    }
     return err;
 }
 
@@ -812,16 +816,19 @@ static int card_init(int (*mount)(void), uint16_t *counted);
  * once a minute, RETRY_RESETS times; then every 10 minutes, so a dead or missing card is not knocked on for good. A
  * card not there at boot gets the resets alone: one put in later did not mount by plain tries (BDAE 10-14: none at
  * boot 01:50, one put in ~02:2x was not up by 02:31, tried once a minute all the while; the next boot's reset mounted
- * it at once): boot's own reset (sdcard.c, sd_spi_reset) is what wakes a card up properly. */
+ * it at once): boot's own reset (sdcard.c, sd_spi_reset) is what wakes a card up properly. The tries count until the
+ * card takes a write again, not until it mounts: one that reads but does not write mounted at every quick try, each
+ * mount started the count again and the reset never came (#198: BDAE 10-11, writes stuck busy 57 s, then EIO, then
+ * mounted again, over and over). A working card is looked at every RETRY_FAST_MS: back by a reset, the next failure
+ * is tried again in seconds once it has taken a write, not in 10 minutes. */
 #define RETRY_FAST 6
 #define RETRY_FAST_MS 5000
 #define RETRY_RESETS 3
-static int retries;  // tries of a failed card since it last worked
 
 static int64_t retry_every(void)
 {
     int fast = boot ? RETRY_FAST : 0;
-    return retries < fast ? RETRY_FAST_MS : retries < fast + RETRY_RESETS ? 60000 : 600000;
+    return !store_err || retries < fast ? RETRY_FAST_MS : retries < fast + RETRY_RESETS ? 60000 : 600000;
 }
 
 /* A card that failed (a write, the mount, none at boot) is tried again (retry_every), one mount try, the SD mutex
@@ -831,7 +838,6 @@ static int64_t retry_every(void)
 static void retry_card(void)
 {
     if (!store_err || store_err == -EBUSY || store_err == -ENOSPC) {
-        retries = 0;
         return;
     }
     k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
@@ -846,7 +852,7 @@ static void retry_card(void)
         err = card_init(mount_sd_card_reset, &was);  // counts the boot
     }
     k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
-    retries = err ? retries + 1 : 0;
+    retries++;  // a mount too: only a write (append) says the card works
     if (!err) {
         k_mutex_lock(&stream_mtx, K_FOREVER);
         flush();  // the stream's last records go with the file they are in (not on the card)

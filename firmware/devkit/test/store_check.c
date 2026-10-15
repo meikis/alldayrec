@@ -164,7 +164,7 @@ uint32_t lr_log_read(uint32_t from, uint8_t *buf, uint16_t max, bool (*send)(uin
 void unmount_sd_card(void) {}
 
 // a phone following the stream: file -> bytes by offset
-#define FILES 8
+#define FILES 24
 static uint8_t phone[FILES][1 << 16];
 static uint32_t phone_len[FILES];
 static const struct bt_gatt_attr *data_attr, *ctrl_attr;  // READ's: DATA offset:u32 bytes..., CTRL replies
@@ -360,10 +360,11 @@ int main(void)
     assert(mounts == 6 && resets == 3 && retries == 9 && retry_every() == 600000);
     retry_card();  // the reset brings it back
     assert(mounts == 6 && resets == 4 && store_err == 0);
-    assert(retries == 0 && retry_every() == 5000);
+    assert(retries == 10 && retry_every() == 5000);  // looked at every 5 s; counted on until it takes a write
     mounts = 0;
     frames(1700, 500);
     flush();
+    assert(retries == 0);
     assert(seg == 1 && card_len[1] == phone_len[1] && memcmp(card[1], phone[1], card_len[1]) == 0);
     a = t = 0;
     parse(phone[0], phone_len[0], &a, &t);
@@ -579,6 +580,37 @@ int main(void)
         assert(store_err == 0 && seg == s0 + 3);
     }
 
+    // a card that reads but does not write (#198: BDAE 10-11, the injector's "busy after a write"): every try mounts it,
+    // its next write fails again. That is no card back: the tries count on, 6 quick mounts, then resets from scratch
+    // once a minute 3 times, then every 10 minutes. Mounted, it is looked at every 5 s; once a write goes, quick again
+    {
+        mounts = resets = mount_fails = 0;
+        frames(rec_next, 50);
+        flush();
+        assert(store_err == 0 && retries == 0);
+        card_fail = -EIO;
+        frames(rec_next, 50);
+        flush();
+        assert(store_err == -EIO);
+        int64_t every[10], want[10] = {5000, 5000, 5000, 5000, 5000, 5000, 60000, 60000, 60000, 600000};
+        for (int i = 0; i < 10; i++) {
+            every[i] = retry_every();
+            retry_card();
+            assert(store_err == 0 && retry_every() == 5000);  // mounted: reads work
+            frames(rec_next, 50);
+            flush();
+            assert(store_err == -EIO);  // the first write fails
+            assert(mounts == MIN(i + 1, 6) && resets == MAX(i - 5, 0));
+        }
+        assert(retries == 10 && memcmp(every, want, sizeof(want)) == 0 && retry_every() == 600000);
+        card_fail = 0;  // the reset wakes it up
+        retry_card();
+        assert(store_err == 0 && resets == 5 && retries == 11);
+        frames(rec_next, 50);
+        flush();
+        assert(store_err == 0 && retries == 0 && retry_every() == 5000 && card_len[seg] == phone_len[seg]);
+    }
+
     // none at boot (BDAE 10-14: one put in later did not mount by plain tries): from scratch from the first try, once a
     // minute 3 times, then every 10 minutes; back, it counts this boot then and starts at its segment 0
     boot = 0, store_err = -ETIMEDOUT, retries = 0, mounts = resets = 0, mount_fails = 4, n_logged = 0;
@@ -591,7 +623,7 @@ int main(void)
     assert(mounts == 0 && resets == 4 && store_err == -ETIMEDOUT && boot == 0 && n_logged == 0);
     uint16_t counted = sys_get_le16(boot_file);
     retry_card();
-    assert(mounts == 0 && resets == 5 && store_err == 0 && boot == counted + 1 && seg == 0 && retries == 0);
+    assert(mounts == 0 && resets == 5 && store_err == 0 && boot == counted + 1 && seg == 0 && retries == 5 && retry_every() == 5000);
     assert(n_logged == 2 && logged[0].code == LR_STORE && logged[1].code == LR_SEGMENT && logged[1].a == (uint32_t) boot << 16);
     printf("store_check ok: %u + %u + %u B on the card\n", card_len[0], card_len[1], card_len[2]);
     return 0;
