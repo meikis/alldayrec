@@ -34,8 +34,9 @@ def _body(x: np.ndarray) -> bytes:
 
 
 async def sse(x: np.ndarray, on_sentence=None) -> list[dict]:
-    """x: 16 kHz int16 PCM. Its deltas [{delta, start_time, end_time}] (ms into x); on_sentence(deltas so far) whenever
-    one ends a sentence or starts one after a pause (see sentences), as each arrives.
+    """x: 16 kHz int16 PCM. Its deltas [{delta, start_time, end_time}] (ms into x), runs on one time spread out
+    (spread: every reader, final and draft, gets them so); on_sentence(deltas so far) whenever one ends a sentence or
+    starts one after a pause (see sentences), as each arrives.
     Raises on an HTTP error (402 balance, 429 rate, 451 refused) and unless transcript.text.done arrives (a cut stream)."""
     body = await anyio.to_thread.run_sync(_body, x, limiter=threads.MEDIA)  # a 5 min window is 13 MB of JSON: ~35 ms, off the event loop
     out = []
@@ -54,12 +55,39 @@ async def sse(x: np.ndarray, on_sentence=None) -> list[dict]:
                     pause = bool(out) and a is not None and a - (out[-1].get("end_time") or a) > GAP_MS
                     out.append(m)
                     if on_sentence and (pause or t[-1:] and t[-1] in END):
-                        on_sentence(out)
+                        on_sentence(spread(out))
                 elif m.get("type") == "transcript.text.done":
-                    return out
+                    return spread(out, len(x) / 16)  # x's ms at 16 kHz
                 elif "error" in m or m.get("type", "").endswith("error"):
                     raise RuntimeError(f"stepfun sse: {str(m)[:200]}")
     raise RuntimeError(f"stepfun sse: no transcript.text.done after {len(out)} deltas")
+
+
+def spread(deltas: list[dict], end_ms: float | None = None) -> list[dict]:
+    """The deltas, each run of them on one time (the same start_time and end_time) spread evenly from the end of the
+    delta before it (0 at the start) to the start of the one after it (end_ms, the audio's end, at the end): StepFun
+    sometimes gives a stretch of speech one time (#234: 10-15 460 deltas, 118 s, on one instant: rows of no length,
+    every file sentence of the stretch dropped). A run the delta after it does not follow (it starts on or before the
+    run's time: also each burst of fast speech) stays as it is. end_ms None (the stream goes on): a run at the end is
+    left out until the delta after it comes. Copies; the deltas given stay as they are."""
+    out, i = [], 0
+    while i < len(deltas):
+        j, t = i + 1, (deltas[i].get("start_time"), deltas[i].get("end_time"))
+        while j < len(deltas) and (deltas[j].get("start_time"), deltas[j].get("end_time")) == t:
+            j += 1
+        run = [dict(x) for x in deltas[i:j]]
+        if len(run) > 1 and t[0] is not None:
+            if j == len(deltas) and end_ms is None:
+                break
+            a = next((x["end_time"] for x in reversed(deltas[:i]) if x.get("end_time") is not None), 0)
+            b = next((x["start_time"] for x in deltas[j:] if x.get("start_time") is not None), end_ms)
+            if b is not None and b > max(a, t[0]):
+                step = (b - a) / len(run)
+                for k, x in enumerate(run):
+                    x["start_time"], x["end_time"] = round(a + k * step), round(a + (k + 1) * step)
+        out += run
+        i = j
+    return out
 
 
 def sentences(deltas: list[dict]) -> list[dict]:
