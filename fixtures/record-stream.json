@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "notes": {
+    "web": "RecordStream follows one file; no persisted boot reuse or undated archive API. cut flushes the last run.",
+    "python": "runs consumes complete file snapshots; assemble tests transport holes separately. No persistent mirror/reused API.",
+    "native": "Mirror buffers incomplete records and flushes the last run only when the file closes.",
+    "ogg": "Compare page structure, not whole bytes: serial numbers are random."
+  },
+  "mirror": {
+    "file": 65539,
+    "hex": "410a00000000020000020101020202020303020404020505020606020707020808020909410a0a000000020000020101020202020303020404020505020606020707020808020909541400000040420f0000000000410a14000000020000020101020202020303020404020505020606020707020808020909410a28000000020000020101020202020303020404020505020606020707020808020909",
+    "liveFrames": 15,
+    "deliveries": [
+      {
+        "start": 0,
+        "end": 40,
+        "hole": null
+      },
+      {
+        "start": 60,
+        "end": 80,
+        "hole": 40
+      },
+      {
+        "start": 30,
+        "end": 157,
+        "hole": null
+      }
+    ],
+    "pieces": [
+      [
+        999800,
+        20
+      ],
+      [
+        1000000,
+        10
+      ],
+      [
+        1000200,
+        10
+      ]
+    ]
+  },
+  "archive": {
+    "files": [
+      {
+        "file": 65536,
+        "hex": "41030000000002000002010102020241020300000002000002010154040000001027000000000000410109000000020000"
+      },
+      {
+        "file": 65537,
+        "hex": "41010a0000000200"
+      },
+      {
+        "file": 131072,
+        "hex": "410200000000020000020101"
+      },
+      {
+        "file": 196608,
+        "hex": "410a280000000200000201010202020203030204040205050206060207070208080209095432000000b882010000000000"
+      }
+    ],
+    "runs": [
+      [
+        9960,
+        5
+      ],
+      [
+        10050,
+        1
+      ],
+      [
+        null,
+        2
+      ],
+      [
+        98900,
+        10
+      ]
+    ]
+  },
+  "reuse": {
+    "file": 458752,
+    "hex": "548813000050f9ebffa0010000410a88130000020000020101020202020303020404020505020606020707020808020909",
+    "cases": [
+      {
+        "frame": 7000,
+        "at": 1791000100000,
+        "reused": false
+      },
+      {
+        "frame": 3000,
+        "at": 1791000085000,
+        "reused": true
+      },
+      {
+        "frame": 7000,
+        "at": 1791259300000,
+        "reused": true
+      }
+    ]
+  },
+  "ogg": {
+    "packetHex": "f8fffe",
+    "count": 120,
+    "pages": 5
+  }
+}

@@ -205,35 +205,57 @@ def conversations(lo: str | None = None, hi: str | None = None) -> list[dict]:
             for r in conn().execute(q + (" ORDER BY c.start" if lo else " ORDER BY c.start DESC"), args)]
 
 
+def _metadata_contains(fields: str | None, q: str) -> bool:
+    # Keep Python's Unicode lower() and JSON spacing/escaping: queries may themselves
+    # contain JSON punctuation. SQLite extracts only the searchable fields, not the body.
+    meta = json.loads(fields) if fields else [None] * 5
+    return q in json.dumps(meta, ensure_ascii=False).lower()
+
+
 def search(q: str = "", tag: str = "", kind: str = "", who: str = "", after: str = "", before: str = "", limit: int = 30) -> list[dict]:
-    """Closed conversations newest first, filtered by a tag and by words in the title, summary, tags or todos (and in
-    the transcript when the summary does not match), by a participant, a kind, and by start time in [after, before)."""
-    out = []
-    for c in conversations():
-        s = c["summary"] or {}
-        if after and c["start"] < after:
-            break
-        if before and c["start"] >= before or who and who not in (c.get("participants") or []) or tag and tag not in (s.get("tags") or []) or kind and c.get("kind", "对话") != kind:
-            continue
-        if q:
-            meta = json.dumps([s.get(k) for k in ("title", "summary", "tags", "todos", "decisions")], ensure_ascii=False)
-            if q.lower() not in meta.lower() and not has_text(c["start"], c["end"], q, c.get("device")):
-                continue
-        out.append(c)
-        if len(out) == limit:
-            break
-    return out
+    """Closed conversations newest first, with metadata/transcript filters and start in [after, before).
+
+    JSON1 handles membership/extraction; Python retains the metadata search's Unicode
+    and serialization semantics. Transcript matching remains case-sensitive instr().
+    """
+    clauses, args = [], []
+    for value, clause in (
+        (after, "c.start >= ?"),
+        (before, "c.start < ?"),
+        (who, "EXISTS (SELECT 1 FROM json_each(c.participants) WHERE value = ?)"),
+        (tag, "EXISTS (SELECT 1 FROM json_each(s.body, '$.tags') WHERE value = ?)"),
+        (kind, "coalesce(c.kind, '对话') = ?"),
+    ):
+        if value:
+            clauses.append(clause)
+            args.append(value)
+    connection = conn()
+    if q:
+        connection.create_function("metadata_contains", 2, _metadata_contains, deterministic=True)
+        clauses.append("""(metadata_contains(json_extract(s.body, '$.title', '$.summary', '$.tags', '$.todos', '$.decisions'), ?)
+            OR EXISTS (SELECT 1 FROM sentences t
+                       WHERE t.start >= c.start AND t.start <= c.end
+                       AND (c.device IS NULL OR t.source = c.device) AND instr(t.text, ?)))""")
+        args.extend((q.lower(), q))
+    query = "SELECT c.*, s.body FROM conversations c LEFT JOIN summaries s ON s.conversation = c.id"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    # Historically zero and negative limits meant no limit (the counter never equalled them).
+    query += " ORDER BY c.start DESC LIMIT ?"
+    args.append(limit if limit > 0 else -1)
+    return [{**_conversation(r), "summary": json.loads(r["body"]) if r["body"] else None}
+            for r in connection.execute(query, args)]
 
 
 def names() -> dict[str, int]:
     """Names in use and their conversations, most first; a voice in the people bank with none yet at 0."""
     n = {}
-    for c in conversations():
-        for p in c.get("participants") or []:
+    for r in conn().execute("SELECT participants FROM conversations ORDER BY start DESC"):
+        for p in json.loads(r["participants"]) or []:
             if p != "我" and not re.fullmatch(r"S(\d+|\?)", p):
                 n[p] = n.get(p, 0) + 1
-    for p in people():
-        n.setdefault(p, 0)
+    for r in conn().execute("SELECT name FROM people"):
+        n.setdefault(r["name"], 0)
     return dict(sorted(n.items(), key=lambda kv: -kv[1]))
 
 

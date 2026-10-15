@@ -46,20 +46,20 @@ def test_ask(tmp_path, monkeypatch):
             finals = lambda: db.sentences(server.iso(t0), "~", source=DEVICE)
             for _ in range(60):
                 await anyio.sleep(0.5)
-                if st()["conversation"] and len(finals()) == 4:
+                if st().conversation and len(finals()) == 4:
                     break
-            speech = st()["conversation"]["speech_s"]
-            assert 10 < speech < 60, st()["conversation"]
-            assert not calls and not st()["live"], "under a minute: no analysis by itself"
+            speech = st().conversation["speech_s"]
+            assert 10 < speech < 60, st().conversation
+            assert not calls and not st().live, "under a minute: no analysis by itself"
 
             assert await server.live_ask(DEVICE) == {"analyzing": True}
             assert server.device_status(DEVICE, st())["analyzing"]
             assert await asked() == "正在分析"
             for _ in range(20):
-                if st()["live"]:
+                if st().live:
                     break
                 await anyio.sleep(0.2)
-            assert st()["live"]["asked"] and st()["live"]["topics"] and len(calls) == 1
+            assert st().live["asked"] and st().live["topics"] and len(calls) == 1
             assert not server.device_status(DEVICE, st())["analyzing"]
             assert await asked() == "没有新的语音", "no wait between asks: only speech it has not seen"
 
@@ -70,7 +70,7 @@ def test_ask(tmp_path, monkeypatch):
                 await anyio.sleep(0.5)
             c = T().summaries[1].receive_nowait()
             assert c["via_live"] and c["speech_s"] == speech and db.timeline(c["id"])["asked"]
-            assert not st()["live"] and await asked() == "没有进行中的对话"
+            assert not st().live and await asked() == "没有进行中的对话"
             res = await server.summarize(c, [])
             assert res["via"] == "live" and res["title"] == "短的" and len(calls) == 2, "asked: the agent writes the summary"
             db.put_timeline(c["id"], {**db.timeline(c["id"]), "asked": False})
@@ -84,7 +84,7 @@ def test_ask(tmp_path, monkeypatch):
 def test_ask_without_pipeline(monkeypatch):
     """A device without its pipeline (none, or one whose state exists but did not get as far as its ask: starting, or
     failed on the way and waiting for lasting() to restart it): 404, not a KeyError's 500."""
-    db.open_db(Path(tempfile.mkdtemp()) / "t.db").devices["starting"] = {"live": None}
+    db.open_db(Path(tempfile.mkdtemp()) / "t.db").devices["starting"] = server.PipelineState()
     for device in ("nobody", "starting"):
         with pytest.raises(HTTPException) as e:
             anyio.run(server.live_ask, device)

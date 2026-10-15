@@ -1,6 +1,6 @@
 // mergeNearby: the add-recorder page's rows keep their places while scans come and go.
 import 'package:flutter_test/flutter_test.dart';
-import 'package:live_record/main.dart';
+import 'package:live_record/add_recorder_page.dart';
 
 // a scan entry as Recorder.nearby gives it; the native lists come strongest first
 Map rec(String name, int rssi, {String? address}) =>

@@ -9,10 +9,56 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
+import org.json.JSONObject
 
 /** The record stream as the phone takes it: mirror (LIVE with holes READ again), pieces dated by the nearest 'T',
  *  frames held for a boot without one, closed files finished and deletable once their pieces are uploaded. */
 class StoreTest {
+    private val fixture = JSONObject(javaClass.getResource("/record-stream.json")!!.readText())
+    private fun hex(s: String) = s.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    private fun frames(file: File): Long {
+        val b = file.readBytes()
+        val last = String(b, Charsets.ISO_8859_1).lastIndexOf("OggS")
+        return ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN).getLong(last + 6) / 480
+    }
+
+    @Test fun sharedArchive() {
+        val v = fixture.getJSONObject("archive")
+        val files = v.getJSONArray("files")
+        val m = Mirror(tmp()); val out = tmp(); val undated = tmp()
+        val sizes = mutableMapOf<Long, Long>()
+        for (i in 0 until files.length()) {
+            val f = files.getJSONObject(i)
+            val bytes = hex(f.getString("hex"))
+            m.put(f.getLong("file"), 0, bytes)
+            sizes[f.getLong("file")] = bytes.size.toLong()
+        }
+        m.listed(sizes, 4L shl 16)
+        m.pieces(out, undated, "X", 15, 4)
+        val runs = v.getJSONArray("runs")
+        for (i in 0 until runs.length()) {
+            val r = runs.getJSONArray(i)
+            val file = if (r.isNull(0)) undated.listFiles()!!.single() else File(out, "${r.getLong(0)}@X.ogg")
+            assertEquals(r.getLong(1), frames(file))
+        }
+        assertEquals(runs.length() - 1, out.listFiles()!!.size)
+    }
+    private fun pieceNames(v: JSONObject, count: Int) = (0 until count).map {
+        "${v.getJSONArray("pieces").getJSONArray(it).getLong(0)}@LR-P1-BDAE.ogg"
+    }
+
+    @Test fun sharedReuseBoundaries() {
+        val v = fixture.getJSONObject("reuse")
+        val cases = v.getJSONArray("cases")
+        for (i in 0 until cases.length()) {
+            val c = cases.getJSONObject(i)
+            val m = Mirror(tmp())
+            val f = v.getLong("file")
+            m.put(f, 0, hex(v.getString("hex")))
+            assertEquals(c.getBoolean("reused"), m.reused(f shr 16, c.getLong("frame"),
+                c.getLong("at"), tmp(), tmp(), "X"))
+        }
+    }
     private fun le(n: Int, fill: ByteBuffer.() -> Unit) = ByteBuffer.allocate(n).order(ByteOrder.LITTLE_ENDIAN).apply(fill).array()
     private fun a(first: Int, n: Int) = le(6) { put('A'.code.toByte()); put(n.toByte()); putInt(first) } +
         (0 until n).flatMap { listOf<Byte>(2, it.toByte(), it.toByte()) }.toByteArray()
@@ -22,25 +68,29 @@ class StoreTest {
 
     @Test fun mirror() {
         val dir = tmp(); val out = tmp(); val undated = tmp()
-        val f = 1L shl 16 or 3  // boot 1, segment 3: the open file
-        val stream = a(0, 10) + a(10, 10) + t(20, 1_000_000) + a(20, 10) + a(40, 10)  // frames 30..39 lost on the way
+        val v = fixture.getJSONObject("mirror")
+        val f = v.getLong("file")
+        val stream = hex(v.getString("hex"))
         val m = Mirror(dir)
-        assertNull(m.put(f, 0, stream.copyOfRange(0, 40)))
-        assertEquals(40L, m.put(f, 60, stream.copyOfRange(60, 80)))  // a lost notify: READ from 40
-        assertNull(m.put(f, 30, stream.copyOfRange(30, stream.size)))  // READ: overlaps what is there
+        val deliveries = v.getJSONArray("deliveries")
+        for (i in 0 until deliveries.length()) {
+            val d = deliveries.getJSONObject(i)
+            val hole = if (d.isNull("hole")) null else d.getLong("hole")
+            assertEquals(hole, m.put(f, d.getLong("start"), stream.copyOfRange(d.getInt("start"), d.getInt("end"))))
+        }
         assertEquals(stream.size.toLong(), m.have(f))
         m.listed(mapOf(f to 80L), f)
 
         // the open file: pieces of >= 15 frames at record ends, a gap ends one, the last frames wait
         assertEquals(2, m.pieces(out, undated, "LR-P1-BDAE", 15, 1))
-        assertEquals(listOf("999800@LR-P1-BDAE.ogg", "1000000@LR-P1-BDAE.ogg"), names(out))
+        assertEquals(pieceNames(v, 2), names(out))
 
         // the stream moved on (the board rebooted: boot 2): this file is closed and whole, its last frames go too
         val g = 2L shl 16
         assertNull(m.put(g, 0, a(0, 5)))  // boot 2, no 'T' yet: waits
         m.listed(mapOf(f to stream.size.toLong(), g to 21L), g)
         assertEquals(1, m.pieces(out, undated, "LR-P1-BDAE", 15, 2))
-        assertEquals("1000200@LR-P1-BDAE.ogg", names(out).last())
+        assertEquals(pieceNames(v, 3).last(), names(out).last())
         assertEquals(emptyList<Long>(), m.done(out))  // pieces not uploaded yet
         out.listFiles()!!.forEach { it.delete() }   // the uploader took them
         assertEquals(listOf(f), m.done(out))
@@ -194,8 +244,9 @@ class StoreTest {
     }
 
     @Test fun ogg() {
-        val ogg = Store.oggOpus(List(120) { byteArrayOf(0xF8.toByte(), 0xFF.toByte(), 0xFE.toByte()) })
-        assertEquals(5, Regex("OggS").findAll(String(ogg, Charsets.ISO_8859_1)).count())
+        val v = fixture.getJSONObject("ogg")
+        val ogg = Store.oggOpus(List(v.getInt("count")) { hex(v.getString("packetHex")) })
+        assertEquals(v.getInt("pages"), Regex("OggS").findAll(String(ogg, Charsets.ISO_8859_1)).count())
     }
 }
 

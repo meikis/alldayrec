@@ -117,12 +117,12 @@ def test_backlog_does_not_hold_drafts(tmp_path, monkeypatch):
                     await anyio.sleep(live0.timestamp() + k + 1 - time.time())
                     await anyio.to_thread.run_sync(save, live0 + dt.timedelta(seconds=k), body)
             for _ in range(20):  # the last tone's pause has just come in
-                if {str(N + j) for j in range(LIVE_S // 5)} <= {r["text"] for r in st()["drafts"]}:
+                if {str(N + j) for j in range(LIVE_S // 5)} <= {r["text"] for r in st().drafts}:
                     break
                 await anyio.sleep(0.5)
             drafts = db.drafts("", None, DEVICE)
             assert [r["text"] for r in drafts if int(r["text"]) >= N] == [str(N + j) for j in range(LIVE_S // 5)], drafts
-            assert st()["done_to"] is None or st()["done_to"] < t0 + dt.timedelta(seconds=PIECE_S), "the final layer was to be busy"
+            assert st().done_to is None or st().done_to < t0 + dt.timedelta(seconds=PIECE_S), "the final layer was to be busy"
             edge = live0 - dt.timedelta(seconds=PIECE_S + server.DRAFT_BACK_S)
             assert all(r["start"] >= server.iso(edge) for r in drafts), "the backlog is not drafted"
             assert sent["draft"] < server.DRAFT_BACK_S + LIVE_S, sent
@@ -130,7 +130,7 @@ def test_backlog_does_not_hold_drafts(tmp_path, monkeypatch):
                 if fed and fed[-1] and fed[-1][-1] == N + LIVE_S // 5 - 1:
                     break
                 await anyio.sleep(0.5)
-            lv = st()["live"]
+            lv = st().live
             assert lv and lv["start"] >= server.iso(edge) and lv["topics"], lv and server.live.public(lv)
             assert fed and fed[-1][-1] == N + LIVE_S // 5 - 1 and min(min(f) for f in fed) >= N - server.DRAFT_BACK_S // PIECE_S - 1, fed
 
@@ -142,7 +142,7 @@ def test_backlog_does_not_hold_drafts(tmp_path, monkeypatch):
                 await anyio.sleep(0.5)
             assert [r["text"] for r in finals()] == [str(i) for i in range(N)], [r["text"] for r in finals()][:20]
             await anyio.sleep(3)  # the final layer's turn of the live analysis, now that the conversation is final
-            assert st()["live"]["start"] == lv["start"], "the same live analysis goes on"
+            assert st().live["start"] == lv["start"], "the same live analysis goes on"
             assert len(sum(fed, [])) == len(set(sum(fed, []))), fed
             tg.cancel_scope.cancel()
 
@@ -187,12 +187,12 @@ def test_hold_keeps_backlog_final(tmp_path, monkeypatch):
                     if k == 4:
                         rest.start_soon(anyio.to_thread.run_sync, card)
             for _ in range(60):
-                if len(finals()) >= n and {str(n + j) for j in range(LIVE_S // 5)} <= {r["text"] for r in st()["drafts"]}:
+                if len(finals()) >= n and {str(n + j) for j in range(LIVE_S // 5)} <= {r["text"] for r in st().drafts}:
                     break
                 await anyio.sleep(0.5)
             assert not late, f"backlog pieces behind the queue: {late}"
             assert finals() == [str(i) for i in range(n)], finals()
-            assert {str(n + j) for j in range(LIVE_S // 5)} <= {r["text"] for r in st()["drafts"]}, "drafts follow now meanwhile"
+            assert {str(n + j) for j in range(LIVE_S // 5)} <= {r["text"] for r in st().drafts}, "drafts follow now meanwhile"
             assert sent["draft"] < server.DRAFT_BACK_S + LIVE_S, sent
             assert server.device_status(DEVICE, st())["hold"] == live0.isoformat(timespec="seconds")
             await anyio.sleep(3)
@@ -263,7 +263,7 @@ def test_final_goes_on_after_a_gap(tmp_path, monkeypatch):
             if finals() == want:
                 return
             await anyio.sleep(0.5)
-        assert finals() == want, (finals(), st()["done_to"])
+        assert finals() == want, (finals(), st().done_to)
 
     async def run():
         save(at(0), flac(np.concatenate([tone(0, 2), np.zeros(3 * SR, np.int16)])))  # 5 s, then stopped
@@ -271,7 +271,7 @@ def test_final_goes_on_after_a_gap(tmp_path, monkeypatch):
         async with anyio.create_task_group() as tg:
             tg.start_soon(server.pipeline, DEVICE)
             await until(["0"])
-            assert st()["done_to"] == at(0) + dt.timedelta(seconds=5), "finalized to the very end of the recording"
+            assert st().done_to == at(0) + dt.timedelta(seconds=5), "finalized to the very end of the recording"
             # 45 s in 1 s pieces, quiet at first (the VAD pads an utterance's start back: across the pause into the
             # recording before, it bridged the pause), a pause after the tone ends the final piece
             x = np.concatenate([np.zeros(5 * SR, np.int16), tone(1, 2), np.zeros(38 * SR, np.int16)])
@@ -280,10 +280,10 @@ def test_final_goes_on_after_a_gap(tmp_path, monkeypatch):
             await until(["0", "1"])
             stop(at(1) + dt.timedelta(seconds=45))
             for _ in range(20):
-                if st()["done_to"] == at(1) + dt.timedelta(seconds=45):
+                if st().done_to == at(1) + dt.timedelta(seconds=45):
                     break
                 await anyio.sleep(0.5)
-            assert st()["done_to"] == at(1) + dt.timedelta(seconds=45), st()["done_to"]
+            assert st().done_to == at(1) + dt.timedelta(seconds=45), st().done_to
             tg.cancel_scope.cancel()
         save(at(2), flac(np.concatenate([tone(2, 2), np.zeros(3 * SR, np.int16)])))  # while the server restarts
         stop(at(2) + dt.timedelta(seconds=5))
@@ -304,8 +304,7 @@ def test_hold_release(tmp_path, monkeypatch):
     t = dt.datetime(2026, 10, 7, 17, 36)
     save(t, flac(tone(0, 3)))  # it came just now: the device records
     audio.hold(DEVICE, int(t.timestamp() * 1000))
-    st = {"audio_end": None, "done_to": None, "progress": [], "latency": [], "final_latency": [], "drafting": False,
-          "last_speech": None, "refine": None, "conversation": None, "draft": None, "draft_to": None, "analyzing": False}
+    st = server.PipelineState()
     d = server.device_status(DEVICE, st)
     assert d["hold"] == "2026-10-07T17:36:00" and d["recording"], d
     seen, until = dt.datetime.fromisoformat(d["hold_seen"]), dt.datetime.fromisoformat(d["hold_until"])
@@ -316,3 +315,22 @@ def test_hold_release(tmp_path, monkeypatch):
     anyio.run(server.hold_release, DEVICE)
     d = server.device_status(DEVICE, st)
     assert d["hold"] is None and d["hold_seen"] is None and audio.held(DEVICE) is None
+
+
+def test_pipeline_cursors_and_pause_notifications_are_independent():
+    """Final commits do not advance drafts; a pause during a draft wakes the next pass."""
+    async def run():
+        t = dt.datetime(2026, 10, 7, 17, 36)
+        a, b = server.PipelineState(draft_to=t), server.PipelineState()
+        a.progress = [(0.0, t), (599.0, t)]
+        a.finalized(t + dt.timedelta(seconds=300), 600.0)
+        assert a.done_to == t + dt.timedelta(seconds=300) and a.draft_to == t
+        assert a.progress == [(599.0, t), (600.0, a.done_to)]
+        assert b.done_to is None and b.progress == []
+        a.wake.set()
+        assert a.take_draft_wake()
+        assert not a.wake.is_set() and not b.wake.is_set()
+        a.wake.set()  # a new pause while the current pass runs
+        assert a.take_draft_wake()
+        assert not a.take_draft_wake()
+    anyio.run(run)

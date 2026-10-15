@@ -50,6 +50,7 @@ import summary
 import tenant
 import threads
 from conversations import IGNORE, Grouper
+from pipeline_state import PipelineState
 from tenant import T
 
 HERE = Path(__file__).resolve().parent
@@ -742,32 +743,26 @@ async def pipeline(device: str):
     resume = db.kv(f"finalized_to:{device}")
     done0 = dt.datetime.fromisoformat(resume) if resume else None
     draft0 = db.kv(f"draft_to:{device}")
-    st = T().devices[device] = {"seg": seg, "done_to": done0, "audio_end": None, "edge_end": None, "last_speech": None, "refine": None,
-                                     "conversation": None, "latency": [], "final_latency": [], "live": None,
-                                     "analyzing": False,  # the live analysis running
-                                     "progress": [],  # (wall time, finalized time) per commit, the last 10 min: the rate
-                                     "utts": [],  # VAD utterances after the finalized time: where the final layer cuts
-                                     # the draft layer: its own progress, VAD utterances, last pause, wake-up, and its rows not yet covered
-                                     "draft_to": dt.datetime.fromisoformat(draft0) if draft0 else None, "draft_utts": [],
-                                     "vad_to": None, "wake": anyio.Event(), "draft": None, "drafting": False,
-                                     "voiced": [],  # the open conversation's final sentences with their voiceprints: relabelled at its close
-                                     "drafts": db.drafts(iso(done0) if done0 else "", None, device)}
+    st = T().devices[device] = PipelineState(
+        seg=seg, done_to=done0,
+        draft_to=dt.datetime.fromisoformat(draft0) if draft0 else None,
+        drafts=db.drafts(iso(done0) if done0 else "", None, device))
     if resume:
         log.info("%s resuming after the last finalized row at %s", device, resume)
 
     async def feed():
         """The device's audio stream into the final layer's segmenter, taking the next stretch only while finalization
         is less than BUFFER_S - 300 s of audio behind: the buffer must not drop audio before it is finalized."""
-        async for t, x in audio.stream(device, st["done_to"]):
+        async for t, x in audio.stream(device, st.done_to):
             while True:
-                done = st["done_to"]
+                done = st.done_to
                 a = max(seg.audio_base, seg.sample_at(done)) if seg.anchors and done else seg.audio_base
                 if (seg.samples - a) / SR <= BUFFER_S - 300:
                     break
                 await anyio.sleep(1)
-            st["audio_end"] = t + dt.timedelta(seconds=len(x) / SR)
+            st.audio_end = t + dt.timedelta(seconds=len(x) / SR)
             try:
-                st["utts"] += [(u[0], u[1]) for u in seg.push(t, x)]
+                st.utts += [(u[0], u[1]) for u in seg.push(t, x)]
             except Exception:
                 log.exception("%s: segmenter failed on %.1f s at %s", device, len(x) / SR, t.time())
 
@@ -776,20 +771,20 @@ async def pipeline(device: str):
         with. A backlog (a phone back after hours offline sends them at once) is skipped here and finalized in order
         by the final layer; fed through feed(), drafts waited until it was all final (10-06: hours)."""
         async for t, x in audio.stream(device, None, edge_s=DRAFT_BACK_S):
-            st["edge_end"] = t + dt.timedelta(seconds=len(x) / SR)
+            st.edge_end = t + dt.timedelta(seconds=len(x) / SR)
             try:
                 utts = dseg.push(t, x)
             except Exception:
                 log.exception("%s: draft segmenter failed on %.1f s at %s", device, len(x) / SR, t.time())
                 continue
             for i, u in enumerate(utts):
-                st["last_speech"] = u[1]  # a piece with no VAD speech is not sent to the engine
-                st["draft_utts"].append((u[0], u[1]))
+                st.last_speech = u[1]  # a piece with no VAD speech is not sent to the engine
+                st.draft_utts.append((u[0], u[1]))
                 nxt = utts[i + 1][0] if i + 1 < len(utts) else dseg.time_at(dseg.pending[0]) if dseg.pending else None
                 if nxt is None or (nxt - u[1]).total_seconds() >= MERGE_GAP_S:  # a pause, not a split of a long utterance
-                    st["vad_to"] = u[1] + dt.timedelta(seconds=VAD_CUT_S)
-                    st["wake"].set()
-            del st["draft_utts"][:-200]
+                    st.vad_to = u[1] + dt.timedelta(seconds=VAD_CUT_S)
+                    st.wake.set()
+            del st.draft_utts[:-200]
 
     from diarist import Diarist, relabel
     bank = {k: e for k, (_, e) in db.people().items()}
@@ -803,8 +798,8 @@ async def pipeline(device: str):
     def open_view() -> dict | None:
         """The conversation going on now as the pages and the live analysis see it: the open conversation's final rows
         and the drafts after the finalized time; drafts alone start one before any final row has come."""
-        o, done = grouper.open, st["done_to"]
-        ds = [r for r in st["drafts"] if not done or r["start"] >= iso(done)]
+        o, done = grouper.open, st.done_to
+        ds = [r for r in st.drafts if not done or r["start"] >= iso(done)]
         if o and ds and (dt.datetime.fromisoformat(ds[0]["start"]) - dt.datetime.fromisoformat(o["end"])).total_seconds() >= grouper.gap:
             o = None  # the drafts begin after the open conversation's gap: a new one
         if not o and not ds:
@@ -817,11 +812,11 @@ async def pipeline(device: str):
 
     def show_open():
         v = open_view()
-        st["conversation"] = {"start": v["start"], "end": v["end"], "sentences": len(v["sentences"]), "speech_s": round(v["speech_s"]),
+        st.conversation = {"start": v["start"], "end": v["end"], "sentences": len(v["sentences"]), "speech_s": round(v["speech_s"]),
                               "device": device} if v else None
 
     if (lv := db.kv(f"live:{device}")) and "messages" in lv and (v := open_view()) and overlaps(lv, v):
-        st["live"] = lv
+        st.live = lv
     show_open()
     if grouper.open:
         log.info("%s continuing the open conversation from %s", device, grouper.open["start"])
@@ -839,7 +834,7 @@ async def pipeline(device: str):
     def relabel_rows(rec: dict) -> tuple[list[dict], int] | None:
         """A closed conversation's final rows labelled again with all its sentences in view (diarist.relabel), and how
         many changed; None when its voices do not cover its rows (a restart lost the earlier ones)."""
-        vs = [v for v in st["voiced"] if rec["start"] <= v["start"] <= rec["end"]]
+        vs = [v for v in st.voiced if rec["start"] <= v["start"] <= rec["end"]]
         rows = db.sentences(rec["start"], rec["end"], inclusive=True, source=device)
         if not vs or not rows:
             return None
@@ -860,7 +855,7 @@ async def pipeline(device: str):
         """One transaction: the piece's rows replace [lo, hi), closed conversations (with the live analysis that
         overlaps one), the finalized time, the open conversation."""
         recs = [record(c) for c in closed]
-        lv = st["live"]
+        lv = st.live
         with db.tx() as t:
             if rows is not None:
                 db.replace_sentences(t, lo, iso(hi), rows, device)
@@ -872,7 +867,7 @@ async def pipeline(device: str):
                     relabelled.append((rec, rl[0], rl[1]))
                     if lv and overlaps(lv, rec):
                         lv = {**lv, "drafted": True}  # its agent saw other labels: the closing turn resends the final transcript
-                st["voiced"] = [v for v in st["voiced"] if v["start"] > rec["end"]]
+                st.voiced = [v for v in st.voiced if v["start"] > rec["end"]]
                 db.insert_conversation(t, rec)
                 db.put_summary({"conversation": rec["id"], "status": "pending", "error": None}, t)
                 if lv and overlaps(lv, rec):
@@ -883,15 +878,13 @@ async def pipeline(device: str):
                 db.put_kv(f"finalized_to:{device}", iso(hi), t)
             db.put_kv(f"open_conversation:{device}", grouper.open, t)
             if hi:
-                st["drafts"] = [r for r in st["drafts"] if r["start"] >= iso(hi)]  # covered by final rows now
+                st.drafts = [r for r in st.drafts if r["start"] >= iso(hi)]  # covered by final rows now
             # the analysis ends with its conversation, or when nothing is going on any more (a too short one is dropped)
             live_ends = bool(lv) and (attached or open_view() is None)
             if live_ends:
                 db.put_kv(f"live:{device}", None, t)
         if hi:
-            st["done_to"] = hi
-            now = time.time()
-            st["progress"] = [p for p in st["progress"] if now - p[0] < 600] + [(now, hi)]
+            st.finalized(hi, time.time())
         if rows is not None:
             await broadcast({"type": "final", "device": device, "from": lo, "to": iso(hi), "rows": rows})
         for rec, rs, n in relabelled:
@@ -908,20 +901,20 @@ async def pipeline(device: str):
             await broadcast({"type": "conversation", **db.conversation(rec["id"])})
         show_open()
         if live_ends:
-            st["live"] = None
+            st.live = None
             await broadcast({"type": "live", "device": device, "live": None})
 
     def present(o: dict) -> bool:
         """The device is recording now and o is the conversation going on: during a backlog the drafts of what is said
         now (open_view starts one of them after the gap), not the old conversation the final layer is still on."""
-        edge = st["edge_end"]
+        edge = st.edge_end
         return bool(edge) and (dt.datetime.now() - edge).total_seconds() <= LIVE_AUDIO_S and \
             (edge - dt.datetime.fromisoformat(o["end"])).total_seconds() <= grouper.gap
 
     def live_due() -> bool:
         """A page is in front, the conversation going on has a minute of speech and is the present, and LIVE_EVERY_S of
         new speech came (or any, when a page just came to the front)."""
-        o, lv, now = open_view(), st["live"], time.time()
+        o, lv, now = open_view(), st.live, time.time()
         if not o or o["speech_s"] < summary.MIN_SPEECH_S or now > T().watch_until or now - live_failed < 120 or not present(o):
             return False
         if not lv or not overlaps(lv, o):
@@ -934,7 +927,7 @@ async def pipeline(device: str):
         o = open_view()
         if o is None:  # it closed between the start and now
             return
-        lv = st["live"] if st["live"] and overlaps(st["live"], o) else live.new(o["start"], device, db.conversations(o["start"][:10], o["start"]))
+        lv = st.live if st.live and overlaps(st.live, o) else live.new(o["start"], device, db.conversations(o["start"][:10], o["start"]))
         rows, speech = [r for r in o["sentences"] if r.get("text")], o["speech_s"]
         try:
             res = await live.analyze(lv, rows)
@@ -946,7 +939,7 @@ async def pipeline(device: str):
         res.update(speech_s=speech, wall=time.time(), at=dt.datetime.now().isoformat(timespec="seconds"),
                    upto=rows[-1]["start"], sentences=len(rows), asked=lv.get("asked") or asked)
         if (v := open_view()) and overlaps(res, v):
-            st["live"] = res
+            st.live = res
             db.put_kv(f"live:{device}", res)
             await broadcast({"type": "live", "device": device, "live": live.public(res)})
         elif r := db.conn().execute("SELECT id FROM conversations WHERE device = ? AND start <= ? AND end >= ? ORDER BY start DESC",
@@ -959,15 +952,15 @@ async def pipeline(device: str):
         except Exception:  # a bug here must not end the pipeline beside it (its task group would)
             log.exception("%s live analysis", device)
         finally:
-            st["analyzing"] = False
+            st.analyzing = False
 
     def start_analysis(asked: bool = False):
         """One at a time, in the pipeline's task group: it ends with the pipeline."""
-        st["analyzing"] = True
+        st.analyzing = True
         ptg.start_soon(analysis, asked, name=f"live:{device}")
 
     def maybe_live():
-        if not st["analyzing"] and live_due():
+        if not st.analyzing and live_due():
             start_analysis()
 
     def ask() -> str | None:
@@ -975,8 +968,8 @@ async def pipeline(device: str):
         more, during a failure's wait. One at a time, and only with speech it has not seen (the page holds its button 10 s
         after a press). None when it started, else why not. Asked once, its agent writes the final summary however short
         it stays (summarize)."""
-        o, lv = open_view(), st["live"]
-        if st["analyzing"]:
+        o, lv = open_view(), st.live
+        if st.analyzing:
             return "正在分析"
         if not o or not present(o):
             return "没有进行中的对话"
@@ -994,13 +987,13 @@ async def pipeline(device: str):
             ddia.set_bank(owner)
         if not seg.anchors:
             return False
-        done = st["done_to"]
+        done = st.done_to
         base = done or seg.time_at(seg.audio_base)
-        st["utts"] = [u for u in st["utts"] if u[1] > base]
+        st.utts = [u for u in st.utts if u[1] > base]
         rel = lambda t: (t - base).total_seconds()
         end_at = db.kv(f"end_at:{device}")
         force = bool(end_at) and not audio.queued(device)  # the recorder stopped and all its audio is in: no more is coming
-        known = st["utts"] + ([(seg.time_at(seg.pending[0]), seg.time_at(seg.pending[1]))] if seg.pending else [])  # one waiting for a merge
+        known = st.utts + ([(seg.time_at(seg.pending[0]), seg.time_at(seg.pending[1]))] if seg.pending else [])  # one waiting for a merge
         cut = next_cut([(max(0.0, rel(a)), rel(b)) for a, b in known], rel(seg.time_at(seg.samples)), seg.speaking(), force)
         if cut is None:
             return False
@@ -1031,14 +1024,14 @@ async def pipeline(device: str):
             dia.rollback(m0)
             log.warning("%s final piece failed: %r", device, e)
             note(f"{device}：定稿引擎调用失败：{str(e)[:120]}，稍后重试这一块", "error")
-            st["refine"] = {"error": str(e)[:200]}
+            st.refine = {"error": str(e)[:200]}
             await anyio.sleep(10)
             return False
         by_label = {}
         for g in segs:  # final_rows keys confidence by label
             by_label[g["speaker"]] = max(by_label.get(g["speaker"], 0.0), g["confidence"])
         lo, hi, rows = final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, base, len(x) / SR, by_label, 0.0, at, 0.0)
-        st["voiced"] += [{"start": iso(at(g["start_ms"] / 1000)), "dur": (g["end_ms"] - g["start_ms"]) / 1000,
+        st.voiced += [{"start": iso(at(g["start_ms"] / 1000)), "dur": (g["end_ms"] - g["start_ms"]) / 1000,
                           "e": dia.E[m[0] - 1] if m else None, "key": (iso(base), g["engine_speaker"]) if g.get("engine_speaker") else None}
                          for g, m in zip(segs, marks)]
         with open(T().data / f"{lo.date()}.passes.jsonl", "a") as f:  # every piece's raw engine output, for tracing lost rows
@@ -1047,17 +1040,17 @@ async def pipeline(device: str):
         shown = dt.datetime.now()
         for r in rows:
             r["source"], r["engine"], r["shown_at"] = device, engine, iso(shown)
-            st["final_latency"].append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
-        del st["final_latency"][:-50]
+            st.final_latency.append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
+        del st.final_latency[:-50]
         closed = [c for r in rows for c in grouper.sentence(r)]
         closed += grouper.advance(hi)
         await commit(closed, rows, iso(lo), hi)
-        st["refine"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
+        st.refine = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
                         "engine": engine, "speakers": by_label, "changed": len(rows), "piece_s": round(len(x) / SR),
                         "backlog_s": round((seg.time_at(seg.samples) - hi).total_seconds())}
-        log.info("final %s: %s", device, st["refine"])
+        log.info("final %s: %s", device, st.refine)
         note(f"定稿一块：{device} {lo.strftime('%H:%M:%S')}–{hi.strftime('%H:%M:%S')}（{len(x) / SR:.0f} s）给 {engine or ENGINE}，"
-             f"{st['refine']['ms'] / 1000:.1f} s，{len(rows)} 句，积压 {st['refine']['backlog_s']} s")
+             f"{st.refine['ms'] / 1000:.1f} s，{len(rows)} 句，积压 {st.refine['backlog_s']} s")
         if segs and segs[0].get("fallback"):
             note(f"{device}：定稿引擎失败（{segs[0]['fallback'][:120]}），这一块改用 {engine}", "warn")
         if grouper.open and not was_open:
@@ -1070,7 +1063,7 @@ async def pipeline(device: str):
                 maybe_live()
             closed = []
             end_at = db.kv(f"end_at:{device}")
-            final_all = not seg.anchors or (st["done_to"] and (seg.time_at(seg.samples) - st["done_to"]).total_seconds() < 0.5)
+            final_all = not seg.anchors or (st.done_to and (seg.time_at(seg.samples) - st.done_to).total_seconds() < 0.5)
             if end_at and not audio.queued(device) and final_all:
                 closed += grouper.end(dt.datetime.fromisoformat(end_at))  # the recorder stopped and its last audio is final
                 db.put_kv(f"end_at:{device}", None)
@@ -1085,18 +1078,18 @@ async def pipeline(device: str):
 
     def drafting() -> bool:
         """A page watches and this device is recording now (its newest audio is recent, backlog or not)."""
-        return (time.time() < T().watch_until and bool(dseg.anchors) and st["edge_end"] is not None
-                and (dt.datetime.now() - st["edge_end"]).total_seconds() < LIVE_AUDIO_S)
+        return (time.time() < T().watch_until and bool(dseg.anchors) and st.edge_end is not None
+                and (dt.datetime.now() - st.edge_end).total_seconds() < LIVE_AUDIO_S)
 
     async def draft_pass(end: dt.datetime | None = None) -> bool:
         """One draft pass; True when more remains. Timer (end None): [draft_to - margin, + window], rows near its end
         left open; VAD: from 1 s before the first undrafted utterance to `end`, a point in the pause after one."""
-        dto = st["draft_to"]
+        dto = st.draft_to
         t_run = time.perf_counter()
         if end is None:
             t0, x = dseg.window(REFINE_WINDOW_S, dto - dt.timedelta(seconds=REFINE_MARGIN_S))
         else:
-            us = st["draft_utts"] = [u for u in st["draft_utts"] if u[1] > dto]
+            us = st.draft_utts = [u for u in st.draft_utts if u[1] > dto]
             if not us:
                 return False
             start = max(us[0][0] - dt.timedelta(seconds=1), dto - dt.timedelta(seconds=REFINE_MARGIN_S))
@@ -1108,8 +1101,8 @@ async def pipeline(device: str):
         if len(x) / SR - since < (0.3 if end is not None else EDGE_S + 10):
             return False
         hi = at(len(x) / SR - EDGE_S)
-        if end is None and not dseg.speaking() and (st["last_speech"] is None or st["last_speech"] <= dto):
-            st["draft_to"] = hi  # silence: nothing to send
+        if end is None and not dseg.speaking() and (st.last_speech is None or st.last_speech <= dto):
+            st.draft_to = hi  # silence: nothing to send
             db.put_kv(f"draft_to:{device}", iso(hi))
             return (dseg.time_at(dseg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
         sent, n_rows = since, 0  # seconds into the window up to which rows went out while the call ran
@@ -1121,14 +1114,14 @@ async def pipeline(device: str):
             for r in rows:
                 r["id"], r["state"] = "d" + r["id"][1:], "draft"
                 r["source"], r["engine"], r["shown_at"] = device, engine, iso(shown)
-                st["latency"].append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
-            del st["latency"][:-50]
+                st.latency.append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
+            del st.latency[:-50]
             with db.tx() as t:
                 db.insert_drafts(t, rows)
                 db.put_kv(f"draft_to:{device}", iso(upto), t)
-            st["draft_to"], n_rows = upto, n_rows + len(rows)
-            done = st["done_to"]
-            st["drafts"] += [r for r in rows if not done or r["start"] >= iso(done)]
+            st.draft_to, n_rows = upto, n_rows + len(rows)
+            done = st.done_to
+            st.drafts += [r for r in rows if not done or r["start"] >= iso(done)]
             if rows:
                 await broadcast({"type": "draft", "device": device, "rows": rows})
             show_open()
@@ -1166,7 +1159,7 @@ async def pipeline(device: str):
             e = threads.first(e)
             ddia.rollback(m0)
             log.warning("%s draft pass failed: %r", device, e)
-            st["draft"] = {"error": str(e)[:200]}
+            st.draft = {"error": str(e)[:200]}
             return False
         by_label = {}
         for g in segs:
@@ -1180,9 +1173,9 @@ async def pipeline(device: str):
                                 "early_to": sent, "from": iso(at(since)), "to": iso(hi), "segs": raw}, ensure_ascii=False) + "\n")
         engine = raw[0]["engine"] if raw else DRAFT_ENGINE
         await publish(rows, hi, engine)
-        st["draft"] = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
+        st.draft = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
                        "engine": engine, "changed": n_rows, "early_s": round(sent - since), "to": iso(hi)}
-        log.info("draft %s: %s", device, st["draft"])
+        log.info("draft %s: %s", device, st.draft)
         if end is not None:  # pauses that came during the pass have set wake again
             return len(x) / SR >= REFINE_WINDOW_S
         return (dseg.time_at(dseg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
@@ -1190,23 +1183,22 @@ async def pipeline(device: str):
     async def draft_loop():
         while True:
             with anyio.move_on_after(REFINE_EVERY_S):  # a pause after speech drafts at once; the timer covers pause-less speech
-                await st["wake"].wait()
-            by_vad = st["wake"].is_set()
-            st["wake"] = anyio.Event()  # an anyio.Event is not cleared: a new one for the next pause
+                await st.wake.wait()
+            by_vad = st.take_draft_wake()
             if not drafting():
-                st["drafting"] = False
+                st.drafting = False
                 continue
             # from where drafts or final rows stop, but no further back than DRAFT_BACK_S: a page that opens sees the
             # minutes not final yet, not a backlog
             floor = dseg.time_at(dseg.samples) - dt.timedelta(seconds=DRAFT_BACK_S)
-            st["draft_to"] = max(t for t in (st["draft_to"], st["done_to"], floor, dseg.time_at(dseg.audio_base)) if t)
-            if not st["drafting"]:
-                st["drafting"] = True
-                note(f"{device}：页面在看，开始出初稿（从 {st['draft_to'].strftime('%H:%M:%S')} 起）", "state")
+            st.draft_to = max(t for t in (st.draft_to, st.done_to, floor, dseg.time_at(dseg.audio_base)) if t)
+            if not st.drafting:
+                st.drafting = True
+                note(f"{device}：页面在看，开始出初稿（从 {st.draft_to.strftime('%H:%M:%S')} 起）", "state")
                 while await draft_pass():  # what came before the page opened, in windows
                     pass
             if by_vad:
-                while st["vad_to"] and st["vad_to"] > st["draft_to"] and await draft_pass(st["vad_to"]):
+                while st.vad_to and st.vad_to > st.draft_to and await draft_pass(st.vad_to):
                     pass
             else:
                 while await draft_pass():
@@ -1221,18 +1213,18 @@ async def pipeline(device: str):
     # lasting() starts it again whole
     try:
         async with anyio.create_task_group() as ptg:
-            st["ask"] = ask
+            st.ask = ask
             for name, part in (("feed", feed), ("edge", edge_feed), ("draft", draft_loop), ("final", final_loop)):
                 ptg.start_soon(forever, part, name=f"{name}:{device}")
     finally:
-        st.pop("ask", None)  # 立即总结 has no pipeline to run in until lasting() starts it again
+        st.ask = None  # no task group to run in until lasting() starts it again
         T().dias.remove(dia)
         T().dias.remove(ddia)
 
 
-def device_status(device: str, st: dict) -> dict:
-    end, done, pr = st["audio_end"], st["done_to"], st["progress"]
-    lat = st["latency"] if st["drafting"] else st["final_latency"]  # what the page shows first: drafts while it watches
+def device_status(device: str, st: PipelineState) -> dict:
+    end, done, pr = st.audio_end, st.done_to, st.progress
+    lat = st.latency if st.drafting else st.final_latency  # what the page shows first: drafts while it watches
     left, received_to = audio.backlog(device, done)
     hold, seen, arrived = audio.held(device), audio.hold_seen(device), audio.arrival(device)
     # seconds of audio finalized per second, over the commits of the last 10 min (silence goes fast, speech ~8x)
@@ -1250,10 +1242,10 @@ def device_status(device: str, st: dict) -> dict:
             # behind_s is how long ago it last recorded)
             "recording": bool(arrived) and time.time() * 1000 - arrived["at"] < LIVE_AUDIO_S * 1000,
             "rate": round(rate, 1) if rate else None, "eta_s": round(left / rate) if rate and rate > 0.1 and left > 30 else None,
-            "last_speech": st["last_speech"].isoformat(timespec="seconds") if st["last_speech"] else None,
-            "refine": st["refine"], "conversation": st["conversation"], "drafting": st["drafting"], "draft": st["draft"],
-            "analyzing": st["analyzing"],  # the live analysis is running
-            "draft_to": st["draft_to"].isoformat(timespec="seconds") if st["draft_to"] else None,
+            "last_speech": st.last_speech.isoformat(timespec="seconds") if st.last_speech else None,
+            "refine": st.refine, "conversation": st.conversation, "drafting": st.drafting, "draft": st.draft,
+            "analyzing": st.analyzing,  # the live analysis is running
+            "draft_to": st.draft_to.isoformat(timespec="seconds") if st.draft_to else None,
             "latency_s": sorted(lat)[len(lat) // 2] if lat else None,
             "arrival": arrived, "sound": sound(device, received_to)}
 
@@ -1474,13 +1466,14 @@ async def events():
 @app.get("/api/live")
 async def live_now():
     """Each device's live analysis of its open conversation."""
-    return [live.public(st["live"]) for st in T().devices.values() if st.get("live")]
+    return [live.public(st.live) for st in T().devices.values() if st.live]
 
 
 @app.post("/api/live/{device}")
 async def live_ask(device: str):
     """立即总结 (the live page's button): the device's live analysis now; 409 with why not."""
-    ask = T().devices.get(device, {}).get("ask")  # none yet: its pipeline is starting (lasting() restarts a failed one)
+    st = T().devices.get(device)
+    ask = st.ask if st else None  # none until its pipeline's task group is ready
     if not ask:
         raise HTTPException(404, "没有这台设备的处理流程")
     if why := ask():
@@ -1505,8 +1498,8 @@ async def sentences(date: str | None = None):
 async def conversations(date: str | None = None):
     day = dt.date.fromisoformat(date) if date else dt.date.today()
     closed = db.conversations(day.isoformat(), (day + dt.timedelta(days=1)).isoformat())
-    return closed + [{**st["conversation"], "state": "open"} for st in T().devices.values()
-                     if st["conversation"] and st["conversation"]["start"][:10] == day.isoformat()]
+    return closed + [{**st.conversation, "state": "open"} for st in T().devices.values()
+                     if st.conversation and st.conversation["start"][:10] == day.isoformat()]
 
 
 @app.get("/api/days")

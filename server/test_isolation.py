@@ -72,11 +72,10 @@ def seed(t: tenant.Tenant):
         (t.data / "voices" / "clips" / f"{mark}.ogg").write_bytes(OGG)
     tenant.call(t, store)
     t.events.append({"type": "event", "at": AT, "kind": "info", "text": mark})
-    t.devices[DEV] = {"audio_end": None, "done_to": None, "progress": [], "latency": [], "final_latency": [], "drafting": False,
-                      "last_speech": None, "refine": None, "draft": None, "draft_to": None, "analyzing": False,
-                      "conversation": {"start": f"{TODAY}T11:00:00.000", "end": f"{TODAY}T11:01:00.000", "sentences": 1, "speech_s": 30,
-                                       "device": DEV, "note": mark},
-                      "live": {"start": f"{TODAY}T11:00:00.000", "topics": [{"title": mark}], "messages": []}}
+    t.devices[DEV] = server.PipelineState(
+        conversation={"start": f"{TODAY}T11:00:00.000", "end": f"{TODAY}T11:01:00.000", "sentences": 1, "speech_s": 30,
+                      "device": DEV, "note": mark},
+        live={"start": f"{TODAY}T11:00:00.000", "topics": [{"title": mark}], "messages": []})
 
 
 def snapshot(t: tenant.Tenant) -> str:
@@ -215,7 +214,7 @@ def test_routes(two, monkeypatch):
     assert prompts and not [p for p in prompts if "MARKb" in p], "the model saw nothing of b's"
     assert any("MARKa" in p for p in prompts), "ask's tools read a's store"
     assert snapshot(b) == before, "nothing of b's changed"
-    assert b.events[-1]["text"] == "MARKb" and len(b.events) == 1 and b.devices[DEV]["conversation"]["note"] == "MARKb"
+    assert b.events[-1]["text"] == "MARKb" and len(b.events) == 1 and b.devices[DEV].conversation["note"] == "MARKb"
     assert a.chunks and b.chunks is None, "the upload is a's"
     assert b.summaries[1].statistics().current_buffer_used == 0 and a.summaries[1].statistics().current_buffer_used >= 1
 
@@ -279,7 +278,7 @@ def test_pipelines_side_by_side(tmp_path, monkeypatch):
     anyio.run(both)
     assert got == {"a": ["1", "2"], "b": ["51", "52"]}, got
     assert DEV in a.read_to and DEV in b.read_to and a.read_to is not b.read_to
-    assert a.devices[DEV]["seg"] is not b.devices[DEV]["seg"]
+    assert a.devices[DEV].seg is not b.devices[DEV].seg
     assert len(dias["a"]) == len(dias["b"]) == 2 and not set(map(id, dias["a"])) & set(map(id, dias["b"])), "each its own diarists"
     assert not a.dias and not b.dias, "gone with their pipelines"
 

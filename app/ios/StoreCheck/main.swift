@@ -3,7 +3,7 @@
 // held for a boot without one, closed files finished and deletable once their pieces are uploaded; the recorder's
 // event log (Runner/DeviceLog.swift, DeviceLogTest.kt's case); what a firmware update checks first and leaves in the
 // device log (Runner/Dfu.swift); and listening on the phone (Runner/Listen.swift). Foundation only, so CI runs it on Linux:
-//   cd app/ios && swiftc -o /tmp/storecheck Runner/Store.swift Runner/DeviceLog.swift Runner/Dfu.swift Runner/Listen.swift StoreCheck/main.swift && /tmp/storecheck
+//   cd app/ios && swiftc -o /tmp/storecheck Runner/Store.swift Runner/DeviceLog.swift Runner/Dfu.swift Runner/Listen.swift "$PWD/StoreCheck/main.swift" && /tmp/storecheck
 import Foundation
 #if canImport(AVFoundation)
 import AVFoundation
@@ -11,6 +11,23 @@ import AVFoundation
 
 func check<T: Equatable>(_ got: T, _ want: T, _ what: String, line: Int = #line) {
   if got != want { print("FAIL line \(line) \(what): got \(got), want \(want)"); exit(1) }
+}
+
+// Resolve relative to this source, not the process working directory. CI compiles using an absolute source path.
+let fixtureURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+  .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("fixtures/record-stream.json")
+let fixture = try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as! [String: Any]
+func hex(_ s: String) -> Data {
+  let chars = Array(s)
+  return Data(stride(from: 0, to: chars.count, by: 2).map { UInt8(String(chars[$0...($0 + 1)]), radix: 16)! })
+}
+let mirrorVector = fixture["mirror"] as! [String: Any]
+let mirrorPieces = mirrorVector["pieces"] as! [[Int64]]
+func sharedNames(_ count: Int) -> [String] { mirrorPieces.prefix(count).map { "\($0[0])@LR-P1-BDAE.ogg" } }
+func frameCount(_ file: URL) throws -> Int64 {
+  let b = [UInt8](try Data(contentsOf: file))
+  let last = (0...(b.count - 4)).last { Array(b[$0..<($0 + 4)]) == [79, 103, 103, 83] }!
+  return Int64(Store.le(b, last + 6, 8)) / 480
 }
 
 func a(_ first: Int, _ n: Int) -> Data {
@@ -35,25 +52,27 @@ func count(_ hay: Data, _ needle: String) -> Int {
 // mirror
 do {
   let dir = tmp(), out = tmp(), undated = tmp()
-  let f: Int64 = 1 << 16 | 3  // boot 1, segment 3: the open file
-  let stream = a(0, 10) + a(10, 10) + t(20, 1_000_000) + a(20, 10) + a(40, 10)  // frames 30..39 lost on the way
+  let f = (mirrorVector["file"] as! NSNumber).int64Value
+  let stream = hex(mirrorVector["hex"] as! String)
   let m = Mirror(dir)
-  check(try m.put(f, 0, stream.subdata(in: 0..<40)), nil, "first bytes")
-  check(try m.put(f, 60, stream.subdata(in: 60..<80)), 40, "a lost notify: READ from 40")
-  check(try m.put(f, 30, stream.subdata(in: 30..<stream.count)), nil, "READ overlapping what is there")
+  for d in mirrorVector["deliveries"] as! [[String: Any]] {
+    let start = d["start"] as! Int, end = d["end"] as! Int
+    check(try m.put(f, Int64(start), stream.subdata(in: start..<end)),
+          (d["hole"] as? NSNumber)?.int64Value, "shared delivery")
+  }
   check(m.have(f), Int64(stream.count), "mirrored")
   m.listed([f: 80], open: f)
 
   // the open file: pieces of >= 15 frames at record ends, a gap ends one, the last frames wait
   check(try m.pieces(out, undated, tag: "LR-P1-BDAE", liveFrames: 15, boot: 1), 2, "open file pieces")
-  check(names(out), ["999800@LR-P1-BDAE.ogg", "1000000@LR-P1-BDAE.ogg"], "open file names")
+  check(names(out), sharedNames(2), "open file names")
 
   // the stream moved on (the board rebooted: boot 2): this file is closed and whole, its last frames go too
   let g: Int64 = 2 << 16
   check(try m.put(g, 0, a(0, 5)), nil, "boot 2, no 'T' yet")
   m.listed([f: Int64(stream.count), g: 21], open: g)
   check(try m.pieces(out, undated, tag: "LR-P1-BDAE", liveFrames: 15, boot: 2), 1, "closed file's last piece")
-  check(names(out).last, "1000200@LR-P1-BDAE.ogg", "last piece")
+  check(names(out).last, sharedNames(3).last, "last piece")
   check(m.done(out), [], "pieces not uploaded yet")
   clear(out)  // the uploader took them
   check(m.done(out), [f], "deletable")
@@ -179,21 +198,44 @@ do {
   check(try u.reused(boot: 0, frame: 100, at: now, out: out, undated: undated, tag: "X"), false, "boot 0: no count to reuse")
 }
 
+// Shared clock drift / frame rollback / distant boot-reuse boundaries; fresh state per case.
+do {
+  let v = fixture["reuse"] as! [String: Any], f = (fixture["reuse"] as! [String: Any])["file"] as! Int64
+  for c in v["cases"] as! [[String: Any]] {
+    let m = Mirror(tmp())
+    _ = try m.put(f, 0, hex(v["hex"] as! String))
+    check(try m.reused(boot: f >> 16, frame: c["frame"] as! Int64, at: c["at"] as! Int64,
+                       out: tmp(), undated: tmp(), tag: "X"), c["reused"] as! Bool, "shared reuse boundary")
+  }
+}
+
 // lr_sync.py's selftest data. boot 1: a gap at 5..8, a cut-short tail; its 'T' in the middle of the stream, after the
 // frames it dates. boot 2: rebooted, never synced: time unknown. boot 3: the open file, its 'T' (this connection's) last
 do {
   let dir = tmp(), out = tmp(), undated = tmp()
-  let files: [Int64: Data] = [1 << 16: a(0, 3) + a(3, 2) + t(4, 10_000) + a(9, 1), 1 << 16 | 1: a(10, 1).dropLast(),
-                              2 << 16: a(0, 2), 3 << 16: a(40, 10) + t(50, 99_000)]
+  let archive = fixture["archive"] as! [String: Any]
+  let files = Dictionary(uniqueKeysWithValues: (archive["files"] as! [[String: Any]]).map {
+    (($0["file"] as! NSNumber).int64Value, hex($0["hex"] as! String))
+  })
   let m = Mirror(dir)
   for (f, b) in files { check(try m.put(f, 0, b), nil, "file \(f)") }
   m.listed(files.mapValues { Int64($0.count) }, open: 3 << 16)
   check(try m.pieces(out, undated, tag: "LR-P1-BDAE", liveFrames: 15, boot: 3), 2, "boot 1's runs")
-  check(names(out), ["9960@LR-P1-BDAE.ogg", "10050@LR-P1-BDAE.ogg"], "dated by a 'T' after them")
+  let runs = archive["runs"] as! [[Any]]
+  check(names(out), runs.prefix(2).map { "\(($0[0] as! NSNumber).int64Value)@LR-P1-BDAE.ogg" }, "dated by a 'T' after them")
   check(try FileManager.default.contentsOfDirectory(atPath: undated.path), ["LR-P1-BDAE-00020000.ogg"], "boot 2 undated")
   m.listed(files.mapValues { Int64($0.count) }.merging([3 << 16 | 1: 0]) { $1 }, open: 3 << 16 | 1)  // the stream moved on
   check(try m.pieces(out, undated, tag: "LR-P1-BDAE", liveFrames: 15, boot: 3), 1, "boot 3's run once its file closed")
-  check(names(out).last, "98900@LR-P1-BDAE.ogg", "boot 3 dated by the 'T' after it")
+  check(names(out).last, "\((runs[3][0] as! NSNumber).int64Value)@LR-P1-BDAE.ogg", "boot 3 dated by the 'T' after it")
+  for r in runs {
+    let file: URL
+    if let timestamp = r[0] as? NSNumber {
+      file = out.appendingPathComponent("\(timestamp.int64Value)@LR-P1-BDAE.ogg")
+    } else {
+      file = undated.appendingPathComponent("LR-P1-BDAE-00020000.ogg")
+    }
+    check(try frameCount(file), (r[1] as! NSNumber).int64Value, "shared frame count")
+  }
 }
 
 // #109: a piece appends one line to the state instead of writing all of it again (at 1 s pieces that grew with every
@@ -231,8 +273,9 @@ do {
 
 // ogg
 do {
-  let ogg = Store.oggOpus(Array(repeating: Data([0xF8, 0xFF, 0xFE]), count: 120))  // 120 silent 10 ms Opus frames
-  check(count(ogg, "OggS"), 5, "pages: head, tags, 50 + 50 + 20 frames")
+  let o = fixture["ogg"] as! [String: Any]
+  let ogg = Store.oggOpus(Array(repeating: hex(o["packetHex"] as! String), count: o["count"] as! Int))
+  check(count(ogg, "OggS"), o["pages"] as! Int, "pages: head, tags, audio")
 }
 
 // the recorder's event log (DeviceLog.swift), the case of DeviceLogTest.kt and lr_sync.py --selftest: boot 7's TIME fell

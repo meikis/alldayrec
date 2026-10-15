@@ -1,7 +1,7 @@
 name: app
 on:
   pull_request:  # only on PRs: main gets what a green PR ran
-    paths: ['app/**', '.github/workflows/app.yml']
+    paths: ['app/**', 'fixtures/**', '.github/workflows/app.yml', '.github/scripts/apk-toolchain.sh']
 
 concurrency:  # a new push to a PR cancels its run still going
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -10,18 +10,44 @@ concurrency:  # a new push to a PR cancels its run still going
 jobs:
   app:
     runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}"]', vars.LR_RUNNER)) }}  # repo variable LR_RUNNER=lr-54: the self-hosted runner on .54
-    timeout-minutes: 10  # ~1.5 min, at most 4 so far
+    timeout-minutes: 30  # hosted Android SDK/Gradle downloads can make a cold run slower
     defaults:
       run:
         working-directory: app
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, the job's only action: a runner downloads every action its job names, skipped or not
-      - if: runner.environment == 'github-hosted'  # Flutter 3.47.5: Dart 3.13.4, as pubspec.yaml asks; a new stable's lints come in by bumping this (here and on .54)
-        run: git clone -q --depth 1 -b 3.47.5 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter" && echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
-      - if: runner.environment == 'self-hosted'  # .54: Flutter and Swift in ci-runner's home (the image has Swift)
-        run: echo "$HOME/sdk/flutter/bin" >> "$GITHUB_PATH" && echo "$HOME/sdk/swift/usr/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - if: runner.environment == 'github-hosted'
+        run: pipx install uv
+      - if: runner.environment == 'self-hosted'
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH" && echo "$HOME/sdk/swift/usr/bin" >> "$GITHUB_PATH"
+      - name: Set up pinned JDK without sudo
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        env:
+          RUNNER_TOOL_CACHE: ${{ runner.temp }}/apk-java-toolcache
+        with:
+          distribution: temurin
+          java-version: '17.0.18+8'
+      - name: Set up pinned Flutter and runner-owned Android SDK
+        run: |
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            export FLUTTER_ROOT="$HOME/sdk/flutter" ANDROID_HOME="$HOME/sdk/android"
+          fi
+          bash ../.github/scripts/apk-toolchain.sh
       - run: flutter analyze
       - run: flutter test -j 4  # test/: the add-recorder list's order (mergeNearby); -j 4: .54 has 48 cores, a test runner each would not fit its memory
+      - name: Android JVM regression tests (no APK or signing)
+        working-directory: app/android
+        run: |
+          printf 'sdk.dir=%s\nflutter.sdk=%s\n' "$ANDROID_HOME" "$FLUTTER_ROOT" > local.properties
+          # Flutter normally installs these during an APK build; this gate builds no APK.
+          cp "$FLUTTER_ROOT/bin/cache/artifacts/gradle_wrapper/gradlew" .
+          cp "$FLUTTER_ROOT/bin/cache/artifacts/gradle_wrapper/gradle/wrapper/gradle-wrapper.jar" gradle/wrapper/
+          ./gradlew :app:testDebugUnitTest --stacktrace --info --no-configuration-cache --no-daemon --max-workers=2 --no-parallel \
+            '-Dorg.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m -XX:ReservedCodeCacheSize=128m' \
+            -Dorg.gradle.vfs.watch=false -Pkotlin.compiler.execution.strategy=in-process
       # the iPhone's BLE record stream (Store.swift: mirror, 'T' dating, Ogg), event log (DeviceLog.swift), firmware update
       # checks (Dfu.swift) and listening (Listen.swift): Foundation only
-      - run: swiftc -o "$RUNNER_TEMP/storecheck" ios/Runner/Store.swift ios/Runner/DeviceLog.swift ios/Runner/Dfu.swift ios/Runner/Listen.swift ios/StoreCheck/main.swift && "$RUNNER_TEMP/storecheck"  # RUNNER_TEMP: .54 is shared, another user may own /tmp/storecheck
+      - run: swiftc -o "$RUNNER_TEMP/storecheck" ios/Runner/Store.swift ios/Runner/DeviceLog.swift ios/Runner/Dfu.swift ios/Runner/Listen.swift "$PWD/ios/StoreCheck/main.swift" && "$RUNNER_TEMP/storecheck"  # absolute main.swift lets #filePath locate the shared fixture; RUNNER_TEMP avoids shared /tmp
+      - name: Remove hosted ephemeral Gradle cache
+        if: always() && runner.environment == 'github-hosted'
+        run: rm -rf "$RUNNER_TEMP"/apk-gradle-"$GITHUB_RUN_ID"-"$GITHUB_RUN_ATTEMPT"

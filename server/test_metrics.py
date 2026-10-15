@@ -33,10 +33,8 @@ def test_metrics(monkeypatch):
     db.add_device_status("LR-P3-116C", (now - dt.timedelta(seconds=30)).isoformat(timespec="milliseconds"),
                          {"battery": 80, "charge": "charging", "fw": 'a"b\\c\nd'})
     audio.hold("某人的 iPhone", ms)
-    st = {"audio_end": now - dt.timedelta(seconds=2), "done_to": None, "progress": [], "latency": [], "final_latency": [4.0],
-          "drafting": False, "last_speech": None, "refine": None, "conversation": None, "draft": None, "draft_to": None,
-          "analyzing": False}
-    T().devices.update({"LR-P3-116C": st, "某人的 iPhone": {**st, "audio_end": None, "final_latency": []}})
+    st = server.PipelineState(audio_end=now - dt.timedelta(seconds=2), final_latency=[4.0])
+    T().devices.update({"LR-P3-116C": st, "某人的 iPhone": server.PipelineState()})
     monkeypatch.setitem(server.state, "commit", "abc1234")
     for h, cny in ((24, 27.3), (0, 24.1)):  # ¥3.2 a day: 7.5 days left
         db.conn().execute("INSERT INTO balances VALUES (?, 'stepfun', ?)", ((now - dt.timedelta(hours=h)).isoformat(timespec="seconds"), cny))

@@ -11,9 +11,13 @@ export function useSocket(onMessage: (m: any) => void, onResync: () => void) {
     last = 0,
     opened = false,
     stopped = false,
-    timer = 0;
+    timer = 0,
+    retry = 0;
 
   function connect() {
+    if (stopped || ws) return;
+    clearTimeout(retry);
+    retry = 0;
     ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
     last = Date.now();
     ws.onopen = () => {
@@ -25,15 +29,19 @@ export function useSocket(onMessage: (m: any) => void, onResync: () => void) {
       last = Date.now();
       onMessage(JSON.parse(e.data));
     };
+    const current = ws;
     ws.onclose = () => {
+      if (stopped || ws !== current) return;
+      ws = null;
       connected.value = false;
-      if (!stopped) setTimeout(connect, 2000);
+      retry = window.setTimeout(connect, 2000);
     };
   }
   function watchdog() {
-    if (!ws || document.hidden || Date.now() - last < STALE_MS) return;
-    ws.onclose = null;
+    if (stopped || !ws || document.hidden || Date.now() - last < STALE_MS) return;
+    ws.onopen = ws.onmessage = ws.onclose = null;
     ws.close();
+    ws = null;
     connected.value = false;
     connect();
   }
@@ -45,10 +53,13 @@ export function useSocket(onMessage: (m: any) => void, onResync: () => void) {
   onUnmounted(() => {
     stopped = true;
     clearInterval(timer);
+    clearTimeout(retry);
+    connected.value = false;
     document.removeEventListener("visibilitychange", watchdog);
     if (ws) {
-      ws.onclose = null;
+      ws.onopen = ws.onmessage = ws.onclose = null;
       ws.close();
+      ws = null;
     }
   });
   // false when not connected: nothing is queued

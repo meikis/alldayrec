@@ -8,7 +8,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
-import 'main.dart';
+import 'page_widgets.dart';
+import 'recorder.dart';
+import 'settings.dart';
 
 const _ch = MethodChannel('live_record/recorder');
 

@@ -77,7 +77,10 @@ flutter {
     source = "../.."
 }
 
+android.sourceSets.getByName("test").resources.srcDir("../../../fixtures")
+
 dependencies {
     implementation("no.nordicsemi.android:dfu:2.5.0")  // firmware updates over Bluetooth (legacy DFU, Adafruit bootloader)
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

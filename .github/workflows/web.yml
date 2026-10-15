@@ -1,7 +1,7 @@
 name: web
 on:
   pull_request:  # only on PRs: main gets what a green PR ran
-    paths: ['web/**', '.github/workflows/web.yml']
+    paths: ['web/**', 'fixtures/**', '.github/workflows/web.yml']
 
 concurrency:  # a new push to a PR cancels its run still going
   group: ${{ github.workflow }}-${{ github.ref }}

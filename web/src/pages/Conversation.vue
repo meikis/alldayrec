@@ -23,6 +23,7 @@ import {
 } from "../lib/api";
 import { play, player } from "../lib/audio";
 import { useSocket } from "../lib/socket";
+import { useMutation } from "../lib/mutation";
 
 const props = defineProps<{ id: string }>();
 const route = useRoute();
@@ -92,24 +93,25 @@ useSocket((m) => {
   }
 }, load);
 
+const { busy: regenerating, error: regenError, run: runRegen } = useMutation();
 async function regen() {
-  await post(`/api/conversation/${props.id}/summarize`);
-  await load();
+  await runRegen(async () => {
+    await post(`/api/conversation/${props.id}/summarize`);
+    await load();
+  });
 }
 
 // a correction in the owner's words, kept for a later read-back across many of them
-const note = ref(""),
-  sending = ref(false);
+const note = ref("");
+const { busy: sending, error: noteError, run: runNote } = useMutation();
 async function sendNote() {
-  sending.value = true;
-  try {
+  if (!note.value.trim()) return;
+  await runNote(async () => {
     c.value!.feedback = await post<Feedback[]>(`/api/conversation/${props.id}/feedback`, {
       text: note.value.trim(),
     });
     note.value = "";
-  } finally {
-    sending.value = false;
-  }
+  });
 }
 // a todo marked 完成 or 不对 (TodoMarks) shows how instead of the buttons
 const marked = (text: string) =>
@@ -123,9 +125,8 @@ const marked = (text: string) =>
 const editing = ref(""),
   newName = ref(""),
   names = ref<string[]>([]),
-  error = ref(""),
-  flash = ref(""),
-  saving = ref(false);
+  flash = ref("");
+const { busy: saving, error, run: runSpeaker } = useMutation();
 const named = (p: string) => p !== "我" && !/^S(\d+|\?)$/.test(p);
 const labels = computed(() =>
   (c.value?.participants ?? []).filter((p) => p !== "我" && p !== "S?"),
@@ -137,9 +138,8 @@ async function edit(label: string) {
   names.value = (await get<string[]>("/api/names")).slice(0, 12);
 }
 async function rename(from: string, to: string) {
-  saving.value = true;
-  error.value = "";
-  try {
+  await runSpeaker(async () => {
+    flash.value = "";
     const r = await post<{ renamed: number; voiceprints: number }>(
       `/api/conversation/${props.id}/rename`,
       { from, to },
@@ -154,17 +154,16 @@ async function rename(from: string, to: string) {
       "；摘要重新生成中";
     editing.value = "";
     await Promise.all([load(), loadSug()]);
-  } catch (e) {
-    error.value = (e as Error).message;
-  } finally {
-    saving.value = false;
-  }
+  });
 }
 const save = () => rename(editing.value, newName.value.trim());
 async function alias(name: string, of: string) {
-  await post("/api/aliases", { alias: name, name: of });
-  flash.value = `已记下「${name}」是 ${of} 的别名，以后被这样叫会建议 ${of}`;
-  await loadSug();
+  await runSpeaker(async () => {
+    flash.value = "";
+    await post("/api/aliases", { alias: name, name: of });
+    flash.value = `已记下「${name}」是 ${of} 的别名，以后被这样叫会建议 ${of}`;
+    await loadSug();
+  });
 }
 </script>
 
@@ -199,15 +198,14 @@ async function alias(name: string, of: string) {
           />
           <button :disabled="saving || !newName.trim()" @click="save">保存</button>
           <button @click="editing = ''">取消</button>
-          <span class="bad">{{ error }}</span>
           <button v-for="n in names" :key="n" class="tag" @click="newName = n">{{ n }}</button>
         </template>
       </div>
       <div v-if="flash" class="flash">{{ flash }}</div>
+      <p v-if="error" class="bad" role="alert">{{ error }}</p>
 
       <div v-if="anySug" class="sug">
         <h3>说话人建议 <span class="hint">点了才会改</span></h3>
-        <span v-if="error && !editing" class="bad">{{ error }}</span>
         <ul class="items">
           <li v-for="h in sug!.names" :key="`n${h.who}${h.name}${h.at}`">
             <span class="who">{{ h.who }}</span
@@ -219,7 +217,7 @@ async function alias(name: string, of: string) {
             <button v-if="anon(h.who)" :disabled="saving" @click="rename(h.who, h.canon)">
               改名为 {{ h.canon }}
             </button>
-            <button v-else-if="h.canon === h.name" @click="alias(h.name, h.who)">
+            <button v-else-if="h.canon === h.name" :disabled="saving" @click="alias(h.name, h.who)">
               记为 {{ h.who }} 的别名
             </button>
             <div class="quote">「{{ h.quote }}」</div>
@@ -344,13 +342,14 @@ async function alias(name: string, of: string) {
               ? `由 ${s.model}${s.via === "live" ? "（会中实时 Agent）" : ""} 生成 · ${(s.created_at ?? "").slice(5, 16).replace("T", " ")}`
               : "语音不足 60 秒，没有生成摘要"
           }}
-          <button @click="regen">重新生成</button>
+          <button :disabled="regenerating" @click="regen">重新生成</button>
         </div>
       </template>
       <div v-else-if="s?.status === 'failed'" class="summary bad">
-        摘要生成失败：{{ s.error }} <button @click="regen">重新生成</button>
+        摘要生成失败：{{ s.error }} <button :disabled="regenerating" @click="regen">重新生成</button>
       </div>
       <div v-else class="summary muted">摘要生成中…</div>
+      <p v-if="regenError" class="bad" role="alert">{{ regenError }}</p>
 
       <div class="note">
         <textarea
@@ -359,6 +358,7 @@ async function alias(name: string, of: string) {
           placeholder="哪里判断错了？比如：这段不是视频、S2 其实是我、摘要漏了某件事"
         ></textarea>
         <button :disabled="sending || !note.trim()" @click="sendNote">提交纠正</button>
+        <p v-if="noteError" class="bad" role="alert">{{ noteError }}</p>
         <div v-for="(f, i) in c.feedback" :key="i" class="muted">
           {{ f.at.slice(5, 16).replace("T", " ") }} {{ f.text }}
         </div>

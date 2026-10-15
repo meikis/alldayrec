@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import AppHeader from "../components/AppHeader.vue";
 import { get, post, type Speaker, type Voice } from "../lib/api";
 import { play, player } from "../lib/audio";
+import { useMutation } from "../lib/mutation";
 
 const groups = ref<Speaker[]>([]),
   names = ref<string[]>([]),
@@ -13,9 +14,8 @@ const groups = ref<Speaker[]>([]),
   members = ref<Voice[]>([]),
   editing = ref(""),
   newName = ref(""),
-  flash = ref(""),
-  error = ref(""),
-  busy = ref(false);
+  flash = ref("");
+const { busy, error, run } = useMutation();
 
 async function load() {
   [groups.value, names.value] = await Promise.all([
@@ -57,9 +57,8 @@ async function expand(g: Speaker) {
 async function name(g: Speaker, to: string, what: string, suggestion?: string) {
   to = to.trim();
   if (!to) return;
-  busy.value = true;
-  error.value = "";
-  try {
+  await run(async () => {
+    flash.value = "";
     const r = await post<{ renamed: number }>("/api/speakers/name", {
       name: to,
       group: g.id,
@@ -68,32 +67,24 @@ async function name(g: Speaker, to: string, what: string, suggestion?: string) {
     flash.value = `${what} → ${to}：改了 ${r.renamed} 段对话，摘要重新生成中`;
     editing.value = "";
     await load();
-  } catch (e) {
-    error.value = (e as Error).message;
-  } finally {
-    busy.value = false;
-  }
+  });
 }
 async function addAlias(alias: string, name: string) {
-  busy.value = true;
-  try {
+  await run(async () => {
+    flash.value = "";
     await post("/api/aliases", { alias, name });
     flash.value = `已记下「${alias}」是 ${name} 的别名`;
     await load();
-  } finally {
-    busy.value = false;
-  }
+  });
 }
 async function detach(g: Speaker, v: Voice) {
-  busy.value = true;
-  try {
+  await run(async () => {
+    flash.value = "";
     await post("/api/speakers/detach", { conv: v.conv, label: v.label, group: g.name ?? g.id });
     flash.value = `已把 ${day(v.start)} 那段从「${title(g)}」移出`;
     members.value = members.value.filter((m) => m !== v);
     await load();
-  } finally {
-    busy.value = false;
-  }
+  });
 }
 </script>
 
@@ -107,6 +98,7 @@ async function detach(g: Speaker, v: Voice) {
       <button :class="{ on: filter === 'all' }" @click="filter = 'all'">全部</button>
     </div>
     <p v-if="flash" class="flash">{{ flash }}</p>
+    <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-if="!loaded" class="empty">加载中…</p>
 
     <section v-for="g in list.slice(0, shown)" :key="g.id" class="card">
@@ -172,7 +164,6 @@ async function detach(g: Speaker, v: Voice) {
           {{ open === g.id ? "收起" : `对话列表（${g.count}）` }}
         </button>
       </div>
-      <p v-if="error && editing === g.id" class="error">{{ error }}</p>
       <div v-if="editing === g.id && names.length" class="chips">
         <button v-for="n in names.slice(0, 12)" :key="n" class="chip" @click="name(g, n, title(g))">
           {{ n }}

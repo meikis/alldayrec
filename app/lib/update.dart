@@ -10,7 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'main.dart';
+import 'settings.dart';
 
 const _ch = MethodChannel('live_record/recorder');
 

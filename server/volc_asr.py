@@ -62,17 +62,20 @@ def utterances(payload: dict | None) -> list[dict]:
             for u in (payload or {}).get("result", {}).get("utterances", []) if u.get("definite", True)]
 
 
-async def _run(x: np.ndarray, mode: str, pace_s: float, speakers: bool, log=None) -> tuple[list[dict], dict]:
+async def _session(x: np.ndarray, mode: str, pace_s: float, options: dict, consume, *, empty_packet: bool = False) -> dict:
+    """Send one request while consuming answers; a reader failure cancels the sender."""
     import websockets
     headers = {"X-Api-Key": os.environ["VOLC_ASR_KEY"], "X-Api-Resource-Id": RESOURCE,
                "X-Api-Connect-Id": str(uuid.uuid4()), "X-Api-Request-Id": str(uuid.uuid4())}
     req = {"user": {"uid": "live-record"},
            "audio": {"format": "pcm", "codec": "raw", "rate": SR, "bits": 16, "channel": 1},
-           "request": {"model_name": "bigmodel", "enable_itn": True, "enable_punc": True, "show_utterances": True,
-                       "result_type": "full", **({"enable_speaker_info": True} if speakers else {})}}
+           "request": {"model_name": "bigmodel", "enable_itn": True, "enable_punc": True,
+                       "show_utterances": True, **options}}
     step = SR * PACKET_MS // 1000
     packets = [x[i:i + step].tobytes() for i in range(0, len(x), step)]
-    last, responses, t0 = None, 0, time.perf_counter()
+    if empty_packet and not packets:
+        packets = [b""]
+    responses, t0 = 0, time.perf_counter()
     # ping_interval=None: while packets pour in faster than real time the server does not answer pings in time
     async with websockets.connect(URL.format(mode=mode), additional_headers=headers, max_size=None, ping_interval=None) as ws:
         await ws.send(frame(FULL_CLIENT, POS_SEQ, 1, json.dumps(req).encode()))
@@ -82,16 +85,13 @@ async def _run(x: np.ndarray, mode: str, pace_s: float, speakers: bool, log=None
         logid = ws.response.headers.get("X-Tt-Logid") if hasattr(ws, "response") else None
 
         async def reader():
-            nonlocal last, responses
+            nonlocal responses
             async for data in ws:
                 r = parse(data)
                 responses += 1
                 if r["type"] == SERVER_ERROR:
                     raise RuntimeError(f"{r['code']}: {r['payload']}")
-                if isinstance(r.get("payload"), dict) and "result" in r["payload"]:
-                    last = r["payload"]
-                    if log:
-                        log(r)
+                consume(r)
                 if r.get("seq", 0) < 0:  # the answer to the last packet
                     return
 
@@ -105,57 +105,42 @@ async def _run(x: np.ndarray, mode: str, pace_s: float, speakers: bool, log=None
             tg.cancel_scope.deadline = anyio.current_time() + 120  # the answer to the last packet
         if tg.cancel_scope.cancelled_caught:
             raise TimeoutError  # as asyncio.wait_for did: the calls table keeps "TimeoutError: "
-    return utterances(last), {"seconds": round(time.perf_counter() - t0, 1), "responses": responses, "logid": logid,
-                  "text": (last or {}).get("result", {}).get("text", "")}
+    return {"seconds": round(time.perf_counter() - t0, 1), "responses": responses, "logid": logid}
+
+
+async def _run(x: np.ndarray, mode: str, pace_s: float, speakers: bool, log=None) -> tuple[list[dict], dict]:
+    last = None
+
+    def consume(r):
+        nonlocal last
+        if isinstance(r.get("payload"), dict) and "result" in r["payload"]:
+            last = r["payload"]
+            if log:
+                log(r)
+
+    meta = await _session(x, mode, pace_s,
+                          {"result_type": "full", **({"enable_speaker_info": True} if speakers else {})}, consume)
+    return utterances(last), {**meta, "text": (last or {}).get("result", {}).get("text", "")}
 
 
 async def _stream(x: np.ndarray, pace_s: float, end_window_ms: int | None = None) -> tuple[list[dict], dict]:
     """bigmodel_async with two-pass recognition: the server cuts sentences (800 ms of silence) and re-reads each with
     the nostream model; only those carry definite, and result_type single sends each sentence once."""
-    import websockets
-    headers = {"X-Api-Key": os.environ["VOLC_ASR_KEY"], "X-Api-Resource-Id": RESOURCE,
-               "X-Api-Connect-Id": str(uuid.uuid4()), "X-Api-Request-Id": str(uuid.uuid4())}
-    req = {"user": {"uid": "live-record"},
-           "audio": {"format": "pcm", "codec": "raw", "rate": SR, "bits": 16, "channel": 1},
-           "request": {"model_name": "bigmodel", "enable_itn": True, "enable_punc": True, "show_utterances": True,
-                       "result_type": "single", "enable_nonstream": True, "enable_speaker_info": True,
-                       **({"end_window_size": end_window_ms} if end_window_ms else {})}}  # default 800 ms of silence ends a sentence
-    step = SR * PACKET_MS // 1000
-    packets = [x[i:i + step].tobytes() for i in range(0, len(x), step)] or [b""]
-    utts, untimed, t0 = [], [], time.perf_counter()  # untimed: definite results without times (seen on 05-26), not usable
-    async with websockets.connect(URL.format(mode="async"), additional_headers=headers, max_size=None, ping_interval=None) as ws:
-        await ws.send(frame(FULL_CLIENT, POS_SEQ, 1, json.dumps(req).encode()))
-        first = parse(await ws.recv())
-        if first["type"] == SERVER_ERROR:
-            raise RuntimeError(f"{first['code']}: {first['payload']}")
-        logid = ws.response.headers.get("X-Tt-Logid") if hasattr(ws, "response") else None
+    utts, untimed = [], []  # untimed: definite results without times (seen on 05-26), not usable
 
-        async def reader():
-            async for data in ws:
-                r = parse(data)
-                if r["type"] == SERVER_ERROR:
-                    raise RuntimeError(f"{r['code']}: {r['payload']}")
-                p = r.get("payload")
-                for u in (p.get("result", {}).get("utterances") or [] if isinstance(p, dict) else []):
-                    if u.get("definite") and "start_time" not in u:
-                        untimed.append(u.get("text", ""))
-                    elif u.get("definite"):
-                        utts.append({"text": u["text"], "start_ms": u["start_time"], "end_ms": u["end_time"],
-                                     **({"speaker": "SPEAKER_" + str(u["additions"]["speaker_id"])} if u.get("additions", {}).get("speaker_id") is not None else {})})
-                if r.get("seq", 0) < 0:
-                    return
+    def consume(r):
+        p = r.get("payload")
+        for u in (p.get("result", {}).get("utterances") or [] if isinstance(p, dict) else []):
+            if u.get("definite") and "start_time" not in u:
+                untimed.append(u.get("text", ""))
+            elif u.get("definite"):
+                utts.extend(utterances({"result": {"utterances": [u]}}))
 
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(reader)
-            for i, pk in enumerate(packets, start=2):
-                end = i == len(packets) + 1
-                await ws.send(frame(AUDIO_ONLY, NEG_WITH_SEQ if end else POS_SEQ, -i if end else i, pk))
-                if pace_s:
-                    await anyio.sleep(pace_s)
-            tg.cancel_scope.deadline = anyio.current_time() + 120
-        if tg.cancel_scope.cancelled_caught:
-            raise TimeoutError  # as asyncio.wait_for did: the calls table keeps "TimeoutError: "
-    return utts, {"seconds": round(time.perf_counter() - t0, 1), "logid": logid, "untimed": untimed}
+    meta = await _session(x, "async", pace_s,
+                          {"result_type": "single", "enable_nonstream": True, "enable_speaker_info": True,
+                           **({"end_window_size": end_window_ms} if end_window_ms else {})},
+                          consume, empty_packet=True)
+    return utts, {k: meta[k] for k in ("seconds", "logid")} | {"untimed": untimed}
 
 
 async def stream(x: np.ndarray, pace_s: float = 0.02, end_window_ms: int | None = None):

@@ -11,6 +11,7 @@ import asyncio
 import ctypes
 import errno
 import math
+import json
 import random
 import urllib.request
 import datetime as dt
@@ -421,19 +422,26 @@ async def log(name: str, start: int):
 
 
 def selftest():
-    a = lambda first, n: bytes([0x41, n]) + struct.pack("<I", first) + b"".join(bytes([2, i, i]) for i in range(n))
-    t = lambda frame, epoch: b"T" + struct.pack("<IQ", frame, epoch)
-    # boot 1: a gap at 5..8, a cut-short tail; its 'T' in the middle of the stream, after the frames it dates.
-    # boot 2: rebooted, never synced: time unknown. boot 3: the open file, its 'T' (this connection's) last.
-    files = {1 << 16: a(0, 3) + a(3, 2) + t(4, 10_000) + a(9, 1), 1 << 16 | 1: a(10, 1)[:-1],
-             2 << 16: a(0, 2), 3 << 16: a(40, 10) + t(50, 99_000)}
+    fixture = json.loads((Path(__file__).resolve().parents[2] / "fixtures/record-stream.json").read_text())
+    files = {f["file"]: bytes.fromhex(f["hex"]) for f in fixture["archive"]["files"]}
     got = list(runs(files))
-    assert [(s, len(f)) for s, f in got] == [(9_960, 5), (10_050, 1), (None, 2), (98_900, 10)], got
-    ogg = ogg_opus([bytes([0xF8, 0xFF, 0xFE])] * 120)  # 120 silent 10 ms Opus frames
-    assert ogg[:4] == b"OggS" and ogg.count(b"OggS") == 5, ogg.count(b"OggS")
-    # READ took 0..6, LIVE brought 4..8 (overlap) and 10..12 (after a lost notify)
-    assert assemble({0: b"abcdef", 4: b"efgh", 10: b"kl"}) == (b"abcdefgh", 8)
-    assert assemble({0: b"abcdefgh", 8: b"ij", 10: b"kl"}) == (b"abcdefghijkl", None)
+    assert [[s, len(f)] for s, f in got] == fixture["archive"]["runs"], got
+    v = fixture["mirror"]
+    stream, parts = bytes.fromhex(v["hex"]), {}
+    for d in v["deliveries"]:
+        parts[d["start"]] = stream[d["start"]:d["end"]]
+        merged, hole = assemble(parts)
+        assert hole == d["hole"], (hole, d)
+    assert merged == stream
+    # The snapshot reader merges consecutive frames; live clients slice at liveFrames.
+    # Compare their frame clocks, not the transport-dependent piece boundaries.
+    actual = [s + i * FRAME_MS for s, frames in runs({v["file"]: merged}) for i in range(len(frames))]
+    expected = [s + i * FRAME_MS for s, count in v["pieces"] for i in range(count)]
+    assert actual == expected, (actual, expected)
+    o = fixture["ogg"]
+    ogg = ogg_opus([bytes.fromhex(o["packetHex"])] * o["count"])
+    assert ogg[:4] == b"OggS" and ogg.count(b"OggS") == o["pages"]
+    # Snapshot parser: incomplete tails are dropped, not buffered. No persisted boot-reuse API.
 
     # the event log, wrapped: the oldest sectors went, so boot 7 starts mid-way (its BOOT and TIME gone); LOG packets
     # as the device sends them (seq + records), one sent twice by an overlapping read, out of order

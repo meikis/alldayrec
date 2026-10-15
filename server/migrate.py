@@ -27,7 +27,7 @@ def main():
         raise SystemExit(f"{out} exists")
     if list(DATA.glob("????-??-??.jsonl")):
         raise SystemExit("first-layer <date>.jsonl files exist; the database has no place for pending rows")
-    db.open_db(out)
+    db.open_db(out, REC)
     n, finalized = {}, ""
     with db.tx() as t:
         for p in sorted(DATA.glob("*.final.jsonl")):  # each record replaces the rows starting in [from, to)
@@ -66,7 +66,7 @@ def main():
         files = sorted(p for p in REC.glob("chunks/*/*.*") if p.stem.isdigit())
         with cf.ThreadPoolExecutor(16) as ex:
             secs = list(ex.map(seconds, files))
-        t.executemany("INSERT INTO pieces VALUES (?, ?, ?, ?)",
+        t.executemany("INSERT INTO pieces (device, start_ms, seconds, path) VALUES (?, ?, ?, ?)",
                       [(p.parent.name, int(p.stem), s, str(p.relative_to(REC))) for p, s in zip(files, secs)])
         n["pieces"] = len(files)
     voices = db.conn().execute("SELECT count(*) FROM voices").fetchone()[0]

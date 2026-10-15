@@ -18,6 +18,34 @@ Page: http://127.0.0.1:8770/ . Data, per tenant: `<data>/live.db` (SQLite: sente
 
 Tests and tooling in `server/`: `test_live.py`, `replay_case.py` (replay a case through candidate pipelines), `score_case.py` (score against a case's `gt.jsonl`), `eval_all.sh`.
 
+### Code boundaries and regression checks
+
+- `server/pipeline_state.py` owns each device's typed in-memory state. Finalization and the independent draft reader keep separate cursors; persisted rows and public API payloads remain dictionaries. `server/volc_asr.py` shares the WebSocket session/packet lifecycle while keeping full-result and streaming-result accumulation separate.
+- `server/db.py` applies search bounds, membership filters and result limits in SQLite (JSON1 required), with transcript fallback in the same query. Metadata matching retains Python's Unicode case handling; only returned results decode full summary bodies. Name counts read participants without loading summaries.
+- `app/lib/main.dart` contains startup and the application root; `home.dart` owns navigation and the recording lifecycle. `settings.dart`, `recorder.dart`, and `recorder_status.dart` separate configuration, native-channel calls and status presentation; individual pages import their actual dependencies.
+  Disposing `Home` cancels status polling and unregisters its lifecycle observer; asynchronous settings/status completions do not act on a disposed page.
+- `fixtures/record-stream.json` is the common record-stream oracle for Web, Android, Swift and the Python recorder client. It covers fragmented/overlapping reads, clock anchors, gaps, truncated tails and supported boot-reuse behavior. Snapshot readers merge runs while live clients slice them; platform-specific differences are stated in the fixture rather than hidden by duplicate expectations.
+- Web mutations share busy/error handling through `web/src/lib/mutation.ts`; socket retries are owned by the mounted consumer and cancelled on teardown.
+
+PR gates run the backend suite, Web type/build checks and `*.check.ts`, Flutter analysis/tests, Android JVM regressions, Swift protocol checks, and firmware host checks (including the microphone high-pass filter). Fixture changes trigger all three protocol-consumer gates. Android JVM tests bootstrap the pinned Flutter SDK's Gradle wrapper and need no signing credentials or APK release.
+
+Local checks (from the relevant directory, with the toolchains described below):
+
+```bash
+# server/
+LIVE_DATA=unused ASR_UPLOAD_BRIDGE_URL=unused ASR_SERVICE_URL=unused uv run --with pytest pytest -q
+# web/
+pnpm install --frozen-lockfile && pnpm build
+for f in *.check.ts; do node --experimental-strip-types "$f" || exit 1; done
+# app/ (use the pub host recorded in pubspec.lock)
+PUB_HOSTED_URL=https://pub.flutter-io.cn flutter pub get --enforce-lockfile
+flutter analyze --no-pub && flutter test --no-pub -j 4
+# Android JVM and Swift commands: .github/workflows/app.yml
+# Firmware host commands: .github/workflows/firmware-check.yml
+```
+
+The legacy `server/migrate.py` importer still refuses an existing `live.db` or pending first-layer transcripts, reads its JSON/audio inputs without changing them, and inserts audio pieces by explicit column names so added schema columns do not break the import. `test_migrate.py` exercises the real command with a temporary recording and verifies that a second invocation leaves the existing database untouched.
+
 Android app releases: raise `version` in `app/pubspec.yaml` (the build number after `+` must go up), build in a clean checkout of main (`cd app && ANDROID_HOME=~/Library/Android/sdk flutter build apk --release`, signed with `~/.android/live-record-debug.keystore` like every build before), then `server/apk_release.sh app/build/app/outputs/flutter-apk/app-release.apk`. It puts the APK at the main instance's `/app.apk` by a rename (a download under way keeps the old file), keeps the one it replaces as `data/live-record.apk.prev-<version>`, refuses one that is not newer, and checks `/api/app/latest`. That route reads the version from the APK itself (`server/apk.py`); Android phones ask for it at start and, back in front, once a day, and offer the update at the top of the home page.
 
 ## GitHub Actions 构建与归档

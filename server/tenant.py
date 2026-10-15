@@ -16,8 +16,12 @@ import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import anyio
+
+if TYPE_CHECKING:
+    from pipeline_state import PipelineState
 
 current: contextvars.ContextVar["Tenant"] = contextvars.ContextVar("tenant")
 FILE = Path(__file__).resolve().parent.parent / "tenants.json"
@@ -33,7 +37,7 @@ class Tenant:
     # its state in memory: what its pages see and what its pipelines run on
     clients: set = field(default_factory=set)       # its WebSockets
     events: list = field(default_factory=list)      # its system log, the last 300
-    devices: dict = field(default_factory=dict)     # one pipeline's state per device
+    devices: dict[str, "PipelineState"] = field(default_factory=dict)
     pipelines: set = field(default_factory=set)     # the devices whose pipeline runs (server.lasting)
     dias: list = field(default_factory=list)        # its pipelines' diarists: a rename teaches them a name
     watch_until: float = 0.0                        # a page of its watches until then: drafts, the live analysis
