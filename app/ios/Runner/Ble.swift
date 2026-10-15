@@ -188,6 +188,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   @Shared private var lastSeen: String?   // HH:mm the link last went down
   @Shared private var staleNote: String?  // iOS still has keys the recorder forgot: what the person has to do
   @Shared private var bluetoothOff = false  // as last logged (#155 A2)
+  @Shared private var waiting = false  // a reconnect request said in the device log, until the link is up again (#239)
 
   init(chunks: URL, undated: URL, mirrors: URL, sliceS: @escaping () -> Int, report: @escaping (String, [String: Any]) -> Void) {
     self.chunks = chunks; self.undated = undated; self.mirrors = mirrors; self.sliceS = sliceS; self.report = report
@@ -203,6 +204,9 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   }
 
   private func begin(_ p: CBPeripheral) {
+    // its session runs already: iOS connected while the app was not running, the restored link started one at
+    // poweredOn and iOS still says didConnect (10-09, 10-15: services read twice, #239)
+    if conn?.p === p { return }
     let c = Conn(p)
     conn = c
     Thread.detachNewThread { self.session(c) }
@@ -254,9 +258,19 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     }
   }
 
+  /// The app relaunched in the background for the recorder: what iOS kept for it. The launch's options never said so
+  /// (no .bluetoothCentrals in 13 background launches, #239).
   func centralManager(_ c: CBCentralManager, willRestoreState dict: [String: Any]) {
-    guard let p = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral])?.first else { return }
-    Ble.log("restored \(p.identifier) state \(p.state.rawValue)")
+    let p = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral])?.first
+    Ble.log("restored \(p.map { "\($0.identifier) state \($0.state.rawValue)" } ?? "nothing")")
+    let kept = switch p?.state {
+    case .connected?: "已连上录音设备"
+    case .connecting?: "连接请求还在等录音设备"
+    case nil: "没有录音设备的连接或请求"
+    default: "录音设备没有连着"
+    }
+    DeviceLog.app(tag ?? DeviceLog.mine(), "restore", "iOS 恢复蓝牙：\(kept)", fields: ["state": p.map { $0.state.rawValue } ?? NSNull()])
+    guard let p else { return }
     p.delegate = self
     peripheral = p
   }
@@ -320,6 +334,10 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     pairingFailed = false
     q.asyncAfter(deadline: .now() + wait) {
       if self.on && self.peripheral === p && self.prefs.string(forKey: "bleName") != nil && !self.prefs.bool(forKey: "bleKicked") {
+        if !self.waiting {  // once an outage: the request stays until the recorder is back, the app ended or not
+          self.waiting = true
+          DeviceLog.app(self.tag ?? p.identifier.uuidString, "waiting", "在等录音设备：连接请求已交给 iOS，录音设备一回到附近就连上")
+        }
         self.connect(p, auto: true)
       }
     }
@@ -440,6 +458,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     one.lock()
     defer { syncDoneKb = 0; syncTotalKb = 0; syncLiveKb = 0; one.unlock() }  // no link, no catch-up under way
     guard alive(p) else { return }
+    DeviceLog.connecting()
     let name = prefs.string(forKey: "bleName") ?? p.p.identifier.uuidString
     let adding = prefs.bool(forKey: "bindPending")
     do {
@@ -523,6 +542,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             live0 = true
             readLog(p)
             DeviceLog.connected(Ble.tag(name))
+            waiting = false
             state = "已连接 · 实时上传"
           }
           if reading == nil { try nextRead(p, m) }

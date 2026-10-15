@@ -151,15 +151,22 @@ enum DeviceLog {
   /// A step of connecting (BleLink.step), kept for the connect event.
   static func step(_ what: String, _ ms: Int) { lock.lock(); steps.append("\(what) \(ms) ms"); lock.unlock() }
 
-  /// The link is up and the audio flows: the steps it took, as one event.
+  /// A connection's session starts: its steps from here. Not at the disconnect: the session it ends adds the step it
+  /// was in after that, and it showed up first in the next connect event (#239).
+  static func connecting() { lock.lock(); steps = []; lock.unlock() }
+
+  /// The link is up and the audio flows: the steps it took, and how long it was down (#239), as one event.
   static func connected(_ device: String) {
     lock.lock(); let s = steps.joined(separator: "，"); steps = []; lock.unlock()
-    app(device, "connect", "连上：\(s)")
+    let down = (prefs.object(forKey: "downAt") as? Int64).map { Int(Int64(Date().timeIntervalSince1970 * 1000) - $0) }
+    prefs.removeObject(forKey: "downAt")
+    app(device, "connect", "\(down.map { "断开 \(DfuLog.span($0)) 后连上" } ?? "连上")：\(s)", fields: down.map { ["down_ms": $0] } ?? [:])
   }
 
-  /// The link went down: why, as CoreBluetooth says it (nil: this phone ended it).
+  /// The link went down: why, as CoreBluetooth says it (nil: this phone ended it). The first of an outage dates it, in
+  /// prefs: iOS may end the app while it waits and relaunch it for the connection (10-15: 58 min, #239).
   static func disconnected(_ device: String, _ why: String?) {
-    lock.lock(); steps = []; lock.unlock()
+    if prefs.object(forKey: "downAt") == nil { prefs.set(Int64(Date().timeIntervalSince1970 * 1000), forKey: "downAt") }
     app(device, "disconnect", "断开（\(why ?? "手机断开")）", level: "warn")
   }
 

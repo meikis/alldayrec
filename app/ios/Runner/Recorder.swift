@@ -228,7 +228,7 @@ enum Recorder {
   /// At launch (AppDelegate, before any UI: iOS may be relaunching the app in the background for the BLE recorder): a
   /// piece being written when the process died still decodes up to its last page; send what is left over. The BLE link
   /// comes back by itself: the recorder records anyway, and the link is always on (Android's sticky service).
-  static func launch(_ options: [UIApplication.LaunchOptionsKey: Any]? = nil) {
+  static func launch() {
     // app/ios/e2e/run.sh: settings in the launch environment (only devicectl or a debugger sets one); null removes a key
     if let j = ProcessInfo.processInfo.environment["LR_E2E"], let d = try? JSONSerialization.jsonObject(with: Data(j.utf8)) as? [String: Any] {
       for (k, v) in d {
@@ -244,9 +244,9 @@ enum Recorder {
     DeviceLog.start(dir: dir.deletingLastPathComponent(), prefs: defaults)
     foregroundApp = UIApplication.shared.applicationState != .background
     // what the app says of itself (#155 A2, A7, A8): this launch (in the background: iOS brought it back for the
-    // recorder, state restoration), how its processes ended and crashed (MetricKit, a day later), what it may do
-    DeviceLog.app(DeviceLog.mine(), "launch", foregroundApp ? "App 启动"
-                  : "App 启动（在后台被系统拉起\(options?[.bluetoothCentrals] != nil ? "：恢复蓝牙连接" : "")）")
+    // recorder, state restoration: BleLink's restore event says what it kept), how its processes ended and crashed
+    // (MetricKit, a day later), what it may do
+    DeviceLog.app(DeviceLog.mine(), "launch", foregroundApp ? "App 启动" : "App 启动（在后台被系统拉起）")
     MXMetricManager.shared.add(Metrics.shared)
     permissions(UIApplication.shared.backgroundRefreshStatus)
     let fm = FileManager.default
