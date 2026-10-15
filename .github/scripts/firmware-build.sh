@@ -31,7 +31,8 @@ case "$FAMILY" in
     ;;
   blerelay)
     export RELAY_KEY_FILE="$RUNNER_TEMP/firmware-relay.key"
-    trap 'rm -f "$RELAY_KEY_FILE"' EXIT
+    # the build tree holds the key as a plain header: gone at exit, after packaging (or a failure)
+    trap 'rm -rf "$RELAY_KEY_FILE" "$ROOT/firmware/blerelay/build"' EXIT
     if [[ "${GITHUB_EVENT_NAME:-}" == push && "${GITHUB_REF:-}" == refs/tags/firmware-* ]]; then
       [[ "${RELAY_KEY_HEX:-}" =~ ^[0-9a-f]{64}$ ]] && [[ "$RELAY_KEY_HEX" != 0000000000000000000000000000000000000000000000000000000000000000 ]] || {
         echo 'Formal relay requires a non-test RELAY_KEY_HEX authentication secret' >&2; exit 1;

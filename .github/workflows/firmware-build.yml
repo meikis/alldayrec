@@ -34,27 +34,34 @@ jobs:
   select:
     runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}"]', vars.LR_RUNNER)) }}
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read  # this branch's last successful run
     outputs:
       matrix: ${{ steps.select.outputs.matrix }}
       selected: ${{ steps.select.outputs.selected }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Reuse runner-owned uv
         if: runner.environment == 'self-hosted'
         run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Set up pinned official uv
+      - name: Install pinned uv
         if: runner.environment == 'github-hosted'
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
-        with:
-          version: '0.13.0'
-          enable-cache: false
+        run: pipx install uv==0.13.0
       - name: Check firmware selection boundaries
         run: uv run --no-project --python 3.11 python .github/scripts/test_firmware_select.py
       - id: select
-        run: uv run --no-project --python 3.11 python .github/scripts/firmware-select.py
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          # empty when the lookup fails: then every family is built
+          LAST_SUCCESS_SHA=$(gh api "repos/$GH_REPO/actions/workflows/firmware-build.yml/runs?branch=$GITHUB_REF_NAME&event=push&status=success&per_page=1" --jq '.workflow_runs[0].head_sha // empty' || true)
+          export LAST_SUCCESS_SHA
+          uv run --no-project --python 3.11 python .github/scripts/firmware-select.py
 
   build:
     needs: select
@@ -71,18 +78,16 @@ jobs:
       MAKEFLAGS: '-j2'
       NINJAFLAGS: '-j2'
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # lr.sh uses commit history to generate firmware revision
           persist-credentials: false
       - name: Reuse runner-owned uv
         if: runner.environment == 'self-hosted'
         run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - name: Install pinned uv
         if: runner.environment == 'github-hosted'
-        with:
-          version: '0.13.0'
-          enable-cache: false
+        run: pipx install uv==0.13.0
       - name: Require formal relay authentication material
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/firmware-') && matrix.family == 'blerelay'
         env:
@@ -122,7 +127,7 @@ jobs:
       contents: read
       actions: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Keep only this branch's latest successful firmware artifacts
@@ -141,18 +146,16 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
       - name: Reuse runner-owned uv
         if: runner.environment == 'self-hosted'
         run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - name: Install pinned uv
         if: runner.environment == 'github-hosted'
-        with:
-          version: '0.13.0'
-          enable-cache: false
+        run: pipx install uv==0.13.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: firmware-*-${{ github.sha }}

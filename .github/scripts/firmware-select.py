@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 FORMAL_VARIANTS = ["sdmod", "promicro", "promicro-p2", "promicro-p3"]
@@ -28,14 +29,14 @@ def main():
         families = FAMILIES if target == "all" else [target]
         variants = FORMAL_VARIANTS if variant == "all" else [variant]
     else:
-        before = event.get("before", "")
-        if not before or set(before) == {"0"}:
+        # Compare with this branch's last successful push build, not the push's `before`: a newer push cancels the
+        # run before it, and what that run would have built must not be skipped for good.
+        base = os.environ.get("LAST_SUCCESS_SHA", "")
+        if not base or subprocess.run(["git", "cat-file", "-e", base + "^{commit}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+            print(f"No last successful build in this history ({base or 'none'}): building every family", file=sys.stderr)
             families = FAMILIES
         else:
-            # Full history includes the previous push; force pushes can remove it.
-            if subprocess.run(["git", "cat-file", "-e", before], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
-                subprocess.run(["git", "fetch", "--no-tags", "origin", before], check=True)
-            paths = git("diff", "--name-only", before, "HEAD").splitlines()
+            paths = git("diff", "--name-only", base, "HEAD").splitlines()
             shared = any(p in (".github/workflows/firmware-build.yml", ".github/scripts/test_firmware_select.py") or p.startswith(".github/scripts/firmware-") for p in paths)
             families = FAMILIES if shared else [f for f in FAMILIES if any(p.startswith(f"firmware/{f}/") for p in paths)]
     include = []

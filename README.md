@@ -54,7 +54,7 @@ APK 和硬件固件使用独立构建流程；构建不等于生产发布，不�
 
 | 入口 | 构建内容 | 保存位置 |
 | --- | --- | --- |
-| `main` 上相关路径变更 | 对应 APK 或固件系列的测试产物 | Actions Artifacts，保留 3 天 |
+| `main` 上相关路径变更 | APK，或自上次成功构建以来有改动的固件系列（被新推送取消、失败的那次改动会补建；查不到上次成功就全部构建）的测试产物 | Actions Artifacts，保留 3 天 |
 | Actions → Run workflow | 手动选择构建目标及录音器型号 | Actions Artifacts，保留 3 天 |
 | `apk-v<versionName>` tag | 使用原签名的正式 APK，tag 版本须匹配 `app/pubspec.yaml` | Artifacts + Draft GitHub Release |
 | `firmware-*` tag | 正式录音器型号、自检和 ESP32 中继固件 | Artifacts + Draft GitHub Release |
@@ -72,8 +72,9 @@ gh workflow run apk-build.yml --ref main
 gh workflow run firmware-build.yml --ref main -f target=devkit -f variant=promicro-p3
 # 正式 APK：先将 pubspec.yaml 的版本更新合入 main，再打与 versionName 匹配的 tag。
 git fetch origin main
-git tag apk-v1.4.7 origin/main
-git push origin apk-v1.4.7
+v=$(git show origin/main:app/pubspec.yaml | sed -n 's/^version: *\([0-9.]*\)+.*/\1/p')  # versionName
+git tag "apk-v$v" origin/main
+git push origin "apk-v$v"
 # 固件归档 tag 独立命名；其设备版本仍由源码提交确定。
 git tag firmware-20261014 origin/main
 git push origin firmware-20261014
@@ -112,7 +113,7 @@ base64 < ~/.android/live-record-debug.keystore | gh secret set ANDROID_KEYSTORE_
 
 密码、alias 和 relay key 使用 GitHub 的 Secret 输入框或 `gh secret set` 的交互输入，不写入 shell 历史。证书指纹应从原 keystore 或已安装正式 APK 的签名证书核实，不从新生成的测试包复制。
 
-正式 APK 缺签名凭据或证书不匹配时失败；正式 ESP32 构建缺 relay key 时失败。测试 APK 使用独立测试签名，不能覆盖原签名安装；测试 ESP32 中继使用公开测试 key，不能当作生产认证配置。产物名称和元数据区分测试与正式用途。
+正式 APK 缺签名凭据或证书不匹配时失败；正式 ESP32 构建缺 relay key 时失败。测试 APK 由 CI 每次随机生成的测试密钥签名，包名与正式版相同，不能覆盖原签名安装：要装测试包必须先卸载正式 App，卸载会丢掉手机上还没上传的录音分片；测试 ESP32 中继使用公开测试 key，不能当作生产认证配置。产物名称和元数据区分测试与正式用途。
 
 ESP32 二进制包含认证 key，正式固件只能在受信任的私有仓库访问范围内分享。不要把签名文件、认证 key 或密码放入产物、缓存日志和 Git。普通构建权限为 `contents: read`，只有创建 Draft Release 的 job 使用 `contents: write`。
 

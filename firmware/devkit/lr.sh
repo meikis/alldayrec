@@ -47,7 +47,7 @@ build)
   TC=(nrfutil sdk-manager toolchain launch --ncs-version v2.7.0)
   [ -z "${LR_NCS_INSTALL_DIR:-}" ] || TC+=(--install-dir "$LR_NCS_INSTALL_DIR")
   TC+=(--); [ -z "${ZEPHYR_SDK_INSTALL_DIR:-}" ] || TC=(env)
-  "${TC[@]}" west build -b xiao_ble/nrf52840/sense -d "$D/build/lr-$V" "$D" -o="-j${LR_BUILD_JOBS:-2}" -- \
+  "${TC[@]}" west build -b xiao_ble/nrf52840/sense -d "$D/build/lr-$V" "$D" ${LR_BUILD_JOBS:+-o=-j$LR_BUILD_JOBS} -- \
     -DNCS_TOOLCHAIN_VERSION=NONE -DCONF_FILE="$D/prj_$C.conf" -DCACHED_CONF_FILE="$D/prj_$C.conf" \
     -DDTC_OVERLAY_FILE="$OVL" -DPLATFORM=nrf52840 "${EXTRA[@]}"
   ;;

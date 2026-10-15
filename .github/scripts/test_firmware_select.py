@@ -30,11 +30,11 @@ class FirmwareSelection(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "fixture")
 
-    def select(self, event_name, ref, event):
+    def select(self, event_name, ref, event, base=""):
         event_path = self.root / "event.json"
         output_path = self.root / "output"
         event_path.write_text(json.dumps(event))
-        env = dict(os.environ, GITHUB_EVENT_NAME=event_name, GITHUB_REF=ref,
+        env = dict(os.environ, GITHUB_EVENT_NAME=event_name, GITHUB_REF=ref, LAST_SUCCESS_SHA=base,
                    GITHUB_EVENT_PATH=str(event_path), GITHUB_OUTPUT=str(output_path))
         result = subprocess.run([sys.executable, str(SCRIPT)], cwd=self.root, env=env, capture_output=True, text=True)
         if result.returncode:
@@ -47,7 +47,7 @@ class FirmwareSelection(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text("int value;\n")
         self.commit()
-        result, jobs = self.select("push", "refs/heads/main", {"before": self.base})
+        result, jobs = self.select("push", "refs/heads/main", {}, self.base)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual({(j["family"], j["variant"]) for j in jobs}, {
             ("devkit", "sdmod"), ("devkit", "promicro"), ("devkit", "promicro-p2"), ("devkit", "promicro-p3")})
@@ -76,9 +76,27 @@ class FirmwareSelection(unittest.TestCase):
     def test_unrelated_main_change_selects_no_firmware(self):
         (self.root / "README").write_text("documentation\n")
         self.commit()
-        result, jobs = self.select("push", "refs/heads/main", {"before": self.base})
+        result, jobs = self.select("push", "refs/heads/main", {}, self.base)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(jobs, [])
+
+    def test_change_of_a_cancelled_run_is_built_by_the_next(self):
+        # selftest changed in a push whose run a newer push (blerelay) cancelled: both since the last success
+        for family in ("selftest", "blerelay"):
+            source = self.root / f"firmware/{family}/main.c"
+            source.parent.mkdir(parents=True)
+            source.write_text("int value;\n")
+            self.commit()
+        result, jobs = self.select("push", "refs/heads/main", {}, self.base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual({j["family"] for j in jobs}, {"selftest", "blerelay"})
+
+    def test_no_or_unknown_last_success_builds_everything(self):
+        # the first run, a failed lookup, or a success force-pushed out of the history
+        for base in ("", "0" * 40):
+            result, jobs = self.select("push", "refs/heads/main", {}, base)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual({j["family"] for j in jobs}, {"devkit", "selftest", "blerelay"})
 
 
 if __name__ == "__main__":
