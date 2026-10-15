@@ -4,6 +4,15 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// CI explicitly selects a signer; ordinary local builds retain the existing debug-key behavior.
+val ciSigningMode = System.getenv("LR_ANDROID_SIGNING_MODE")
+fun ciSigningValue(name: String): String =
+    System.getenv(name)?.takeIf { it.isNotBlank() }
+        ?: error("Explicit CI signing requires $name")
+if (ciSigningMode != null) {
+    require(ciSigningMode in listOf("test", "release")) { "Unknown CI signing mode" }
+}
+
 android {
     namespace = "com.suyiiyii.live_record"
     compileSdk = 37
@@ -37,6 +46,14 @@ android {
             val ks = file(System.getProperty("user.home") + "/.android/live-record-debug.keystore")
             if (ks.exists()) storeFile = ks
         }
+        if (ciSigningMode != null) {
+            create("ci") {
+                storeFile = file(ciSigningValue("LR_ANDROID_KEYSTORE_PATH"))
+                storePassword = ciSigningValue("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = ciSigningValue("ANDROID_KEY_ALIAS")
+                keyPassword = ciSigningValue("ANDROID_KEY_PASSWORD")
+            }
+        }
     }
 
     testOptions {
@@ -45,7 +62,7 @@ android {
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (ciSigningMode != null) "ci" else "debug")
         }
     }
 }

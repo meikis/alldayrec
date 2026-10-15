@@ -43,9 +43,11 @@ EXTRA+=("-DCONFIG_BT_DIS_FW_REV_STR=\"$FWV\"")
 case ${1:-} in
 build)
   cd "${NCS:-/opt/nordic/ncs/v2.7.0}"  # CI: NCS is a west workspace of v2.7.0
-  # CI runs inside Nordic's toolchain container, whose environment is loaded already (it sets ZEPHYR_SDK_INSTALL_DIR)
-  TC=(nrfutil sdk-manager toolchain launch --ncs-version v2.7.0 --); [ -z "${ZEPHYR_SDK_INSTALL_DIR:-}" ] || TC=(env)
-  "${TC[@]}" west build -b xiao_ble/nrf52840/sense -d "$D/build/lr-$V" "$D" -- \
+  # Native CI can select a user-owned SDK/toolchain installation; a loaded Zephyr SDK needs no launcher.
+  TC=(nrfutil sdk-manager toolchain launch --ncs-version v2.7.0)
+  [ -z "${LR_NCS_INSTALL_DIR:-}" ] || TC+=(--install-dir "$LR_NCS_INSTALL_DIR")
+  TC+=(--); [ -z "${ZEPHYR_SDK_INSTALL_DIR:-}" ] || TC=(env)
+  "${TC[@]}" west build -b xiao_ble/nrf52840/sense -d "$D/build/lr-$V" "$D" -o="-j${LR_BUILD_JOBS:-2}" -- \
     -DNCS_TOOLCHAIN_VERSION=NONE -DCONF_FILE="$D/prj_$C.conf" -DCACHED_CONF_FILE="$D/prj_$C.conf" \
     -DDTC_OVERLAY_FILE="$OVL" -DPLATFORM=nrf52840 "${EXTRA[@]}"
   ;;

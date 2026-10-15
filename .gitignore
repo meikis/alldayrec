@@ -4,4 +4,6 @@ __pycache__/
 *.pyc
 data/
 server/static/dist/
+dist/apk/
+firmware-artifacts/
 tenants.json

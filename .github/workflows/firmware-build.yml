@@ -1,0 +1,165 @@
+name: firmware-build
+
+on:
+  push:
+    branches: [main]
+    tags: ['firmware-*']
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware-build.yml'
+      - '.github/scripts/firmware-*'
+      - '.github/scripts/test_firmware_select.py'
+      - '.github/scripts/prune-build-artifacts.sh'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Firmware family (manual builds never release)
+        type: choice
+        options: [all, devkit, selftest, blerelay]
+        default: all
+      variant:
+        description: Recorder variant (all excludes experimental expansion)
+        type: choice
+        options: [all, sdmod, promicro, promicro-p2, promicro-p3, expansion]
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  select:
+    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}"]', vars.LR_RUNNER)) }}
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      selected: ${{ steps.select.outputs.selected }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reuse runner-owned uv
+        if: runner.environment == 'self-hosted'
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Set up pinned official uv
+        if: runner.environment == 'github-hosted'
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: '0.13.0'
+          enable-cache: false
+      - name: Check firmware selection boundaries
+        run: uv run --no-project --python 3.11 python .github/scripts/test_firmware_select.py
+      - id: select
+        run: uv run --no-project --python 3.11 python .github/scripts/firmware-select.py
+
+  build:
+    needs: select
+    if: needs.select.outputs.selected == 'true'
+    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}"]', vars.LR_RUNNER)) }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      # Shared native toolchain cache and 3 GiB self-hosted memory: serialize models.
+      max-parallel: 1
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      MAKEFLAGS: '-j2'
+      NINJAFLAGS: '-j2'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # lr.sh uses commit history to generate firmware revision
+          persist-credentials: false
+      - name: Reuse runner-owned uv
+        if: runner.environment == 'self-hosted'
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        if: runner.environment == 'github-hosted'
+        with:
+          version: '0.13.0'
+          enable-cache: false
+      - name: Require formal relay authentication material
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/firmware-') && matrix.family == 'blerelay'
+        env:
+          RELAY_KEY_HEX: ${{ secrets.RELAY_KEY_HEX }}
+        run: |
+          if [[ ! "$RELAY_KEY_HEX" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'Formal relay build requires RELAY_KEY_HEX (64 lowercase hex digits); refusing a test key.' >&2
+            exit 1
+          fi
+      - name: Set up official native toolchain and full SDK
+        id: setup
+        env:
+          SDK: ${{ matrix.sdk }}
+        run: bash ".github/scripts/firmware-setup-$SDK.sh"
+      - name: Build and package without flashing or deploying
+        env:
+          FIRMWARE_ENV_FILE: ${{ steps.setup.outputs.env_file }}
+          FIRMWARE_FAMILY: ${{ matrix.family }}
+          FIRMWARE_VARIANT: ${{ matrix.variant }}
+          RELAY_KEY_HEX: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/firmware-') && matrix.family == 'blerelay' && secrets.RELAY_KEY_HEX || '' }}
+        run: bash .github/scripts/firmware-build.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: firmware-${{ matrix.family }}-${{ matrix.variant }}-${{ github.sha }}
+          path: firmware-artifacts/*
+          retention-days: 3
+          if-no-files-found: error
+          # A rerun replaces only this run's artifact for the same model/commit.
+          overwrite: true
+
+  prune:
+    needs: [select, build]
+    if: github.ref_type == 'branch'
+    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}"]', vars.LR_RUNNER)) }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Keep only this branch's latest successful firmware artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_WORKFLOW: firmware-build.yml
+          ARTIFACT_PREFIX: firmware-
+        run: bash .github/scripts/prune-build-artifacts.sh
+
+  release:
+    needs: [select, build]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/firmware-')
+    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}"]', vars.LR_RUNNER)) }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Reuse runner-owned uv
+        if: runner.environment == 'self-hosted'
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        if: runner.environment == 'github-hosted'
+        with:
+          version: '0.13.0'
+          enable-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: firmware-*-${{ github.sha }}
+          path: firmware-artifacts
+          merge-multiple: true
+      - name: Create owner-reviewed draft from the exact uploaded bits
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash .github/scripts/firmware-release.sh
