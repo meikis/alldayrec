@@ -90,6 +90,8 @@ git push origin firmware-20261014
 
 自建 runner 需预装 `bash/git/curl/unzip/tar/xz/sha256sum`、原生 C 编译器、`cmake/ninja/make`、`gh`，以及 `~/.local/bin/uv` 和 `~/sdk/flutter`。工作流自行安装固定 JDK（Temurin 17.0.18+8）、用户目录 Android SDK、Nordic 和 ESP-IDF 工具链；Nordic 工具链自带 dtc/gperf，无需系统安装。Android 默认保存在 `~/sdk/android`；Nordic/ESP-IDF 与 self-hosted Gradle 依赖保存在 `~/.cache/live-record-ci/`，无需每次重新下载。固件缓存路径可通过 `LR_FIRMWARE_CACHE` 覆盖。首次安装需要访问 GitHub、Nordic、Espressif、Google Android、Flutter/pub 和 Maven/Gradle 下载源；缓存不能替代网络可达性。
 
+`ci-runner` 的 Gradle 从阿里云镜像取 Maven Central 和 Gradle Plugin Portal：.54 经局域网透明代理访问这两处时，约 3%–10% 的 TLS 握手会被断开，Gradle 遇到握手失败不重试，直接在本次构建里停用该仓库，构建随即失败（2026-10-15）。runner 上的 `/home/ci-runner/.cache/live-record-ci/apk-gradle/init.d/lr-mirrors.gradle`（self-hosted 的 `GRADLE_USER_HOME/init.d`，每次 Gradle 构建自动加载）就是 [`.github/runner/lr-mirrors.gradle`](.github/runner/lr-mirrors.gradle)；Google Maven（dl.google.com 解析到国内 CDN）不改。每周的 `ci-runner-gc` 不清这个目录；重建 runner 或删掉这个 Gradle 缓存目录后要把它放回（以 ci-runner 身份）。GitHub-hosted runner 和本机构建不加载它。
+
 本机命令行也可调用 `.github/scripts/firmware-setup-ncs.sh` 或 `firmware-setup-idf.sh`，再按脚本打印的 env 路径执行 `firmware-build.sh`。这是原生构建，不使用容器；多型号固件矩阵串行执行，每次编译并发限制为 2。
 
 ### 正式构建凭据

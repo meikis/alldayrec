@@ -22,6 +22,11 @@ mkdir -p "$sdk_root"
   echo 'Android SDK must be owned and writable by the invoking runner.' >&2
   exit 1
 }
+# Gradle builds Flutter's plugin in place; one root-run build leaves files there the runner cannot replace.
+[[ -z $(find "$flutter_root/packages/flutter_tools/gradle" ! -writable -print -quit) ]] || {
+  echo "Flutter's packages/flutter_tools/gradle must be writable by the invoking runner." >&2
+  exit 1
+}
 
 # Official command-line tools 22.0; SHA256 published on developer.android.com/studio.
 cmd_version=22.0
@@ -60,6 +65,7 @@ license_status=${PIPESTATUS[1]}
 set -o pipefail
 [[ $license_status == 0 ]] || { cat "$RUNNER_TEMP/apk-sdk-licenses.log"; exit "$license_status"; }
 # Plugins use Flutter's API 36 default; the app uses API 37.0. AGP 9.1.0 requires Build Tools 36.0.0.
+# The NDK too for app.yml's unit tests: build.gradle.kts names flutter.ndkVersion, so AGP installs it while configuring.
 "$cmd_root/bin/sdkmanager" --sdk_root="$sdk_root" 'platforms;android-36' 'platforms;android-37.0' 'build-tools;36.0.0' "ndk;$ndk_version"
 flutter config --no-analytics --android-sdk "$sdk_root"
 flutter precache --android

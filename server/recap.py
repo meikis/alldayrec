@@ -60,15 +60,14 @@ async def make(day: str) -> dict | None:
 
 if __name__ == "__main__":
     import json
-    import sqlite3
     import sys
     import tempfile
     from pathlib import Path
 
     import anyio
     if sys.argv[1:]:
-        db._local.c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)  # never open_db: it writes the schema
-        db._local.c.row_factory = sqlite3.Row
+        ro = db.read_only(sys.argv[1])
+        db.conn = lambda: ro
         for d in sys.argv[2:]:
             print(json.dumps(anyio.run(make, d), ensure_ascii=False), flush=True)
         sys.exit()

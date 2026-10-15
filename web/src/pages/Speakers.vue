@@ -14,7 +14,8 @@ const groups = ref<Speaker[]>([]),
   members = ref<Voice[]>([]),
   editing = ref(""),
   newName = ref(""),
-  flash = ref("");
+  flash = ref(""),
+  errorAt = ref(""); // the card whose name box the error is about; "" puts it at the top
 const { busy, error, run } = useMutation();
 
 async function load() {
@@ -48,6 +49,10 @@ function edit(id: string) {
   newName.value = "";
   error.value = "";
 }
+function cancel() {
+  editing.value = "";
+  error.value = "";
+}
 async function expand(g: Speaker) {
   if (open.value === g.id) return (open.value = "");
   open.value = g.id;
@@ -57,6 +62,7 @@ async function expand(g: Speaker) {
 async function name(g: Speaker, to: string, what: string, suggestion?: string) {
   to = to.trim();
   if (!to) return;
+  errorAt.value = editing.value === g.id ? g.id : "";
   await run(async () => {
     flash.value = "";
     const r = await post<{ renamed: number }>("/api/speakers/name", {
@@ -70,6 +76,7 @@ async function name(g: Speaker, to: string, what: string, suggestion?: string) {
   });
 }
 async function addAlias(alias: string, name: string) {
+  errorAt.value = "";
   await run(async () => {
     flash.value = "";
     await post("/api/aliases", { alias, name });
@@ -78,6 +85,7 @@ async function addAlias(alias: string, name: string) {
   });
 }
 async function detach(g: Speaker, v: Voice) {
+  errorAt.value = "";
   await run(async () => {
     flash.value = "";
     await post("/api/speakers/detach", { conv: v.conv, label: v.label, group: g.name ?? g.id });
@@ -98,7 +106,7 @@ async function detach(g: Speaker, v: Voice) {
       <button :class="{ on: filter === 'all' }" @click="filter = 'all'">全部</button>
     </div>
     <p v-if="flash" class="flash">{{ flash }}</p>
-    <p v-if="error" class="error" role="alert">{{ error }}</p>
+    <p v-if="error && !errorAt" class="error" role="alert">{{ error }}</p>
     <p v-if="!loaded" class="empty">加载中…</p>
 
     <section v-for="g in list.slice(0, shown)" :key="g.id" class="card">
@@ -157,13 +165,14 @@ async function detach(g: Speaker, v: Voice) {
             @keyup.enter="name(g, newName, title(g))"
           />
           <button :disabled="busy" @click="name(g, newName, title(g))">保存</button>
-          <button class="ghost" @click="editing = ''">取消</button>
+          <button class="ghost" @click="cancel">取消</button>
         </template>
         <button v-else @click="edit(g.id)">{{ g.name ? "改名" : "起名" }}</button>
         <button class="ghost" @click="expand(g)">
           {{ open === g.id ? "收起" : `对话列表（${g.count}）` }}
         </button>
       </div>
+      <p v-if="error && errorAt === g.id" class="error" role="alert">{{ error }}</p>
       <div v-if="editing === g.id && names.length" class="chips">
         <button v-for="n in names.slice(0, 12)" :key="n" class="chip" @click="name(g, n, title(g))">
           {{ n }}

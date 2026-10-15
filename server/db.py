@@ -102,9 +102,23 @@ def conn() -> sqlite3.Connection:
         _local.c = {}
     if (c := _local.c.get(path)) is None:
         c = _local.c[path] = sqlite3.connect(path, isolation_level=None, timeout=30)  # autocommit outside tx()
-        c.row_factory = sqlite3.Row
+        _functions(c)
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA synchronous=NORMAL")
+    return c
+
+
+def _functions(c: sqlite3.Connection):
+    """Row access and search()'s function, once per connection: redefining a function while a statement on the
+    connection is still stepping fails."""
+    c.row_factory = sqlite3.Row
+    c.create_function("metadata_contains", 2, _metadata_contains, deterministic=True)
+
+
+def read_only(path) -> sqlite3.Connection:
+    """A script's connection to a copy of a store that it only reads (never open_db: it writes the schema)."""
+    c = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+    _functions(c)
     return c
 
 
@@ -229,9 +243,7 @@ def search(q: str = "", tag: str = "", kind: str = "", who: str = "", after: str
         if value:
             clauses.append(clause)
             args.append(value)
-    connection = conn()
     if q:
-        connection.create_function("metadata_contains", 2, _metadata_contains, deterministic=True)
         clauses.append("""(metadata_contains(json_extract(s.body, '$.title', '$.summary', '$.tags', '$.todos', '$.decisions'), ?)
             OR EXISTS (SELECT 1 FROM sentences t
                        WHERE t.start >= c.start AND t.start <= c.end
@@ -244,7 +256,7 @@ def search(q: str = "", tag: str = "", kind: str = "", who: str = "", after: str
     query += " ORDER BY c.start DESC LIMIT ?"
     args.append(limit if limit > 0 else -1)
     return [{**_conversation(r), "summary": json.loads(r["body"]) if r["body"] else None}
-            for r in connection.execute(query, args)]
+            for r in conn().execute(query, args)]
 
 
 def names() -> dict[str, int]:

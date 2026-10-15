@@ -36,4 +36,10 @@ async function mark(m: keyof typeof TODO_MARK) {
   padding: 0 6px;
   margin-left: 6px;
 }
+/* the buttons stay together; an error wraps inside the page instead of running off a phone's edge */
+.marks .bad {
+  margin-left: 6px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 </style>

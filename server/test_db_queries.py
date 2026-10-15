@@ -126,3 +126,12 @@ def test_small_result_decodes_only_returned_summaries(tmp_path, monkeypatch):
         assert all(isinstance(x, list) for x in decoded)
     finally:
         db.conn().set_trace_callback(None)
+
+
+def test_search_under_an_open_statement(history):
+    # metadata_contains is registered when the connection opens: redefining it while a statement is still
+    # stepping (a caller iterating rows) fails with "unable to delete/modify user-function"
+    assert [c["id"] for c in db.search(q="äpfel")] == ["0"]
+    rows = db.conn().execute("SELECT id FROM conversations")
+    next(rows)
+    assert [c["id"] for c in db.search(q="äpfel")] == ["0"]

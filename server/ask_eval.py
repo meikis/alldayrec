@@ -18,7 +18,6 @@ import collections
 import datetime as dt
 import json
 import re
-import sqlite3
 import statistics
 import sys
 import time
@@ -109,8 +108,7 @@ def score(x: dict, r: dict) -> dict:
 
 
 if __name__ == "__main__":
-    ro = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, check_same_thread=False)  # never open_db: it writes the schema
-    ro.row_factory = sqlite3.Row
+    ro = db.read_only(sys.argv[1])
     db.conn = lambda: ro  # ask runs its tools in a thread, one at a time
     qs = questions(dt.datetime.now())
     rows = []
