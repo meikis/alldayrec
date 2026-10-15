@@ -144,6 +144,13 @@ int init_usb()
     }
     usbd_device_set_code_triple(&lr_usbd, USBD_SPEED_FS, USB_BCC_MISCELLANEOUS, 0x02, 0x01);  // CDC's IAD
     usbd_msg_register_cb(&lr_usbd, on_msg);
+    // The MSC class reads and writes the card for the computer in its own thread, which NCS 2.7 starts cooperative
+    // (usbd_msc.c: CONFIG_SYSTEM_WORKQUEUE_PRIORITY, -1): while a slow card kept the SD stack waiting and retrying,
+    // the codec (4) got no CPU for over a second and the mic's 1 s ring overflowed (BDAE 10-13, a computer reading the
+    // lent card: 1.3-1.8 s of audio lost in 10 minutes, #208). Below everything that records (the codec 4, LIVE and
+    // the pusher 7, the card writer 8, the store 9, which answers the phone's CTRL to take the card back)
+    extern const k_tid_t usbd_msc;
+    k_thread_priority_set(usbd_msc, K_PRIO_PREEMPT(10));
     err = usbd_init(&lr_usbd);
     usb_charge = nrf_power_usbregstatus_vbusdet_get(NRF_POWER);
     usb_diag[0] = err;

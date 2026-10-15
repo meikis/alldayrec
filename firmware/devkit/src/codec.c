@@ -1,11 +1,11 @@
 #include "codec.h"
 
 #include <zephyr/logging/log.h>
-#include <zephyr/sys/ring_buffer.h>
 
 #include "config.h"
 #include "hpf.h"
 #include "mic_health.h"
+#include "mic_ring.h"
 #include "utils.h"
 #ifdef CODEC_OPUS
 #include "lib/opus-1.2.1/opus.h"
@@ -28,19 +28,18 @@ void set_codec_callback(codec_callback callback)
 // Input
 //
 
-uint8_t codec_ring_buffer_data[AUDIO_BUFFER_SAMPLES * 2]; // 2 bytes per sample
+BUILD_ASSERT(MIC_BUFFER_SAMPLES == MIC_RING_SAMPLES && CODEC_PACKAGE_SAMPLES == MIC_RING_SAMPLES, "a mic buffer is a codec frame");
+static struct mic_ring mic_ring;  // 1 s
 static K_SEM_DEFINE(codec_sem, 0, 1);  // given with each mic buffer
-struct ring_buf codec_ring_buf;
+extern uint32_t transport_frame_no;  // transport.c: the codec's frames, numbered as they are sent on
 int codec_receive_pcm(int16_t *data, size_t len) // this gets called after mic data is finished
 {
-
-    int written = ring_buf_put(&codec_ring_buf, (uint8_t *) data, len * 2);
-    if (written != len * 2) {
-        LOG_ERR("Failed to write %d bytes to codec ring buffer", len * 2);
+    bool kept = mic_ring_put(&mic_ring, data);
+    k_sem_give(&codec_sem);
+    if (!kept) {
+        LOG_ERR("mic ring full: a buffer left out");
         return -1;
     }
-    k_sem_give(&codec_sem);
-
     return 0;
 }
 
@@ -72,16 +71,16 @@ void codec_entry()
 {
 
     uint16_t output_size;
+    uint32_t left_out;
     while (1) {
 
-        // Check if we have enough data
-        if (ring_buf_size_get(&codec_ring_buf) < CODEC_PACKAGE_SAMPLES * 2) {
+        // Read package
+        if (!mic_ring_get(&mic_ring, codec_input_samples, &left_out)) {
             // woken by the next mic buffer, not polled: a frame is encoded as it comes, not up to 10 ms later
             k_sem_take(&codec_sem, K_MSEC(100));
             continue;
         }
-        // Read package
-        ring_buf_get(&codec_ring_buf, (uint8_t *) codec_input_samples, CODEC_PACKAGE_SAMPLES * 2);
+        transport_frame_no += left_out;  // the buffers the ring had no room for: a gap in the frame numbers (mic_ring.h)
 
         // High-pass here, not in the PDM interrupt: the BLE stream and the SD store both take what this encodes
         mic_health_raw(&mic_health, codec_input_samples, CODEC_PACKAGE_SAMPLES);
@@ -122,7 +121,6 @@ int codec_start()
     hpf_init(hpf, MIC_HPF_HZ, 16000);
 
     // Thread
-    ring_buf_init(&codec_ring_buf, sizeof(codec_ring_buffer_data), codec_ring_buffer_data);
     k_thread_create(&codec_thread,
                     codec_stack,
                     K_THREAD_STACK_SIZEOF(codec_stack),
