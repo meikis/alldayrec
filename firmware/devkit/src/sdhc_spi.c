@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/* live-record: NCS v2.7.0's zephyr/drivers/sdhc/sdhc_spi.c with three changes, each marked "LR:", built in its
+/* live-record: NCS v2.7.0's zephyr/drivers/sdhc/sdhc_spi.c with the changes below, each marked "LR:", built in its
  * place (CONFIG_SPI_SDHC=n, CONFIG_LR_SDHC_SPI=y). Upstream main still has the sleeps (#105):
  * 1. A data command's R1 that comes after the second byte cost a 10 ms sleep: polled for the 8 bytes NCR allows first.
  * 2. Busy after CMD12 (every multi-block read) past the 21-byte command buffer cost a 30 ms sleep (1000 ticks):
@@ -14,6 +14,10 @@
  *    there is no TX buffer (upstream main does this too); SPIM could not DMA from flash without a RAM copy.
  * 4. The card's CID and CSD and the failed tries of data transfers go to the event log (sdcard.h, #155 F2 F3).
  * 5. A read's data token waited for SD_SPI_SKIP_MS, yielding (sdhc_skip): upstream polled 1e6 times without yielding.
+ * 6. card_busy lets the bus go after its poll: its config has SPI_LOCK_ON, so a write whose busy wait timed out
+ *    (sdmmc_wait_ready) left the bus held, and the next transfer with another config waited forever (k_sem_take).
+ *    sdcard.c's sd_spi_reset is one (#188's reset of a card stuck busy after writes, reached since #228; LR-X1
+ *    10-16: the store thread stuck there for good); so is a request after set_io swaps cfg_a/cfg_b (sd_init's 400 kHz).
  * Before, on LR-P3-92D2: a 4 KB read took ~48 ms (~84 KB/s), an append of ~4 KB with its sync ~95 ms. */
 #define DT_DRV_COMPAT zephyr_sdhc_spi_slot
 
@@ -111,6 +115,7 @@ static int sdhc_spi_card_busy(const struct device *dev)
 
 
 	ret = sdhc_spi_rx(config->spi_dev, data->spi_cfg, &response, 1);
+	spi_release(config->spi_dev, data->spi_cfg);  /* LR: held otherwise (SPI_LOCK_ON), even when the poll failed */
 	if (ret) {
 		return -EIO;
 	}
