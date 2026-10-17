@@ -266,6 +266,8 @@ ERRNO = {**{n: errno.errorcode[n] for n in range(1, 35) if n in errno.errorcode}
          77: "EBADMSG", 105: "ENOBUFS", 116: "ETIMEDOUT", 120: "EALREADY", 128: "ENOTCONN", 134: "ENOTSUP"}  # Zephyr's
 
 
+# USB_DISK x 0's b (lr_log.h): why the card came back (#238)
+BACK = ("", "the phone", "unplugged", "the computer left it 3 min")  # 0: firmware before #238
 # APPEND_ERR's x (lr_log.h): which part of an append failed
 APPEND = ("", "writer behind, rest of the segment LIVE only: ", "restart with the card stuck: ", "file length not on the card: ")
 
@@ -336,7 +338,7 @@ EVENTS = {
     5: ("SLOW", lambda x, a, b: f"SD append {a} ms ({b} B)"),
     6: ("APPEND_ERR", lambda x, a, b: f"{APPEND[x] if x < len(APPEND) else ''}{err(a)} ({b} B)"),
     7: ("CARD_FULL", lambda x, a, b: f"{'recording stopped' if x else 'resumed'}, {a} KB free"),
-    8: ("USB_DISK", lambda x, a, b: f"card lent to USB" if x else f"card back: {err(a)}"),
+    8: ("USB_DISK", lambda x, a, b: f"card lent to USB" if x else f"card back{f' ({BACK[b] if b < len(BACK) else b})' if b else ''}: {err(a)}"),
     9: ("CONNECT", lambda x, a, b: param(a, b)),
     10: ("DISCONNECT", lambda x, a, b: f"0x{x:02x} {HCI.get(x, '')}".strip()),
     11: ("PARAM", lambda x, a, b: param(a, b)),
@@ -468,6 +470,7 @@ def selftest():
     assert EVENTS[28][1](0, 1, 0) == "off: System OFF" and EVENTS[28][1](1, 9, 0) == "on: 9"
     assert EVENTS[29][1](204, 0, 0) == "on battery, VDDH 4080 mV"
     assert EVENTS[29][1](165, 2, 0).startswith("low battery (3300 mV)")
+    assert EVENTS[8][1](0, 0, 3) == "card back (the computer left it 3 min): ok" and EVENTS[8][1](0, 0, 0) == "card back: ok"
     assert EVENTS[30][0] == "LIVE_LOST" and EVENTS[30][1](0, 12, 4800).startswith("12 records (4800 B) left out of LIVE (link stalled)")
     assert EVENTS[30][1](1, 3, 1100).startswith("3 records (1100 B) left out of LIVE (link lost)")
     assert EVENTS[26][1](12, 409600, 10000 | 491 << 22) == \

@@ -761,12 +761,19 @@ static void forget_bond(const struct bt_bond_info *info, void *arg)
 }
 
 extern volatile bool usb_disk_lent;  // usb.c: the card reader shows the card
+extern volatile uint32_t usb_disk_used;  // usb.c: when the computer last read or wrote it (k_uptime_get_32)
 extern bool usb_charge;
 
-/* The card to the computer (USB disk) and back. Lent, the card is unmounted and nothing records to it (-EBUSY); back,
- * it is mounted again (the ProMicro powers it off and on first) and the card goes on in a new segment. The stream
- * itself never stops. */
-static int lend(bool on)
+/* A lent card the computer has not read or written for this long comes back by itself (#238): ejected (macOS's eject
+ * never reaches the disk driver), forgotten, or never mounted. Lent, nothing records to the card and the stream goes
+ * to LIVE only: a phone gone or a LIVE gap meanwhile was audio kept nowhere (BDAE 10-15: 60 of 107 minutes lent). */
+#define LEND_IDLE_MS (3 * 60 * 1000)
+enum { BACK_PHONE = 1, BACK_UNPLUGGED, BACK_IDLE };  // why a lent card came back (USB_DISK x 0's b; 0: older firmware)
+
+/* The card to the computer (USB disk) and back (why: BACK_*). Lent, the card is unmounted and nothing records to it
+ * (-EBUSY); back, it is mounted again (the ProMicro powers it off and on first) and the card goes on in a new segment.
+ * The stream itself never stops. */
+static int lend(bool on, uint8_t why)
 {
     if (on == usb_disk_lent) {
         return 0;
@@ -783,6 +790,7 @@ static int lend(bool on)
         close_segment();
         unmount_sd_card();
         store_err = -EBUSY;
+        usb_disk_used = k_uptime_get_32();  // idle from now until the computer reads it
         usb_disk_lent = true;
         LOG_INF("card lent to USB");
         lr_log(LR_USB_DISK, 1, 0, 0);
@@ -801,11 +809,19 @@ static int lend(bool on)
         if (!err) {
             count_free();
         }
-        LOG_INF("card back from USB: %d", err);
-        lr_log(LR_USB_DISK, 0, err, 0);
+        LOG_INF("card back from USB: %d (%d)", err, why);
+        lr_log(LR_USB_DISK, 0, err, why);
     }
     k_mutex_unlock(&write_sdcard_mutex);
     return 0;
+}
+
+/* A lent card left alone LEND_IDLE_MS back to the recorder (the store thread looks every RETRY_FAST_MS while lent) */
+static void lend_if_idle(void)
+{
+    if (usb_disk_lent && k_uptime_get_32() - usb_disk_used >= LEND_IDLE_MS) {
+        lend(false, BACK_IDLE);
+    }
 }
 
 static int card_init(int (*mount)(void), uint16_t *counted);
@@ -828,7 +844,7 @@ static int card_init(int (*mount)(void), uint16_t *counted);
 static int64_t retry_every(void)
 {
     int fast = boot ? RETRY_FAST : 0;
-    return !store_err || retries < fast ? RETRY_FAST_MS : retries < fast + RETRY_RESETS ? 60000 : 600000;
+    return !store_err || store_err == -EBUSY || retries < fast ? RETRY_FAST_MS : retries < fast + RETRY_RESETS ? 60000 : 600000;
 }
 
 /* A card that failed (a write, the mount, none at boot) is tried again (retry_every), one mount try, the SD mutex
@@ -883,11 +899,12 @@ static void store_thread(void)
             tried = k_uptime_get();
             retry_card();
         }
+        lend_if_idle();
         if (got) {
             continue;
         }
         if (c.op == UNLEND) {
-            lend(false);
+            lend(false, BACK_UNPLUGGED);
             continue;
         }
         struct bt_conn *conn = get_current_connection();
@@ -921,7 +938,7 @@ static void store_thread(void)
         } else if (c.op == READ) {
             send_file(conn, c.file, c.offset);
         } else if (c.op == USB_DISK) {
-            int err = lend(c.file);
+            int err = lend(c.file, BACK_PHONE);
             reply(conn, 0x86, c.file, (uint8_t) err, 1);
         } else if (c.op == FORGET && c.file) {  // unbinding: the reply first, the link goes with this phone's bond
             reply(conn, 0x85, lr_bond_count(), 0, 0);

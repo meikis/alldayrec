@@ -84,6 +84,7 @@ static uint32_t sys_rand32_get(void) { return 0x1234; }
 static int64_t now_ms;  // the clock: card writes, card reads and notifications take time
 static int write_ms, read_ms, notify_ms;
 static int64_t k_uptime_get(void) { return now_ms; }
+static uint32_t k_uptime_get_32(void) { return (uint32_t) now_ms; }
 static void k_work_cancel_delayable(int *w) {}
 static void k_work_reschedule(int *w, int d) {}
 static void k_thread_create(struct k_thread *t, char *s, size_t n, k_thread_entry_t e, void *a, void *b, void *c, int p, int o, int d) {}
@@ -148,6 +149,9 @@ uint32_t lr_pause_left(void) { return 0; }
 uint8_t lr_charge(void) { return 0; }
 void lr_pause(uint32_t s) {}
 void usb_reattach(void) {}
+volatile bool usb_disk_lent;
+volatile uint32_t usb_disk_used;
+bool usb_charge;
 int mount_sd_card(void) { return 0; }
 static int mounts, resets, mount_fails;  // tries of the card again (retry_card), from scratch; how many of the next fail
 int mount_sd_card_once(void) { mounts++; return mount_fails ? mount_fails--, -EIO : 0; }
@@ -625,6 +629,25 @@ int main(void)
     retry_card();
     assert(mounts == 0 && resets == 5 && store_err == 0 && boot == counted + 1 && seg == 0 && retries == 5 && retry_every() == 5000);
     assert(n_logged == 2 && logged[0].code == LR_STORE && logged[1].code == LR_SEGMENT && logged[1].a == (uint32_t) boot << 16);
+
+    // lent to a computer that then leaves it alone (ejected: macOS's eject never reaches the disk driver; forgotten; never
+    // mounted) for 3 minutes: back by itself (#238); read now and then, it stays lent. Looked at every 5 s while lent
+    usb_charge = true, retries = 9, n_logged = 0, now_ms = 0xFFFF0000;  // near the 32-bit clock's wrap
+    usb_disk_used = 0x80000000;  // the last lend's reads, long ago
+    assert(lend(true, BACK_PHONE) == 0 && usb_disk_lent && store_err == -EBUSY && retry_every() == 5000);
+    now_ms += LEND_IDLE_MS - 1;  // left alone from the lend
+    lend_if_idle();
+    assert(usb_disk_lent);
+    usb_disk_used = k_uptime_get_32();  // a read
+    now_ms += LEND_IDLE_MS - 1;
+    lend_if_idle();
+    assert(usb_disk_lent && store_err == -EBUSY);
+    now_ms += 1;
+    lend_if_idle();
+    assert(!usb_disk_lent && store_err == 0 && n_logged >= 2 && logged[0].code == LR_USB_DISK && logged[0].x == 1);
+    assert(logged[n_logged - 1].code == LR_USB_DISK && logged[n_logged - 1].x == 0 && logged[n_logged - 1].b == BACK_IDLE);
+    lend_if_idle();  // back: nothing more
+    assert(logged[n_logged - 1].code == LR_USB_DISK && logged[n_logged - 1].b == BACK_IDLE && !usb_disk_lent);
     printf("store_check ok: %u + %u + %u B on the card\n", card_len[0], card_len[1], card_len[2]);
     return 0;
 }

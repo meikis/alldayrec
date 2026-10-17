@@ -90,6 +90,8 @@ const reas = (v: number) =>
     .join("+") || "上电";
 const param = (a: number, b: number) =>
   `间隔 ${(a & 0xffff) * 1.25} ms，延迟 ${a >>> 16}，超时 ${b * 10} ms`;
+// USB_DISK x 0's b (lr_log.h): why the card came back (#238)
+const BACK = ["", "手机关的", "拔了线", "电脑 3 分钟没读写"];  // 0: firmware before #238
 // APPEND_ERR's x (lr_log.h): which part of an append failed
 const APPEND = ["", "写卡跟不上，本段余下只走实时：", "重启时卡卡在写入：", "文件长度没写上卡："];
 const stack = (v: number) => (v === 0xffff ? "-" : String(v));
@@ -159,7 +161,7 @@ const EVENTS: Record<number, [string, string, (r: Rec) => string]> = {
   5: ["SLOW", "写卡慢", (r) => `${r.a} ms（${r.b} B）`],
   6: ["APPEND_ERR", "写卡失败", (r) => `${APPEND[r.x] ?? ""}${err(r.a)}（${r.b} B）`],
   7: ["CARD_FULL", "存储卡满", (r) => `${r.x ? "停止录音" : "恢复录音"}，剩 ${r.a} KB`],
-  8: ["USB_DISK", "U 盘模式", (r) => (r.x ? "卡借给 USB" : `卡收回：${err(r.a)}`)],
+  8: ["USB_DISK", "U 盘模式", (r) => (r.x ? "卡借给 USB" : `卡收回${r.b ? `（${BACK[r.b] ?? r.b}）` : ""}：${err(r.a)}`)],
   9: ["CONNECT", "连上", (r) => param(r.a, r.b)],
   10: ["DISCONNECT", "断开", (r) => `0x${hex(r.x, 2)} ${HCI[r.x] ?? ""}`.trim()],
   11: ["PARAM", "连接参数", (r) => param(r.a, r.b)],

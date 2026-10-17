@@ -28,30 +28,62 @@ USBD_CONFIGURATION_DEFINE(lr_fs_config, 0, 250);
 USBD_DEFINE_MSC_LUN(LR, "liverec", "SD card", "1.00");
 
 volatile bool usb_disk_lent;
+volatile uint32_t usb_disk_used;  // k_uptime_get_32() at the computer's last read or write: a card left alone comes back (lr_store.c)
+extern struct k_mutex write_sdcard_mutex;  // transport.c: one SPI bus, one user at a time
 
 static int lr_disk_init(struct disk_info *disk)
 {
     return 0;
 }
 
+/* The computer's access to the lent card, under the SD mutex: the MSC thread is preemptible (#208), and the store
+ * thread taking the card back (lend(false): the phone, unplugged, or left alone, #238) powers it off and on and mounts
+ * it with that mutex held; NCS 2.7's sd_init re-inits the card's own lock, so that one does not keep them apart. Not
+ * lent: no wait (the card writer may hold the mutex for seconds on a slow card) */
 static int lr_disk_status(struct disk_info *disk)
 {
-    return usb_disk_lent ? disk_access_status("SD") : DISK_STATUS_NOMEDIA;
+    if (!usb_disk_lent) {
+        return DISK_STATUS_NOMEDIA;
+    }
+    k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+    int s = usb_disk_lent ? disk_access_status("SD") : DISK_STATUS_NOMEDIA;
+    k_mutex_unlock(&write_sdcard_mutex);
+    return s;
 }
 
 static int lr_disk_read(struct disk_info *disk, uint8_t *buf, uint32_t sector, uint32_t count)
 {
-    return usb_disk_lent ? disk_access_read("SD", buf, sector, count) : -EIO;
+    usb_disk_used = k_uptime_get_32();
+    if (!usb_disk_lent) {
+        return -EIO;
+    }
+    k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+    int err = usb_disk_lent ? disk_access_read("SD", buf, sector, count) : -EIO;
+    k_mutex_unlock(&write_sdcard_mutex);
+    return err;
 }
 
 static int lr_disk_write(struct disk_info *disk, const uint8_t *buf, uint32_t sector, uint32_t count)
 {
-    return usb_disk_lent ? disk_access_write("SD", buf, sector, count) : -EIO;
+    usb_disk_used = k_uptime_get_32();
+    if (!usb_disk_lent) {
+        return -EIO;
+    }
+    k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+    int err = usb_disk_lent ? disk_access_write("SD", buf, sector, count) : -EIO;
+    k_mutex_unlock(&write_sdcard_mutex);
+    return err;
 }
 
 static int lr_disk_ioctl(struct disk_info *disk, uint8_t cmd, void *buf)
 {
-    return usb_disk_lent ? disk_access_ioctl("SD", cmd, buf) : -EIO;
+    if (!usb_disk_lent) {
+        return -EIO;
+    }
+    k_mutex_lock(&write_sdcard_mutex, K_FOREVER);
+    int err = usb_disk_lent ? disk_access_ioctl("SD", cmd, buf) : -EIO;
+    k_mutex_unlock(&write_sdcard_mutex);
+    return err;
 }
 
 static const struct disk_operations lr_disk_ops = {

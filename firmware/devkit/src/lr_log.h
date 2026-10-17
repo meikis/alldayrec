@@ -25,7 +25,8 @@
  *                   (-EAGAIN, the rest of the segment to LIVE only), 2 a restart with the card stuck in a write
  *                   (-EDEADLK), 3 the file's length on the card (fs_sync, or fs_close with b the file's bytes)
  *     7 CARD_FULL   x 1 recording stopped / 0 resumed, a free KB
- *     8 USB_DISK    x 1 card lent to USB / 0 back, a error
+ *     8 USB_DISK    x 1 card lent to USB / 0 back, a error, b (back) why: 1 the phone, 2 unplugged, 3 the computer had
+ *                   not read or written it for 3 minutes (#238; 0: firmware before it)
  *     9 CONNECT     a interval (1.25 ms) | latency << 16, b supervision timeout (10 ms)
  *    10 DISCONNECT  x HCI reason
  *    11 PARAM       a interval | latency << 16, b timeout: connection parameters changed
