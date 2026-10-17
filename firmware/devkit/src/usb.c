@@ -148,8 +148,9 @@ static void start_usb(struct k_work *work)
 }
 static K_WORK_DELAYABLE_DEFINE(usb_start, start_usb);
 
-/* The card has just been lent: a computer that ejected it before (macOS) no longer looks for a medium, so the board
- * leaves the bus and comes back as if plugged in again. */
+/* The card has just been lent or taken back (lr_store.c lend): lent, a computer that ejected it before (macOS) no
+ * longer looks for a medium; back, one that has it mounted would keep it mounted. So the board leaves the bus and
+ * comes back as if plugged in again. */
 void usb_reattach(void)
 {
     if (usb_started && usb_charge) {

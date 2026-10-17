@@ -148,7 +148,8 @@ int lr_bond_count(void) { return 1; }
 uint32_t lr_pause_left(void) { return 0; }
 uint8_t lr_charge(void) { return 0; }
 void lr_pause(uint32_t s) {}
-void usb_reattach(void) {}
+static int reattached;  // the board left the USB bus and came back
+void usb_reattach(void) { reattached++; }
 volatile bool usb_disk_lent;
 volatile uint32_t usb_disk_used;
 bool usb_charge;
@@ -644,7 +645,9 @@ int main(void)
     // mounted) for 3 minutes: back by itself (#238); read now and then, it stays lent. Looked at every 5 s while lent
     usb_charge = true, retries = 9, n_logged = 0, now_ms = 0xFFFF0000;  // near the 32-bit clock's wrap
     usb_disk_used = 0x80000000;  // the last lend's reads, long ago
+    reattached = 0;
     assert(lend(true, BACK_PHONE) == 0 && usb_disk_lent && store_err == -EBUSY && retry_every() == 5000);
+    assert(reattached == 1);  // a computer that ejected the card before looks again
     now_ms += LEND_IDLE_MS - 1;  // left alone from the lend
     lend_if_idle();
     assert(usb_disk_lent);
@@ -656,8 +659,17 @@ int main(void)
     lend_if_idle();
     assert(!usb_disk_lent && store_err == 0 && n_logged >= 2 && logged[0].code == LR_USB_DISK && logged[0].x == 1);
     assert(logged[n_logged - 1].code == LR_USB_DISK && logged[n_logged - 1].x == 0 && logged[n_logged - 1].b == BACK_IDLE);
+    assert(reattached == 2);  // back: a computer that has it mounted lets go of it (X1 10-17: macOS 26 hung on it)
     lend_if_idle();  // back: nothing more
     assert(logged[n_logged - 1].code == LR_USB_DISK && logged[n_logged - 1].b == BACK_IDLE && !usb_disk_lent);
+    assert(reattached == 2);
+    // taken back by the phone: off the bus and back, as above; unplugged: off the bus already
+    assert(lend(true, BACK_PHONE) == 0 && lend(false, BACK_PHONE) == 0 && !usb_disk_lent && store_err == 0 && reattached == 4);
+    assert(lend(true, BACK_PHONE) == 0 && reattached == 5);
+    usb_charge = false;
+    assert(lend(false, BACK_UNPLUGGED) == 0 && !usb_disk_lent && store_err == 0 && reattached == 5);
+    assert(logged[n_logged - 1].code == LR_USB_DISK && logged[n_logged - 1].x == 0 && logged[n_logged - 1].b == BACK_UNPLUGGED);
+    usb_charge = true;  // on the computer again for what follows
 
     // wiped on the computer it was lent to (X1 10-17: erased as exFAT on the Mac), or a blank card put in after a failed
     // write: it mounts with no /LR, its writes failed -ENOENT for good (#243). Mounted, it gets its /LR and the hidden

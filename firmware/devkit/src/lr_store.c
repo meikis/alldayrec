@@ -773,7 +773,10 @@ enum { BACK_PHONE = 1, BACK_UNPLUGGED, BACK_IDLE };  // why a lent card came bac
 
 /* The card to the computer (USB disk) and back (why: BACK_*). Lent, the card is unmounted and nothing records to it
  * (-EBUSY); back, it is mounted again (the ProMicro powers it off and on first) and the card goes on in a new segment.
- * The stream itself never stops. */
+ * The stream itself never stops. Both ways the board leaves the USB bus and comes back (usb_reattach): back, a
+ * computer that has the card mounted lets go of it as of a disk pulled out. A medium that only goes away is not seen:
+ * macOS 26 kept the exFAT volume mounted, and whatever read it (cat, diskutil list) hung; unmount force took minutes
+ * or failed; the board leaving the bus ended it at once (X1 10-17, back by the phone and back after 3 min alike). */
 static int lend(bool on, uint8_t why)
 {
     if (on == usb_disk_lent) {
@@ -795,9 +798,6 @@ static int lend(bool on, uint8_t why)
         usb_disk_lent = true;
         LOG_INF("card lent to USB");
         lr_log(LR_USB_DISK, 1, 0, 0);
-        k_mutex_unlock(&write_sdcard_mutex);
-        usb_reattach();
-        return 0;
     } else {
         usb_disk_lent = false;
         int err = mount_card(mount_sd_card);
@@ -814,6 +814,9 @@ static int lend(bool on, uint8_t why)
         lr_log(LR_USB_DISK, 0, err, why);
     }
     k_mutex_unlock(&write_sdcard_mutex);
+    if (on || why != BACK_UNPLUGGED) {  // unplugged: off the bus already
+        usb_reattach();
+    }
     return 0;
 }
 
