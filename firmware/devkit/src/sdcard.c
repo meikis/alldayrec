@@ -205,6 +205,9 @@ int mount_sd_card_once(void)
  * not there at boot. */
 int mount_sd_card_reset(void)
 {
+    if (disk_card) {
+        lr_sdhc_spi_unlock(disk_card->sdhc);  // a write's busy wait that timed out kept the bus: sd_spi_reset would wait forever
+    }
     sd_power_cycle();
     sd_spi_reset();
     int err = disk_card ? sd_init(disk_card->sdhc, disk_card) : 0;  // none: it never mounted, disk_access_init inits it

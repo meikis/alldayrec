@@ -14,10 +14,12 @@
  *    there is no TX buffer (upstream main does this too); SPIM could not DMA from flash without a RAM copy.
  * 4. The card's CID and CSD and the failed tries of data transfers go to the event log (sdcard.h, #155 F2 F3).
  * 5. A read's data token waited for SD_SPI_SKIP_MS, yielding (sdhc_skip): upstream polled 1e6 times without yielding.
- * 6. card_busy lets the bus go after its poll: its config has SPI_LOCK_ON, so a write whose busy wait timed out
- *    (sdmmc_wait_ready) left the bus held, and the next transfer with another config waited forever (k_sem_take).
- *    sdcard.c's sd_spi_reset is one (#188's reset of a card stuck busy after writes, reached since #228; LR-X1
- *    10-16: the store thread stuck there for good); so is a request after set_io swaps cfg_a/cfg_b (sd_init's 400 kHz).
+ * 6. lr_sdhc_spi_unlock(): the bus let go before #188's reset. card_busy's config has SPI_LOCK_ON, so a write whose
+ *    busy wait timed out (sdmmc_wait_ready) leaves the bus held, and the next transfer with another config waits
+ *    forever (k_sem_take): sdcard.c's sd_spi_reset (reached since #228; LR-X1 10-16: the store thread stuck there for
+ *    good), and a request after set_io swaps cfg_a/cfg_b (sd_init's 400 kHz). Not in card_busy itself (#242 did that):
+ *    spi_release also takes CS high, so every poll of a busy wait deselected the card, and LR-X1 10-17 lent to a Mac
+ *    twice ended with the card holding DO low for good (CMD0 r1 0x00) until its supply went (#249).
  * Before, on LR-P3-92D2: a 4 KB read took ~48 ms (~84 KB/s), an append of ~4 KB with its sync ~95 ms. */
 #define DT_DRV_COMPAT zephyr_sdhc_spi_slot
 
@@ -105,6 +107,16 @@ static int sdhc_spi_init_card(const struct device *dev)
 	return ret;
 }
 
+/* LR: the bus a busy wait that timed out left held (SPI_LOCK_ON) let go, CS high: before #188's reset talks to the card
+ * with its own config (sdcard.c). Nothing to do when the bus is free or was last used with another config. */
+void lr_sdhc_spi_unlock(const struct device *dev)
+{
+	const struct sdhc_spi_config *config = dev->config;
+	struct sdhc_spi_data *data = dev->data;
+
+	spi_release(config->spi_dev, data->spi_cfg);
+}
+
 /* Checks if SPI SD card is sending busy signal */
 static int sdhc_spi_card_busy(const struct device *dev)
 {
@@ -115,7 +127,6 @@ static int sdhc_spi_card_busy(const struct device *dev)
 
 
 	ret = sdhc_spi_rx(config->spi_dev, data->spi_cfg, &response, 1);
-	spi_release(config->spi_dev, data->spi_cfg);  /* LR: held otherwise (SPI_LOCK_ON), even when the poll failed */
 	if (ret) {
 		return -EIO;
 	}
