@@ -39,3 +39,10 @@ def test_add_leaves_nothing_when_refused(tmp_path):
     r = tenants_sh(tmp_path, "add", "new", to)
     assert r.returncode == 1 and "would not start" in r.stdout, r.stdout + r.stderr
     assert not (tmp_path / "lr-new").exists() and not (tmp_path / "systemctl.log").exists()
+
+
+def test_merge_needs_others(tmp_path):  # the default (test instance only) has nobody to merge: no restart for nothing
+    to = setup(tmp_path, "to", A)
+    r = tenants_sh(tmp_path, "merge", "-", to)
+    assert r.returncode == 1 and "needs the others" in r.stdout, r.stdout + r.stderr
+    assert not (tmp_path / "systemctl.log").exists()

@@ -17,11 +17,10 @@
 #   server/tenants.sh add <id>   # a new tenant of the last instance: <its parent dir>/lr-<id>/{data,recordings}, a token,
 #                                # it restarted; prints the link that logs them in (the only place the token is shown)
 # Each change keeps the tenants.json it replaced beside it (tenants.json.<mode>-<time>). Instances are dir:unit as in
-# deploy.sh; LR_INSTANCES replaces them.
+# deploy.sh: the test instance unless LR_INSTANCES names others (production: LR_INSTANCES=/opt/lr-prod:lr-prod).
 set -euo pipefail
 HOST=suyiiyii@203.0.113.10
-INSTANCES=${LR_INSTANCES:-/opt/lr-prod:lr-prod /opt/lr-prod2:lr-prod2 /opt/live-record:live-record}
-URL=https://lr.example.com  # the last instance's address (99's Caddy): add's link
+INSTANCES=${LR_INSTANCES:-/opt/live-record:live-record}
 
 if [ "${1:-}" != remote ]; then  # on this Mac
   mode=${1:-} arg=${2:--}
@@ -90,6 +89,7 @@ put() {  # dir unit: its tenants.json.new in place (the one before kept), the un
 case $mode in merge | unmerge | add)
   last=${!#} && t=${last%%:*} tu=${last#*:}
   set -- "${@:1:$#-1}"  # the others
+  [ $# -gt 0 ] || [ "$mode" = add ] || { echo "  stop: $mode needs the others before the one that stays (LR_INSTANCES)"; exit 1; }
   case $mode in
     merge)
       for i in "$@"; do
@@ -124,7 +124,8 @@ case $mode in merge | unmerge | add)
       changed add "$t/tenants.json" "$arg" "$n"
       install -d -m 700 "$n" "$n/data" "$n/recordings"
       put "$t" "$tu"
-      python3 - "$t/tenants.json" "$arg" "$URL" << 'PY'
+      url=https://$([ "$tu" = live-record ] && echo live || echo "live-${tu#lr-}").example.com  # its site on 99's Caddy
+      python3 - "$t/tenants.json" "$arg" "$url" << 'PY'
 import json, sys
 t = next(x for x in json.load(open(sys.argv[1])) if x["id"] == sys.argv[2])
 print(f"  {t['id']}: data {t['data']}, recordings {t['recordings']}; their link, to them only (it logs in as them; on a")
