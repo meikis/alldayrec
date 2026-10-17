@@ -213,7 +213,17 @@ static int seg_of(const char *path) { return strstr(path, ".BIN") ? (int) (strto
 static uint8_t boot_file[2];
 static uint32_t boot_len;
 static int boot_fail;  // BOOT's writes fail with this
-static int fs_open(struct fs_file_t *f, const char *path, int flags) { f->f = strstr(path, "/BOOT") ? BOOT_F : seg_of(path); f->pos = 0; return 0; }
+static int made;  // on the card, made by fs_mkdir/fs_open since it was wiped: 1 /LR, 2 .metadata_never_index, 4 .fseventsd/no_log
+static int fs_open(struct fs_file_t *f, const char *path, int flags)
+{
+    if (strstr(path, "/LR/") && !(made & 1)) {
+        return -ENOENT;
+    }
+    made |= strstr(path, "never_index") ? 2 : strstr(path, "no_log") ? 4 : 0;
+    f->f = strstr(path, "/BOOT") ? BOOT_F : seg_of(path);
+    f->pos = 0;
+    return 0;
+}
 static int sync_fail, close_fail;  // fs_sync and fs_close fail with these: the file's length not on the card
 static int fs_close(struct fs_file_t *f) { return close_fail; }
 static ssize_t fs_write(struct fs_file_t *f, const void *d, size_t n)
@@ -258,7 +268,7 @@ static int fs_readdir(struct fs_dir_t *d, struct fs_dirent *e)
     return 0;
 }
 static int fs_closedir(struct fs_dir_t *d) { return 0; }
-static int fs_mkdir(const char *p) { return 0; }
+static int fs_mkdir(const char *p) { made |= !strcmp(p, "/SD:/LR"); return 0; }
 static int fs_unlink(const char *p) { return 0; }
 static int fs_statvfs(const char *p, struct fs_statvfs *v) { v->f_bfree = v->f_blocks = 1 << 20; v->f_frsize = 4096; return 0; }
 
@@ -648,6 +658,29 @@ int main(void)
     assert(logged[n_logged - 1].code == LR_USB_DISK && logged[n_logged - 1].x == 0 && logged[n_logged - 1].b == BACK_IDLE);
     lend_if_idle();  // back: nothing more
     assert(logged[n_logged - 1].code == LR_USB_DISK && logged[n_logged - 1].b == BACK_IDLE && !usb_disk_lent);
+
+    // wiped on the computer it was lent to (X1 10-17: erased as exFAT on the Mac), or a blank card put in after a failed
+    // write: it mounts with no /LR, its writes failed -ENOENT for good (#243). Mounted, it gets its /LR and the hidden
+    // files again and takes the next write
+    memset(phone_len, 0, sizeof(phone_len)), memset(card_len, 0, sizeof(card_len));  // the card-less boot's: from segment 0
+    for (int i = 0; i < 2; i++) {
+        if (i == 0) {
+            assert(lend(true, BACK_PHONE) == 0);
+            made = 0;
+            lend(false, BACK_IDLE);
+        } else {
+            card_fail = -EIO;
+            frames(rec_next, 50);
+            flush();
+            assert(store_err == -EIO);
+            card_fail = 0, made = 0;
+            retry_card();
+        }
+        assert(store_err == 0);
+        frames(rec_next, 50);
+        flush();
+        assert(store_err == 0 && made == 7 && card_len[seg] == phone_len[seg]);
+    }
     printf("store_check ok: %u + %u + %u B on the card\n", card_len[0], card_len[1], card_len[2]);
     return 0;
 }

@@ -763,6 +763,7 @@ static void forget_bond(const struct bt_bond_info *info, void *arg)
 extern volatile bool usb_disk_lent;  // usb.c: the card reader shows the card
 extern volatile uint32_t usb_disk_used;  // usb.c: when the computer last read or wrote it (k_uptime_get_32)
 extern bool usb_charge;
+static int mount_card(int (*mount)(void));
 
 /* A lent card the computer has not read or written for this long comes back by itself (#238): ejected (macOS's eject
  * never reaches the disk driver), forgotten, or never mounted. Lent, nothing records to the card and the stream goes
@@ -799,7 +800,7 @@ static int lend(bool on, uint8_t why)
         return 0;
     } else {
         usb_disk_lent = false;
-        int err = mount_sd_card();
+        int err = mount_card(mount_sd_card);
         k_mutex_lock(&stream_mtx, K_FOREVER);
         store_err = err;
         if (!err) {
@@ -863,7 +864,7 @@ static void retry_card(void)
     int err;
     unmount_sd_card();  // whatever state the failure left it in
     if (was) {
-        err = retries < RETRY_FAST ? mount_sd_card_once() : mount_sd_card_reset();
+        err = mount_card(retries < RETRY_FAST ? mount_sd_card_once : mount_sd_card_reset);
     } else {
         err = card_init(mount_sd_card_reset, &was);  // counts the boot
     }
@@ -1077,16 +1078,16 @@ static uint16_t next_boot(uint32_t on_card, uint32_t newest, uint32_t chip, bool
     return MIN(next, 0xFFFF);
 }
 
-/* Mount, set the card up, count this boot into *counted. The caller sets store_err (and boot, under the SD mutex). */
-static int card_init(int (*mount)(void), uint16_t *counted)
+/* Mount the card (boot's mount, one try, from scratch) and set it up: its DIR, and a computer the card is lent to (USB
+ * disk) leaves it alone: no Spotlight index, no fseventsd log. Every mount, not boot's alone: a card wiped on the
+ * computer it was lent to (X1 10-17: erased as exFAT) came back without its DIR, mounted at every try, and each
+ * write failed (-ENOENT) until a reboot (#243); so would a blank card put in while it runs. */
+static int mount_card(int (*mount)(void))
 {
-    struct fs_file_t f;
-    fs_file_t_init(&f);
     int err = mount();
     if (err) {
         return err;
     }
-    // a computer the card is lent to (USB disk) leaves it alone: no Spotlight index, no fseventsd log
     struct fs_file_t m;
     fs_file_t_init(&m);
     if (!fs_open(&m, "/SD:/.metadata_never_index", FS_O_CREATE | FS_O_WRITE)) {
@@ -1100,6 +1101,18 @@ static int card_init(int (*mount)(void), uint16_t *counted)
     err = fs_mkdir(DIR);
     if (err && err != -EEXIST) {
         LOG_ERR("mkdir " DIR ": %d", err);
+        return err;
+    }
+    return 0;
+}
+
+/* Mount, set the card up, count this boot into *counted. The caller sets store_err (and boot, under the SD mutex). */
+static int card_init(int (*mount)(void), uint16_t *counted)
+{
+    struct fs_file_t f;
+    fs_file_t_init(&f);
+    int err = mount_card(mount);
+    if (err) {
         return err;
     }
     err = fs_open(&f, DIR "/BOOT", FS_O_CREATE | FS_O_RDWR);
