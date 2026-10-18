@@ -18,6 +18,13 @@ from vad_postprocessor import StreamVadPostprocessor
 
 DIR = Path(os.environ.get("MODELS_DIR") or "/opt/lr-models")
 THREADS = int(os.environ.get("INFER_THREADS", "4"))  # onnxruntime threads per voiceprint call (threads.INFER: calls at once)
+# The VAD hears its stream lifted to a level (#253): its features take a fixed global CMVN, so speech 6-10 dB below the
+# usual (a far lecture through a PA, a quieter speaker) had p > 0.5 on no frame at all and was never sent. Each frame is
+# lifted by what brings the 90th percentile of the last 10 s's frame levels to VAD_TARGET_DB, 0 to VAD_GAIN_MAX_DB;
+# only the VAD's features: the audio every other path takes (engines, voiceprints, playback) stays as it came.
+VAD_TARGET_DB = -42.0
+VAD_GAIN_MAX_DB = float(os.environ.get("VAD_GAIN_MAX_DB", "16"))  # 0: off, the VAD as before
+LEVEL_FRAMES = 1000  # 10 s of frames
 VAD, CMVN, EMB = "fireredvad-stream-vad.onnx", "fireredvad-cmvn.ark", "redimnet2-b6.onnx"
 MODELS = {  # file: sha256 (sources and licenses: export_onnx.py)
     VAD: "b3c97836130dc34fc32d56fab551e88cf9454511de2b3c250a5e6578dee74b93",
@@ -59,14 +66,22 @@ def _vad() -> tuple[ort.InferenceSession, np.ndarray, np.ndarray]:
     return session(VAD, 1), *cmvn(DIR / CMVN)  # one session for every stream: run() is thread-safe, a stream's state is its caches
 
 
-def fbank(x: np.ndarray) -> np.ndarray:
-    """80 log-mel frames (25 ms / 10 ms, snip edges, no dither) of int16 samples, CMVN applied: FireRedVAD's features."""
+def fbank(x: np.ndarray, gain_db: np.ndarray | float = 0.0) -> np.ndarray:
+    """80 log-mel frames (25 ms / 10 ms, snip edges, no dither) of int16 samples, CMVN applied: FireRedVAD's features.
+    gain_db (per frame): as if x were that much louder there (a log-mel is the log of a power, without clipping)."""
     o = knf.FbankOptions()
     o.frame_opts.samp_freq, o.frame_opts.dither, o.frame_opts.snip_edges, o.mel_opts.num_bins = 16000, 0, True, 80
     f = knf.OnlineFbank(o)
     f.accept_waveform(16000, x.tolist())
     _, mean, istd = _vad()
-    return ((np.vstack([f.get_frame(i) for i in range(f.num_frames_ready)]) - mean) * istd).astype(np.float32)
+    feat = np.vstack([f.get_frame(i) for i in range(f.num_frames_ready)]) + np.reshape(gain_db, (-1, 1)) * (np.log(10) / 10)
+    return ((feat - mean) * istd).astype(np.float32)
+
+
+def levels(x: np.ndarray) -> np.ndarray:
+    """dBFS of each fbank frame of int16 samples (mean square over its 25 ms)."""
+    fr = np.lib.stride_tricks.sliding_window_view(x, 400)[::160].astype(np.float64)
+    return 10 * np.log10((fr * fr).mean(1) / 32768 ** 2 + 1e-12)
 
 
 class StreamVad:
@@ -76,9 +91,18 @@ class StreamVad:
     def __init__(self):
         self.postprocessor = StreamVadPostprocessor(5, 0.5, 5, 8, 2000, 20)  # FireRedStreamVadConfig()'s defaults
         self.caches = np.zeros((8, 1, 128, 19), np.float32)
+        self.levels = np.full(LEVEL_FRAMES - 1, VAD_TARGET_DB)  # its last frames' levels; at the start as if at the target: no lift
+
+    def gain(self, x: np.ndarray) -> np.ndarray:
+        """dB for each frame of x (whole frames, a chunk of the stream): up to the target, from the levels of the
+        LEVEL_FRAMES up to and including it. The 90th percentile is the speech when there is some, 10 % of the frames."""
+        lv = np.concatenate([self.levels, levels(x)])
+        self.levels = lv[len(lv) - LEVEL_FRAMES + 1:]
+        p90 = np.partition(np.lib.stride_tricks.sliding_window_view(lv, LEVEL_FRAMES), LEVEL_FRAMES * 9 // 10, axis=1)[:, LEVEL_FRAMES * 9 // 10]
+        return np.clip(VAD_TARGET_DB - p90, 0, VAD_GAIN_MAX_DB)
 
     def detect_chunk(self, x: np.ndarray) -> list:
-        probs, self.caches = _vad()[0].run(None, {"feat": fbank(x)[None], "caches_in": self.caches})
+        probs, self.caches = _vad()[0].run(None, {"feat": fbank(x, self.gain(x))[None], "caches_in": self.caches})
         return [self.postprocessor.process_one_frame(p) for p in probs.reshape(-1).tolist()]
 
 
