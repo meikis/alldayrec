@@ -61,6 +61,7 @@ def rig(tmp_path, monkeypatch, final_engine):
     """A pipeline's world: the energy VAD, fake engines and LLM, a page watching; returns what the draft engine was
     sent (seconds) and what the live analysis was fed (tone numbers per turn)."""
     monkeypatch.setattr(infer, "StreamVad", EnergyVad)
+    monkeypatch.setattr(server.squeeze, "LIFT_MAX_DB", 0.0)  # the fake engines read the tones' amplitudes: sent as they are
     monkeypatch.setattr(server, "DRAFT_ENGINE", "stepfun-sse")
     monkeypatch.setattr(server, "ENGINE_FALLBACK", "")
     monkeypatch.setattr(server.summary, "MIN_SPEECH_S", 3)

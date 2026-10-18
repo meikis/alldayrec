@@ -13,6 +13,9 @@ Candidates
                  audio arrives in 5 s pieces, each piece once to Volcengine, diarist labels; FINAL_LABELS=online (as
                  each piece comes) | offline (diarist.relabel at the end) | engine (the engine's ids per piece as
                  units) | guarded (engine units split when their voices disagree: the server's relabel at a close)
+  engine-pieces  final-pieces as the server sends them now: its Segmenter's utterances cut the pieces, each goes
+                 through server.sent_audio (squeezed on the loose VAD's speech, lifted) to PROVIDERS[ENGINE], cached in
+                 work/engine-<ENGINE>/ by what was sent (ASR_GAIN_MAX_DB=0: not lifted)
   cloud-window   every 30 s, last 240 s to StepFun file diarization (via the file-mode ASR service), cluster mean vs owner,
                  final_rows replace the window (the live second layer as designed)
   local-window   same cadence, diarization by sherpa-onnx pyannote-segmentation-3.0 + CAM++ clustering on the Mac,
@@ -36,7 +39,9 @@ import anyio.to_thread
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from server import DATA, SR, REFINE_EVERY_S, REFINE_WINDOW_S, Segmenter, clip_turns, diarize, final_rows, log  # noqa: E402
+from server import SR, REFINE_EVERY_S, REFINE_WINDOW_S, Segmenter, clip_turns, diarize, final_rows, log  # noqa: E402
+
+DATA = Path(os.environ.get("LIVE_DATA", "."))  # the store whose voiceprints the old candidates read (server.DATA before tenants)
 
 # Building blocks of the candidates that the live server no longer runs (per-utterance SSE, the local diarizer,
 # the per-window owner/registry labelling, the replace-by-window final records).
@@ -410,11 +415,12 @@ def rows_streamed(case: Case, dia, embed) -> list[dict]:
     return rows
 
 
-def rows_final_pieces(case: Case, dia, embed) -> list[dict]:
+def rows_final_pieces(case: Case, dia, embed, utts=None, window=None) -> list[dict]:
     """The final layer as the server runs it: audio arrives PIECE_S at a time; whenever server.next_cut finds a cut, the
-    piece from the finalized time to it goes whole to the engine and every sentence of it is final."""
+    piece from the finalized time to it goes whole to the engine (window(a, e), Volcengine by default) and every
+    sentence of it is final."""
     from server import MERGE_GAP_S, label_sentences, next_cut
-    total, utts, piece = len(case.x) / SR, vad_utterances(case), 5.0
+    total, utts, piece, window = len(case.x) / SR, utts or vad_utterances(case), 5.0, window or case.volc_window
     rows, pieces, base, end = [], [], 0.0, piece
     while base < total - 0.05:
         end = min(end, total)
@@ -430,7 +436,7 @@ def rows_final_pieces(case: Case, dia, embed) -> list[dict]:
         if e <= a:
             break
         if any(u < cut for u, _ in known):
-            segs = case.volc_window(a, e)
+            segs = window(a, e)
             label_sentences(dia, embed, segs, case.x[int(a * SR):int(e * SR)])
             pieces.append((a, e, segs))
         base = e
@@ -447,6 +453,31 @@ def rows_final_pieces(case: Case, dia, embed) -> list[dict]:
     for a, e, segs in pieces:
         rows += final_rows(segs, {g["speaker"]: g["speaker"] for g in segs}, EPOCH + dt.timedelta(seconds=a), e - a, since=0.0, edge=0.0)[2]
     return rows
+
+
+def engine_vad(case: Case) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """The server's Segmenter over the case as it runs now: its utterances and the loose VAD's speech, in seconds."""
+    seg, utts, loose = Segmenter(), [], []
+    for i in range(0, len(case.x), SR):
+        for a, b, _ in seg.push(EPOCH + dt.timedelta(seconds=i / SR), case.x[i:i + SR]):
+            utts.append(((a - EPOCH).total_seconds(), (b - EPOCH).total_seconds()))
+        loose += [(a / SR, b / SR) for a, b in seg.speech if not loose or b / SR > loose[-1][1]]  # seg.speech drops old ones
+    return utts, loose
+
+
+def engine_window(case: Case, loose: list[tuple[float, float]], a: float, e: float) -> list[dict]:
+    """[a, e) as the server sends a final piece: server.sent_audio to PROVIDERS[ENGINE], cached by what was sent."""
+    import hashlib
+    import squeeze
+    from server import ENGINE, PROVIDERS, sent_audio
+    xs, spans = sent_audio(case.x[int(a * SR):int(e * SR)], [(max(0.0, s - a), min(e, t) - a) for s, t in loose if t > a and s < e])
+    p = case.work / f"engine-{ENGINE}" / f"{hashlib.sha1(xs.tobytes()).hexdigest()[:16]}.json"
+    if not p.exists():
+        p.parent.mkdir(exist_ok=True)
+        segs = anyio.run(PROVIDERS[ENGINE], xs)
+        print(f"  {ENGINE} {a:.0f}-{e:.0f}: {len(xs) / SR:.0f} of {e - a:.0f} s sent, {len(segs)} sentences", flush=True)
+        json.dump(segs, open(p, "w"), ensure_ascii=False)
+    return squeeze.unsqueeze([{**g, "engine": ENGINE} for g in json.load(open(p))], spans)
 
 
 def rows_from_windows(case: Case, spk: Speakers, diar, name: str, need_asr: bool, utts=None):
@@ -554,6 +585,13 @@ def run(case: Case, name: str) -> list[dict]:
             rows.append(dict(start=(EPOCH + dt.timedelta(seconds=a)).isoformat(timespec="milliseconds"),
                              end=(EPOCH + dt.timedelta(seconds=b)).isoformat(timespec="milliseconds"), speaker=who, text=t))
         return rows
+    if name == "engine-pieces":  # before Speakers(): no sherpa-onnx (the server's venv)
+        from diarist import Diarist, load_embedder
+        bank = dict(np.load(os.environ.get("OWNER_BANK") or os.environ["LIVE_DATA"] + "/owner-redimnet2.npz"))
+        dia = Diarist(bank)
+        dia.bank_raw = bank
+        utts, loose = engine_vad(case)
+        return rows_final_pieces(case, dia, load_embedder(), utts, lambda a, e: engine_window(case, loose, a, e))
     spk = Speakers()
     if name == "cloud-window":
         def cloud(a, e):

@@ -205,14 +205,21 @@ async def _http(url, data=None, headers=None, method=None) -> bytes:
 FILE_MODELS = tuple(os.environ.get("FILE_MODELS", "stepaudio-2.5-asr-8006,doubao-seedasr-2.0").split(","))  # file-mode engines, in order of preference
 
 
+def sent_audio(x: np.ndarray, speech: list[tuple[float, float]]) -> tuple[np.ndarray, list[tuple[float, float]]]:
+    """What a provider gets of a window and the spans unsqueeze maps its times back by: x with the VAD silences squeezed
+    out, lifted where it is quiet (squeeze.py)."""
+    xs, spans = squeeze.squeeze(x, speech, SQUEEZE_KEEP_S)
+    return squeeze.lift(xs), spans
+
+
 async def engine_segs(x: np.ndarray, speech: list[tuple[float, float]], partial=None, engine: str = ENGINE, kind: str = "final",
                       device: str | None = None) -> list[dict]:
     """Sentences with times and speaker ids for a window of audio, from `engine` (PROVIDERS), or ENGINE_FALLBACK when
     it fails; each carries `engine`, and `fallback` (why) when it came from ENGINE_FALLBACK. speech: the VAD speech in
-    x, (start, end) seconds; the provider gets x with the silences squeezed (squeeze.py), the times come back in x.
+    x, (start, end) seconds; the provider gets sent_audio (silences squeezed, quiet audio lifted), the times come back in x.
     partial(segs): the sentences so far, whenever an answer adds some during the call (volc, stepfun*). Each try goes
     in the calls table as `kind` (final, draft) of `device`, one cut off (the task cancelled) too, as CancelledError."""
-    xs, spans = squeeze.squeeze(x, speech, SQUEEZE_KEEP_S)
+    xs, spans = sent_audio(x, speech)
     why = None
     for name in dict.fromkeys(filter(None, (engine, ENGINE_FALLBACK))):
         mark = lambda gs, name=name: squeeze.unsqueeze([{**g, "engine": name, **({"fallback": why} if why else {})} for g in gs], spans)

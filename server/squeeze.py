@@ -1,12 +1,19 @@
 """Silence squeezed out of the audio the ASR engine gets (#87): the engine bills by audio seconds, and a final piece goes
 whole when it has any speech. Each VAD silence longer than `keep` is cut down to `keep` (keep/2 after the speech before
 it, keep/2 before the speech after it; at the window's edges keep/2 next to the speech). unsqueeze maps the engine's
-times back to the window, so nothing after the engine sees the cut."""
+times back to the window, so nothing after the engine sees the cut. lift then brings quiet audio up to a level the
+engines hear."""
+import os
+
 import numpy as np
 
 SR = 16000
 MS = SR // 1000  # samples per ms: spans lie on whole ms, so whole-ms engine times map back exactly
 FADE = 10 * MS   # ramps at each splice: no click
+LIFT_TARGET_DB = -30.0  # lift: the 90th percentile of the 10 ms block levels of what is sent is brought up to this
+LIFT_MAX_DB = float(os.environ.get("ASR_GAIN_MAX_DB", "16"))  # ... by at most this; 0: sent as it came
+LIFT_PEAK = 0.89 * 32768  # ... and never past -1 dBFS at the peaks next to a block
+BLOCK = 10 * MS
 
 
 def squeeze(x: np.ndarray, speech: list[tuple[float, float]], keep: float) -> tuple[np.ndarray, list[tuple[float, float]]]:
@@ -55,6 +62,28 @@ def unsqueeze(segs: list[dict], spans: list[tuple[float, float]]) -> list[dict]:
     return segs
 
 
+def lift(x: np.ndarray) -> np.ndarray:
+    """x as an engine is sent it, louder when it is quiet: StepFun hears level. 10-18 it wrote 31 and 81 characters of
+    a lecture minute at -47 and -53 dBFS (90th percentile of the frame levels), 218 and 209 with 16 dB more; on the
+    GT cases a quiet phone recording went from 42.7 to 35.6 % CER, the others stayed. One gain for all of x (the
+    90th percentile of its 10 ms block levels to LIFT_TARGET_DB, 0 to LIFT_MAX_DB): a gain that followed the level
+    every 10 s lifted the quiet stretches of a loud conversation too, CER 8.8 -> 14.2 %. Lower only where a block's
+    peaks or its neighbours' would pass -1 dBFS, ramped from block to block; never below x, the same length: times do
+    not move. x itself when nothing is lifted."""
+    n = len(x) // BLOCK
+    if n == 0 or LIFT_MAX_DB <= 0:
+        return x
+    b = x[:n * BLOCK].astype(np.float64).reshape(n, BLOCK)
+    g = np.clip(LIFT_TARGET_DB - np.percentile(10 * np.log10((b * b).mean(1) / 32768 ** 2 + 1e-12), 90), 0, LIFT_MAX_DB)
+    peak = np.abs(b).max(1)
+    peak = np.maximum(peak, np.maximum(np.r_[peak[1:], 0], np.r_[0, peak[:-1]]))
+    g = np.clip(np.minimum(g, 20 * np.log10(LIFT_PEAK / np.maximum(peak, 1))), 0, None)
+    if not g.any():
+        return x
+    ramp = np.interp(np.arange(len(x)), np.arange(n) * BLOCK + BLOCK / 2, 10 ** (g / 20))
+    return np.clip(np.round(x * ramp), -32768, 32767).astype(np.int16)
+
+
 def check():
     rng = np.random.default_rng(0)
     for _ in range(300):  # random speech: a sent sample (off the fades) is the sample of x its time maps back to
@@ -91,6 +120,22 @@ def check():
     assert y is x and spans == [(0, 60000)]
     y, _ = squeeze(np.full(20 * SR, 1000, np.int16), [(3, 4), (12, 13)], 3.0)  # splices fade to 0 and back
     assert len(y) == 8 * SR and y[0] == y[4 * SR - 1] == y[4 * SR] == y[-1] == 0 and y[4 * SR + FADE] == y[2 * SR] == 1000
+
+    rng = np.random.default_rng(1)
+    talk = lambda db, s: (rng.normal(size=s * SR) * np.repeat(rng.random(s * 4) < 0.5, SR // 4) * 32768 * 10 ** (db / 20)).astype(np.int16)
+    quiet, loud = talk(-55, 30), talk(-25, 30)  # bursts of noise, half the quarter seconds: p90 a little over the burst RMS
+    assert lift(loud) is loud, "loud: as it came"
+    y = lift(quiet)
+    assert len(y) == len(quiet) and np.corrcoef(y.astype(float), quiet.astype(float))[0, 1] > 0.999, "the same audio, louder"
+    gain = 20 * np.log10(np.sqrt((y.astype(float) ** 2).mean() / (quiet.astype(float) ** 2).mean()))
+    assert abs(gain - LIFT_MAX_DB) < 0.5, gain
+    mixed = np.concatenate([talk(-25, 20), talk(-50, 20)])  # a loud speaker, then a quiet one: the loud one sets the gain
+    assert lift(mixed) is mixed
+    clicks = quiet.copy()
+    clicks[5 * SR + 37] = 20000  # a peak in quiet audio: not lifted past -1 dBFS
+    assert np.abs(lift(clicks).astype(int)).max() <= LIFT_PEAK + 1
+    short = talk(-55, 1)
+    assert len(lift(short)) == len(short) and lift(short[:100]) is not None
 
 
 if __name__ == "__main__":
