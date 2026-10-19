@@ -42,6 +42,7 @@ import mcp_server
 import net
 import profiles
 import qwen_asr
+import qwen_stream
 import recap
 import selfvoice
 import speakers
@@ -80,7 +81,8 @@ SLICE_BACKGROUND_S = int(os.environ.get("SLICE_BACKGROUND_S", "20"))  # ... in t
 SLICE_SCREEN_OFF_S = int(os.environ.get("SLICE_SCREEN_OFF_S", "60"))  # ... screen off (Android)
 LIVE_AUDIO_S = 120                         # a device whose audio came this recently is recording now: drafts and live analysis
 ENGINE = os.environ.get("ENGINE") or "volc"  # final layer's ASR provider (PROVIDERS): volc | qwen | stepfun | stepfun-sse | stepfun-file
-DRAFT_ENGINE = os.environ.get("DRAFT_ENGINE") or ENGINE  # draft layer's (stepfun-sse: fast, no speakers, drafts are replaced anyway)
+DRAFT_ENGINE = os.environ.get("DRAFT_ENGINE") or ENGINE  # draft layer's (stepfun-sse: fast, no speakers, drafts are replaced anyway;
+                                                         # qwen-stream: one streaming session while a page watches, stream_loop)
 ENGINE_FALLBACK = os.environ.get("ENGINE_FALLBACK", "")  # a window the provider fails on (402, 451, 5xx, timeout) goes here; empty: none
 SQUEEZE_KEEP_S = float(os.environ.get("SQUEEZE_KEEP_S", "3"))  # VAD silences longer than this go to the engine cut to this (#87); 0: whole
 SQUEEZE_VAD = float(os.environ.get("SQUEEZE_VAD", "0.3"))  # ... silences by this VAD threshold: 0.5 (cutting pieces) misses short replies
@@ -1100,6 +1102,25 @@ async def pipeline(device: str):
         return (time.time() < T().watch_until and bool(dseg.anchors) and st.edge_end is not None
                 and (dt.datetime.now() - st.edge_end).total_seconds() < LIVE_AUDIO_S)
 
+    async def publish_drafts(rows: list[dict], upto: dt.datetime, engine: str):
+        """Store, push and advance draft_to: a crash after this does not redo these rows."""
+        shown = dt.datetime.now()
+        for r in rows:
+            r["id"], r["state"] = "d" + r["id"][1:], "draft"
+            r["source"], r["engine"], r["shown_at"] = device, engine, iso(shown)
+            st.latency.append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
+        del st.latency[:-50]
+        with db.tx() as t:
+            db.insert_drafts(t, rows)
+            db.put_kv(f"draft_to:{device}", iso(upto), t)
+        st.draft_to = upto
+        done = st.done_to
+        st.drafts += [r for r in rows if not done or r["start"] >= iso(done)]
+        if rows:
+            await broadcast({"type": "draft", "device": device, "rows": rows})
+        show_open()
+        maybe_live()
+
     async def draft_pass(end: dt.datetime | None = None) -> bool:
         """One draft pass; True when more remains. Timer (end None): [draft_to - margin, + window], rows near its end
         left open; VAD: from 1 s before the first undrafted utterance to `end`, a point in the pause after one."""
@@ -1127,24 +1148,9 @@ async def pipeline(device: str):
         sent, n_rows = since, 0  # seconds into the window up to which rows went out while the call ran
 
         async def publish(rows: list[dict], upto: dt.datetime, engine: str):
-            """Store, push and advance draft_to: a crash after this does not redo these rows."""
             nonlocal n_rows
-            shown = dt.datetime.now()
-            for r in rows:
-                r["id"], r["state"] = "d" + r["id"][1:], "draft"
-                r["source"], r["engine"], r["shown_at"] = device, engine, iso(shown)
-                st.latency.append(round((shown - dt.datetime.fromisoformat(r["end"])).total_seconds(), 1))
-            del st.latency[:-50]
-            with db.tx() as t:
-                db.insert_drafts(t, rows)
-                db.put_kv(f"draft_to:{device}", iso(upto), t)
-            st.draft_to, n_rows = upto, n_rows + len(rows)
-            done = st.done_to
-            st.drafts += [r for r in rows if not done or r["start"] >= iso(done)]
-            if rows:
-                await broadcast({"type": "draft", "device": device, "rows": rows})
-            show_open()
-            maybe_live()
+            await publish_drafts(rows, upto, engine)
+            n_rows += len(rows)
 
         async def early(segs: list[dict]):
             """An answer during the call: its sentences but the last (it may still grow) go out now, labelled in order."""
@@ -1223,6 +1229,62 @@ async def pipeline(device: str):
                 while await draft_pass():
                     pass
 
+    async def stream_sentence(g: dict, base: int):
+        """A sentence of the streaming session that began at stream sample `base`: one still being said goes to the
+        pages as `partial` (replaced by the next one); one it ended becomes a draft row, labelled as a draft pass's."""
+        a = base + g["start_ms"] * SR // 1000
+        b = max(a, base + g["end_ms"] * SR // 1000)
+        at = lambda s: dseg.time_at(a + int(s * SR))
+        if not g["final"]:
+            await broadcast({"type": "partial", "device": device, "row": {
+                "id": "p" + device, "start": at(0).isoformat(timespec="milliseconds"), "end": at((b - a) / SR).isoformat(timespec="milliseconds"),
+                "speaker": "", "text": g["text"], "state": "draft", "source": device, "engine": "qwen-stream"}})
+            return
+        seg = {"start_ms": 0, "end_ms": (b - a) * 1000 // SR, "text": g["text"], "speaker": None}
+        x = dseg.audio[max(0, a - dseg.audio_base):max(0, b - dseg.audio_base)]
+        await anyio.to_thread.run_sync(label_sentences, ddia, embed, [seg], x, limiter=threads.INFER)
+        rows = final_rows([seg], {seg["speaker"]: seg["speaker"]}, at(0), (b - a) / SR, None, 0.0, at, 0.0)[2]
+        await publish_drafts(rows, at((b - a) / SR), "qwen-stream")
+        st.draft = {"at": dt.datetime.now().isoformat(timespec="seconds"), "engine": "qwen-stream", "to": iso(st.draft_to)}
+
+    async def stream_loop():
+        """DRAFT_ENGINE qwen-stream: while drafting(), one streaming session (qwen_stream) fed the draft stream's audio as
+        it comes, every 0.2 s, from where drafts or final rows stop (as draft_loop); each sentence it ends is a draft row
+        at once, the one still being said is shown as `partial`. A session that ends (the page went, the server closed
+        it, it failed) is one call in the calls table; the next starts again at the end of the last draft row."""
+        while True:
+            await anyio.sleep(1)
+            if not drafting():
+                st.drafting = False
+                continue
+            floor = dseg.time_at(dseg.samples) - dt.timedelta(seconds=DRAFT_BACK_S)
+            st.draft_to = max(t for t in (st.draft_to, st.done_to, floor, dseg.time_at(dseg.audio_base)) if t)
+            if not st.drafting:
+                st.drafting = True
+                note(f"{device}：页面在看，开始出初稿（实时流，从 {st.draft_to.strftime('%H:%M:%S')} 起）", "state")
+            base = max(dseg.audio_base, dseg.sample_at(st.draft_to))
+            sent, t, err = base, time.perf_counter(), None
+            try:
+                async with qwen_stream.Session() as s, anyio.create_task_group() as tg:
+                    async def pump():
+                        nonlocal sent
+                        while drafting():
+                            if dseg.samples > sent:
+                                lo, sent = max(sent, dseg.audio_base), dseg.samples
+                                await s.send(dseg.audio[lo - dseg.audio_base:sent - dseg.audio_base].tobytes())
+                            await anyio.sleep(0.2)
+                        await s.finish()
+                    tg.start_soon(pump)
+                    async for g in s.results():
+                        await stream_sentence(g, base)
+                    tg.cancel_scope.cancel()  # the task finished: no more audio into it
+            except Exception as e:
+                err = threads.first(e)
+                log.warning("%s draft stream failed after %.0f s: %r", device, time.perf_counter() - t, err)
+                st.draft = {"error": str(err)[:200]}
+            db.add_call("draft", "qwen-stream", device, round((time.perf_counter() - t) * 1000), err and failure(err), (sent - base) / SR, (sent - base) / SR)
+            await broadcast({"type": "partial", "device": device, "row": None})
+
     async def forever(part):
         await part()
         raise RuntimeError(f"{part.__name__} returned")
@@ -1233,7 +1295,8 @@ async def pipeline(device: str):
     try:
         async with anyio.create_task_group() as ptg:
             st.ask = ask
-            for name, part in (("feed", feed), ("edge", edge_feed), ("draft", draft_loop), ("final", final_loop)):
+            drafts = stream_loop if DRAFT_ENGINE == "qwen-stream" else draft_loop
+            for name, part in (("feed", feed), ("edge", edge_feed), ("draft", drafts), ("final", final_loop)):
                 ptg.start_soon(forever, part, name=f"{name}:{device}")
     finally:
         st.ask = None  # no task group to run in until lasting() starts it again
@@ -2221,13 +2284,14 @@ def main():
     args = ap.parse_args()
     missing = [k for k in ("ASR_UPLOAD_BRIDGE_TOKEN", "ASR_SERVICE_BASIC_AUTH") if not os.environ.get(k)]
     engines = {e for e in (ENGINE, DRAFT_ENGINE, ENGINE_FALLBACK) if e}
-    if engines - PROVIDERS.keys():
-        raise SystemExit(f"ENGINE, DRAFT_ENGINE, ENGINE_FALLBACK must be one of {', '.join(PROVIDERS)}, not {', '.join(engines - PROVIDERS.keys())}")
+    if engines - PROVIDERS.keys() - {"qwen-stream"} or "qwen-stream" in (ENGINE, ENGINE_FALLBACK):
+        raise SystemExit(f"ENGINE, DRAFT_ENGINE, ENGINE_FALLBACK must be one of {', '.join(PROVIDERS)} (DRAFT_ENGINE also qwen-stream), "
+                         f"not {', '.join(engines - PROVIDERS.keys())}")
     if "volc" in engines and not os.environ.get("VOLC_ASR_KEY"):
         missing.append("VOLC_ASR_KEY")
     if engines & {"stepfun", "stepfun-sse"} and not os.environ.get("STEPFUN_API_KEY"):
         missing.append("STEPFUN_API_KEY")
-    if "qwen" in engines and not os.environ.get("DASHSCOPE_API_KEY"):
+    if engines & {"qwen", "qwen-stream"} and not os.environ.get("DASHSCOPE_API_KEY"):
         missing.append("DASHSCOPE_API_KEY")
     missing += [k for k in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL") if not os.environ.get(k)]
     if missing:

@@ -33,6 +33,7 @@ const today = todayOf();
 const day = computed(() => (route.query.day as string | undefined) || today),
   live = computed(() => day.value === today);
 const rows = ref<Row[]>([]),
+  partials = ref<Record<string, Row>>({}), // per device, the sentence being said now (DRAFT_ENGINE qwen-stream)
   convs = ref<Conversation[]>([]),
   events = ref<LogEvent[]>([]),
   status = ref<Status | null>(null);
@@ -106,6 +107,7 @@ const queueText = (d: DeviceStatus) =>
 const timeline = computed(() => {
   const ev = [
     ...rows.value.map((r) => ({ s: r.start, it: { k: "row", key: "s" + r.id, r } as Item })),
+    ...Object.values(partials.value).map((r) => ({ s: r.start, it: { k: "row", key: r.id, r } as Item })),
     ...convs.value.map((c) => ({ s: c.end, it: { k: "conv", key: "c" + c.id, c } as Item })),
     ...catchups.value,
   ].sort((a, b) => (a.s < b.s ? -1 : a.s > b.s ? 1 : 0)); // stable: a divider stays after rows starting at its end
@@ -163,6 +165,7 @@ function finalize(m: { device?: string; from: string; to: string; rows: Row[] })
 }
 function addDrafts(m: { device: string; rows: Row[] }) {
   const to = finalTo[m.device] || "";
+  delete partials.value[m.device]; // the sentence it showed has ended: now a draft row
   rows.value = rows.value.concat(m.rows.filter((r) => r.start >= to));
 }
 function addConv(c: Conversation) {
@@ -231,6 +234,9 @@ const { connected, send } = useSocket((m) => {
     if (live.value) finalize(m);
   } else if (m.type === "draft") {
     if (live.value) addDrafts(m);
+  } else if (m.type === "partial") {
+    if (live.value && m.row) partials.value[m.device] = m.row;
+    else delete partials.value[m.device];
   } else if (m.type === "conversation") {
     if (m.start.slice(0, 10) === day.value) addConv(m);
   } else if (m.type === "summary") {
