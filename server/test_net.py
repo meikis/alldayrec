@@ -310,6 +310,8 @@ def test_qwen(monkeypatch):
 
     polls[:] = [{"task_status": "FAILED", "code": "ASR_RESPONSE_HAVE_NO_WORDS", "message": "ASR_RESPONSE_HAVE_NO_WORDS"}]
     assert anyio.run(server.qwen, x) == [], "a window nobody spoke in (10-19 18:27, 47 s): no sentences, not a failure"
+    polls[:] = [{"task_status": "SUCCEEDED", "results": [{"subtask_status": "FAILED", "code": "SUCCESS_WITH_NO_VALID_FRAGMENT"}]}]
+    assert anyio.run(server.qwen, x) == [], "nor one too short to hold a fragment (10-19 19:42, a voice memo's last piece)"
 
     polls[:] = [{"task_status": "SUCCEEDED", "results": [{"subtask_status": "FAILED", "code": "InvalidFile.DownloadFailed"}]}]
     with pytest.raises(RuntimeError, match="DownloadFailed"):

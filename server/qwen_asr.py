@@ -21,6 +21,7 @@ MODEL = os.environ.get("QWEN_ASR_MODEL") or "qwen-audio-3.1-asr-flash-filetrans"
 BASE = "https://dashscope.aliyuncs.com/api/v1"
 POLL_S = 2
 WAIT_S = 900
+NOTHING_SAID = ("ASR_RESPONSE_HAVE_NO_WORDS", "SUCCESS_WITH_NO_VALID_FRAGMENT")  # 10-19: a quiet window; one under a second
 
 
 def wav(x: np.ndarray) -> bytes:
@@ -59,7 +60,7 @@ async def transcribe(x: np.ndarray, upload) -> list[dict]:
         if o["task_status"] in ("PENDING", "RUNNING"):
             continue
         res = (o.get("results") or [{}])[0]
-        if (res.get("code") or o.get("code")) == "ASR_RESPONSE_HAVE_NO_WORDS":  # nothing said: a failed task, no sentences
+        if (res.get("code") or o.get("code")) in NOTHING_SAID:  # a failed task, no sentences
             return []
         if o["task_status"] != "SUCCEEDED" or res.get("subtask_status", "SUCCEEDED") != "SUCCEEDED":
             raise RuntimeError(f"qwen asr {o['task_status']}: {res.get('code') or o.get('code')} {res.get('message') or o.get('message')}"[:200])
