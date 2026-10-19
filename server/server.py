@@ -41,6 +41,7 @@ import live
 import mcp_server
 import net
 import profiles
+import qwen_asr
 import recap
 import selfvoice
 import speakers
@@ -78,7 +79,7 @@ SLICE_FOREGROUND_S = int(os.environ.get("SLICE_FOREGROUND_S", "1"))   # the apps
 SLICE_BACKGROUND_S = int(os.environ.get("SLICE_BACKGROUND_S", "20"))  # ... in the background             (drafts ~8 s vs ~13 s at 5 s)
 SLICE_SCREEN_OFF_S = int(os.environ.get("SLICE_SCREEN_OFF_S", "60"))  # ... screen off (Android)
 LIVE_AUDIO_S = 120                         # a device whose audio came this recently is recording now: drafts and live analysis
-ENGINE = os.environ.get("ENGINE") or "volc"  # final layer's ASR provider (PROVIDERS): volc | stepfun | stepfun-sse | stepfun-file
+ENGINE = os.environ.get("ENGINE") or "volc"  # final layer's ASR provider (PROVIDERS): volc | qwen | stepfun | stepfun-sse | stepfun-file
 DRAFT_ENGINE = os.environ.get("DRAFT_ENGINE") or ENGINE  # draft layer's (stepfun-sse: fast, no speakers, drafts are replaced anyway)
 ENGINE_FALLBACK = os.environ.get("ENGINE_FALLBACK", "")  # a window the provider fails on (402, 451, 5xx, timeout) goes here; empty: none
 SQUEEZE_KEEP_S = float(os.environ.get("SQUEEZE_KEEP_S", "3"))  # VAD silences longer than this go to the engine cut to this (#87); 0: whole
@@ -274,8 +275,21 @@ async def stepfun_file(x: np.ndarray, partial=None) -> list[dict]:
     return await diarize(x)
 
 
+async def qwen(x: np.ndarray, partial=None) -> list[dict]:
+    """Bailian's Qwen-Audio 3.1 file job (qwen_asr): text, sentences and speakers at once, no partial answers."""
+    return await qwen_asr.transcribe(x, upload)
+
+
 # provider(x: 16 kHz int16 PCM, partial=None) -> [{start_ms, end_ms, text, speaker?, words?}], times in x; async
-PROVIDERS = {"volc": volc, "stepfun": stepfun, "stepfun-sse": stepfun_sse, "stepfun-file": stepfun_file}
+PROVIDERS = {"volc": volc, "qwen": qwen, "stepfun": stepfun, "stepfun-sse": stepfun_sse, "stepfun-file": stepfun_file}
+
+
+async def upload(data: bytes, content_type: str) -> str:
+    """A file up through the upload bridge (a presigned PUT); its download URL, for a provider to fetch."""
+    up = json.loads(await _http(BRIDGE, json.dumps({"filename": "live." + content_type.split("/")[1], "content_type": content_type}).encode(),
+                                {"Authorization": f"Bearer {os.environ['ASR_UPLOAD_BRIDGE_TOKEN']}", "Content-Type": "application/json"}))
+    await _http(up["upload_url"], data, {"Content-Type": content_type}, "PUT")
+    return up["download_url"]
 
 
 async def diarize(x: np.ndarray, model: str = FILE_MODELS[0]) -> list[dict]:
@@ -287,11 +301,9 @@ async def diarize(x: np.ndarray, model: str = FILE_MODELS[0]) -> list[dict]:
         ogg = (await anyio.run_process(["ffmpeg", "-v", "error", "-f", "s16le", "-ar", str(SR), "-ac", "1", "-i", "pipe:0",
                                         "-c:a", "libopus", "-b:a", "16k", "-f", "ogg", "pipe:1"], input=x.tobytes())).stdout
     t_up = time.perf_counter()
-    up = json.loads(await _http(BRIDGE, json.dumps({"filename": "live.ogg", "content_type": "audio/ogg"}).encode(),
-                                {"Authorization": f"Bearer {os.environ['ASR_UPLOAD_BRIDGE_TOKEN']}", "Content-Type": "application/json"}))
-    await _http(up["upload_url"], ogg, {"Content-Type": "audio/ogg"}, "PUT")
+    url = await upload(ogg, "audio/ogg")
     auth = {"Authorization": "Basic " + base64.b64encode(os.environ["ASR_SERVICE_BASIC_AUTH"].encode()).decode()}
-    job = json.loads(await _http(f"{DIARIZE}/audio/transcriptions", json.dumps({"audio_url": up["download_url"], "model": model}).encode(),
+    job = json.loads(await _http(f"{DIARIZE}/audio/transcriptions", json.dumps({"audio_url": url, "model": model}).encode(),
                                  {**auth, "Content-Type": "application/json"}))["job_id"]
     t_job = time.perf_counter()
     for _ in range(120):
@@ -2215,6 +2227,8 @@ def main():
         missing.append("VOLC_ASR_KEY")
     if engines & {"stepfun", "stepfun-sse"} and not os.environ.get("STEPFUN_API_KEY"):
         missing.append("STEPFUN_API_KEY")
+    if "qwen" in engines and not os.environ.get("DASHSCOPE_API_KEY"):
+        missing.append("DASHSCOPE_API_KEY")
     missing += [k for k in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL") if not os.environ.get(k)]
     if missing:
         raise SystemExit(f"not set: {', '.join(missing)} (see .env.example)")

@@ -17,6 +17,7 @@ import pytest
 import ask
 import db
 import net
+import qwen_asr
 import server
 import stepfun_asr
 import summary
@@ -265,6 +266,51 @@ def test_diarize(monkeypatch):
     outcome = lambda model: {"status": "FAILED", "error": "UPSTREAM_TASK_FAILED"}
     with pytest.raises(RuntimeError, match="^UPSTREAM_TASK_FAILED$"):
         anyio.run(server.diarize, x)
+
+
+def test_qwen(monkeypatch):
+    """Bailian's file job: the window up lossless through the bridge, a task polled until done, its transcription's
+    sentences with speaker ids; a failed task raises."""
+    monkeypatch.setattr(server, "BRIDGE", "http://bridge/presign")
+    monkeypatch.setattr(qwen_asr, "POLL_S", 0)
+    monkeypatch.setenv("ASR_UPLOAD_BRIDGE_TOKEN", "bt")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dk")
+    result = {"transcripts": [{"channel_id": 0, "text": "你好。好的。", "sentences": [
+        {"begin_time": 100, "end_time": 900, "text": "你好。", "speaker_id": 0},
+        {"begin_time": 1000, "end_time": 1500, "text": " ", "speaker_id": 1},
+        {"begin_time": 1600, "end_time": 2400, "text": "好的。", "speaker_id": 1}]}]}
+    seen, polls = [], []
+
+    def handler(req):
+        seen.append((req.method, req.url.host, req.url.path))
+        if req.url.host == "bridge":
+            assert json.loads(req.content) == {"filename": "live.wav", "content_type": "audio/wav"}
+            return httpx2.Response(200, json={"upload_url": "http://up/live.wav", "download_url": "http://dl/live.wav"})
+        if req.url.host == "up":
+            assert req.content[:4] == b"RIFF" and req.headers["content-type"] == "audio/wav"
+            return httpx2.Response(200)
+        if req.url.host == "result":
+            return httpx2.Response(200, json=result)
+        assert req.headers["authorization"] == "Bearer dk"
+        if req.method == "POST":
+            body = json.loads(req.content)
+            assert req.headers["x-dashscope-async"] == "enable" and body["input"] == {"file_urls": ["http://dl/live.wav"]}
+            assert body["model"] == "qwen-audio-3.1-asr-flash-filetrans" and body["parameters"]["diarization_enabled"] is True
+            return httpx2.Response(200, json={"output": {"task_id": "t1", "task_status": "PENDING"}})
+        return httpx2.Response(200, json={"output": polls.pop(0)})
+    mock(monkeypatch, handler)
+    x = (np.sin(np.arange(16000) / 5) * 3000).astype(np.int16)
+
+    polls[:] = [{"task_status": "RUNNING"}, {"task_status": "SUCCEEDED", "results": [
+        {"subtask_status": "SUCCEEDED", "transcription_url": "http://result/t1.json"}]}]
+    assert anyio.run(server.qwen, x) == [{"start_ms": 100, "end_ms": 900, "text": "你好。", "speaker": "SPEAKER_0"},
+                                          {"start_ms": 1600, "end_ms": 2400, "text": "好的。", "speaker": "SPEAKER_1"}]
+    assert [s[1:] for s in seen] == [("bridge", "/presign"), ("up", "/live.wav"), ("dashscope.aliyuncs.com", "/api/v1/services/audio/asr/transcription"),
+                                     ("dashscope.aliyuncs.com", "/api/v1/tasks/t1"), ("dashscope.aliyuncs.com", "/api/v1/tasks/t1"), ("result", "/t1.json")]
+
+    polls[:] = [{"task_status": "SUCCEEDED", "results": [{"subtask_status": "FAILED", "code": "InvalidFile.DownloadFailed"}]}]
+    with pytest.raises(RuntimeError, match="DownloadFailed"):
+        anyio.run(server.qwen, x)
 
 
 def test_http_as_urllib(monkeypatch):
