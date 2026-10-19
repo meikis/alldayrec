@@ -59,6 +59,8 @@ async def transcribe(x: np.ndarray, upload) -> list[dict]:
         if o["task_status"] in ("PENDING", "RUNNING"):
             continue
         res = (o.get("results") or [{}])[0]
+        if (res.get("code") or o.get("code")) == "ASR_RESPONSE_HAVE_NO_WORDS":  # nothing said: a failed task, no sentences
+            return []
         if o["task_status"] != "SUCCEEDED" or res.get("subtask_status", "SUCCEEDED") != "SUCCEEDED":
             raise RuntimeError(f"qwen asr {o['task_status']}: {res.get('code') or o.get('code')} {res.get('message') or o.get('message')}"[:200])
         return sentences(json.loads((await net.request("GET", res["transcription_url"], 60)).content).get("transcripts", []))

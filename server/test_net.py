@@ -308,6 +308,9 @@ def test_qwen(monkeypatch):
     assert [s[1:] for s in seen] == [("bridge", "/presign"), ("up", "/live.wav"), ("dashscope.aliyuncs.com", "/api/v1/services/audio/asr/transcription"),
                                      ("dashscope.aliyuncs.com", "/api/v1/tasks/t1"), ("dashscope.aliyuncs.com", "/api/v1/tasks/t1"), ("result", "/t1.json")]
 
+    polls[:] = [{"task_status": "FAILED", "code": "ASR_RESPONSE_HAVE_NO_WORDS", "message": "ASR_RESPONSE_HAVE_NO_WORDS"}]
+    assert anyio.run(server.qwen, x) == [], "a window nobody spoke in (10-19 18:27, 47 s): no sentences, not a failure"
+
     polls[:] = [{"task_status": "SUCCEEDED", "results": [{"subtask_status": "FAILED", "code": "InvalidFile.DownloadFailed"}]}]
     with pytest.raises(RuntimeError, match="DownloadFailed"):
         anyio.run(server.qwen, x)
