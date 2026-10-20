@@ -279,7 +279,7 @@ async def stepfun_file(x: np.ndarray, partial=None) -> list[dict]:
 
 async def qwen(x: np.ndarray, partial=None) -> list[dict]:
     """Bailian's Qwen-Audio 3.1 file job (qwen_asr): text, sentences and speakers at once, no partial answers."""
-    return await qwen_asr.transcribe(x, upload)
+    return await qwen_asr.transcribe(x)
 
 
 # provider(x: 16 kHz int16 PCM, partial=None) -> [{start_ms, end_ms, text, speaker?, words?}], times in x; async

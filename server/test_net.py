@@ -269,12 +269,12 @@ def test_diarize(monkeypatch):
 
 
 def test_qwen(monkeypatch):
-    """Bailian's file job: the window up lossless through the bridge, a task polled until done, its transcription's
-    sentences with speaker ids; a failed task raises."""
-    monkeypatch.setattr(server, "BRIDGE", "http://bridge/presign")
+    """Bailian's file job: the window up lossless into its temporary storage (a policy, a form POST to its OSS), a task
+    on the oss:// URL polled until done, its transcription's sentences with speaker ids; a failed task raises."""
     monkeypatch.setattr(qwen_asr, "POLL_S", 0)
-    monkeypatch.setenv("ASR_UPLOAD_BRIDGE_TOKEN", "bt")
     monkeypatch.setenv("DASHSCOPE_API_KEY", "dk")
+    policy = {"upload_host": "http://oss", "upload_dir": "dashscope-instant/d1", "policy": "p", "signature": "s",
+              "oss_access_key_id": "ak", "x_oss_object_acl": "private", "x_oss_forbid_overwrite": "true"}
     result = {"transcripts": [{"channel_id": 0, "text": "你好。好的。", "sentences": [
         {"begin_time": 100, "end_time": 900, "text": "你好。", "speaker_id": 0},
         {"begin_time": 1000, "end_time": 1500, "text": " ", "speaker_id": 1},
@@ -283,18 +283,21 @@ def test_qwen(monkeypatch):
 
     def handler(req):
         seen.append((req.method, req.url.host, req.url.path))
-        if req.url.host == "bridge":
-            assert json.loads(req.content) == {"filename": "live.wav", "content_type": "audio/wav"}
-            return httpx2.Response(200, json={"upload_url": "http://up/live.wav", "download_url": "http://dl/live.wav"})
-        if req.url.host == "up":
-            assert req.content[:4] == b"RIFF" and req.headers["content-type"] == "audio/wav"
+        if req.url.host == "oss":
+            form = req.content.decode("latin-1")
+            assert 'name="key"\r\n\r\ndashscope-instant/d1/live.wav\r\n' in form and 'name="Signature"\r\n\r\ns\r\n' in form
+            assert form.index('name="file"') > form.index('name="key"') and "\r\n\r\nRIFF" in form, "the file last"
             return httpx2.Response(200)
         if req.url.host == "result":
             return httpx2.Response(200, json=result)
         assert req.headers["authorization"] == "Bearer dk"
+        if req.url.path == "/api/v1/uploads":
+            assert dict(req.url.params) == {"action": "getPolicy", "model": "qwen-audio-3.1-asr-flash-filetrans"}
+            return httpx2.Response(200, json={"data": policy})
         if req.method == "POST":
             body = json.loads(req.content)
-            assert req.headers["x-dashscope-async"] == "enable" and body["input"] == {"file_urls": ["http://dl/live.wav"]}
+            assert req.headers["x-dashscope-async"] == "enable" and req.headers["x-dashscope-ossresourceresolve"] == "enable"
+            assert body["input"] == {"file_urls": ["oss://dashscope-instant/d1/live.wav"]}
             assert body["model"] == "qwen-audio-3.1-asr-flash-filetrans" and body["parameters"]["diarization_enabled"] is True
             return httpx2.Response(200, json={"output": {"task_id": "t1", "task_status": "PENDING"}})
         return httpx2.Response(200, json={"output": polls.pop(0)})
@@ -305,7 +308,8 @@ def test_qwen(monkeypatch):
         {"subtask_status": "SUCCEEDED", "transcription_url": "http://result/t1.json"}]}]
     assert anyio.run(server.qwen, x) == [{"start_ms": 100, "end_ms": 900, "text": "你好。", "speaker": "SPEAKER_0"},
                                           {"start_ms": 1600, "end_ms": 2400, "text": "好的。", "speaker": "SPEAKER_1"}]
-    assert [s[1:] for s in seen] == [("bridge", "/presign"), ("up", "/live.wav"), ("dashscope.aliyuncs.com", "/api/v1/services/audio/asr/transcription"),
+    assert [s[1:] for s in seen] == [("dashscope.aliyuncs.com", "/api/v1/uploads"), ("oss", "/"),
+                                     ("dashscope.aliyuncs.com", "/api/v1/services/audio/asr/transcription"),
                                      ("dashscope.aliyuncs.com", "/api/v1/tasks/t1"), ("dashscope.aliyuncs.com", "/api/v1/tasks/t1"), ("result", "/t1.json")]
 
     polls[:] = [{"task_status": "FAILED", "code": "ASR_RESPONSE_HAVE_NO_WORDS", "message": "ASR_RESPONSE_HAVE_NO_WORDS"}]
