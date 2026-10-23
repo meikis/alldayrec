@@ -20,8 +20,6 @@ ALLOWED = {
     },
     "migrate.py": {"import concurrent.futures as cf": "one-off (10-02 SQLite cutover): to delete",
                    "with cf.ThreadPoolExecutor(16) as ex:": "one-off: to delete"},
-    "backfill_hints.py": {"import concurrent.futures as cf": "one-off (history backfill): to delete",
-                          "with cf.ThreadPoolExecutor(args.workers) as ex:": "one-off: to delete"},
 }
 
 

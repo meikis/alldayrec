@@ -7,7 +7,7 @@ Tenant; nothing per person stays in a module.
 
 The tenants are in tenants.json beside the server dir (/opt/<instance>/tenants.json, next to its .env), mode 600: it
 holds every token, and nothing else does (server/tenants.sh made it from each instance's .env):
-    [{"id": "main", "token": "...", "data": "/opt/live-record/data", "recordings": "/opt/live-record/recordings"}, ...]
+    [{"id": "main", "token": "...", "data": "/opt/alldayrec/data", "recordings": "/opt/alldayrec/recordings"}, ...]
 A process with one tenant whose token is empty runs without auth (loopback only).
 """
 import contextvars

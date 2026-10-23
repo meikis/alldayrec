@@ -1,5 +1,5 @@
 #!/bin/bash
-# Each instance's tenants.json (#200 B1: who a server serves, server/tenant.py), made once from its .env around the first
+# Each instance's tenants.json (who a server serves, server/tenant.py), made once from its .env around the first
 # deploy of a server that reads it. In order:
 #   server/tenants.sh migrate    # before that deploy: <dir>/tenants.json (600) with the instance's own tenant, from its
 #                                # .env: id LR_INSTANCE (else friend or main by its LIVE_DATA path, as the metrics had it),
@@ -10,28 +10,28 @@
 # Back: server/tenants.sh rollback (the .env as it was, AUTH_TOKEN with it), then server/deploy.sh rollback. In that
 # order: the server before tenants.json takes its token from .env and runs without auth when there is none (deploy.sh
 # refuses to go back to it then). tenants.json stays: that server does not read it.
-# One process for all instances (#200 B1): the last one serves the others' tenants beside its own:
+# One process for all instances (multi-tenant, one SQLite per tenant): the last one serves the others' tenants beside its own:
 #   server/tenants.sh merge      # the others' tenants into the last one's tenants.json, their units stopped and disabled
 #                                # (deploy.sh leaves them alone then), it restarted; every instance on one commit first
 #   server/tenants.sh unmerge    # back: their tenants out of it, it restarted, their units enabled and started
 #   server/tenants.sh add <id>   # a new tenant of the last instance: <its parent dir>/lr-<id>/{data,recordings}, a token,
-#                                # it restarted; prints the link that logs them in (the only place the token is shown)
+#                                # it restarted; prints the path that logs them in (the only place the token is shown),
+#                                # to go after the instance's public URL
 # Each change keeps the tenants.json it replaced beside it (tenants.json.<mode>-<time>). Instances are dir:unit as in
-# deploy.sh: the test instance unless LR_INSTANCES names others (production: LR_INSTANCES=/opt/lr-prod:lr-prod).
+# deploy.sh (LR_INSTANCES, default /opt/alldayrec:alldayrec), on the host LR_DEPLOY_HOST names through LR_DEPLOY_SHELL.
 set -euo pipefail
-HOST=suyiiyii@203.0.113.10
-INSTANCES=${LR_INSTANCES:-/opt/live-record:live-record}
+INSTANCES=${LR_INSTANCES:-/opt/alldayrec:alldayrec}
 
-if [ "${1:-}" != remote ]; then  # on this Mac
+if [ "${1:-}" != remote ]; then  # on this machine
   mode=${1:-} arg=${2:--}
   case $mode in migrate | cleanup | rollback | merge | unmerge) ;; add) [[ $arg =~ ^[a-z][a-z0-9-]{0,31}$ ]] || mode= ;; *) mode= ;; esac
-  [ -n "$mode" ] || { sed -n 2,20p "$0" >&2; exit 2; }
-  export SSH_AUTH_SOCK=${LR_DEPLOY_SSH_SOCK:-$SSH_AUTH_SOCK}
-  ssh "$HOST" "wsl -u root -e bash -s -- remote $mode $arg $INSTANCES" < "$0"
+  [ -n "$mode" ] || { sed -n 2,21p "$0" >&2; exit 2; }
+  HOST=${LR_DEPLOY_HOST:?set LR_DEPLOY_HOST=user@host (the comment at the top of deploy.sh)}
+  ssh "$HOST" "${LR_DEPLOY_SHELL:-bash -s} -- remote $mode $arg $INSTANCES" < "$0"
   exit
 fi
 
-# in WSL on the deploy host, as root: remote <mode> <arg or -> <dir:unit>...
+# on the deploy host, as root: remote <mode> <arg or -> <dir:unit>...
 mode=$2 arg=$3; shift 3
 
 changed() {  # mode file arg...: file's tenants as mode changes them, in tenants.json.new beside it (600, a new file)
@@ -124,12 +124,11 @@ case $mode in merge | unmerge | add)
       changed add "$t/tenants.json" "$arg" "$n"
       install -d -m 700 "$n" "$n/data" "$n/recordings"
       put "$t" "$tu"
-      url=https://$([ "$tu" = live-record ] && echo live || echo "live-${tu#lr-}").example.com  # its site on 99's Caddy
-      python3 - "$t/tenants.json" "$arg" "$url" << 'PY'
+      python3 - "$t/tenants.json" "$arg" << 'PY'
 import json, sys
 t = next(x for x in json.load(open(sys.argv[1])) if x["id"] == sys.argv[2])
 print(f"  {t['id']}: data {t['data']}, recordings {t['recordings']}; their link, to them only (it logs in as them; on a")
-print(f"  computer it shows the code their app scans): {sys.argv[3]}/connect?token={t['token']}")
+print(f"  computer it shows the code their app scans): <the instance's public URL>/connect?token={t['token']}")
 PY
       ;;
   esac

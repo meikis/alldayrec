@@ -1,24 +1,27 @@
 #!/bin/bash
-# Put the server (server/*.py and the web app built into static/dist) live on the deploy host and check it: on the test instance
-# (/opt/live-record) unless LR_INSTANCES names others; production (/opt/lr-prod) only when named, once test proved it.
+# Put the server (server/*.py and the web app built into static/dist) live on the deploy host and check it, on every
+# instance LR_INSTANCES names (dir:unit, space separated; default /opt/alldayrec:alldayrec; test before production).
 #   server/deploy.sh            # HEAD (a clean origin/main): build, back up, install, restart, check
 #   server/deploy.sh check      # check what runs now (read only)
 #   server/deploy.sh rollback   # put back what the last deploy replaced (code, web, columns it added), restart, check
-# Instances are dir:unit; LR_INSTANCES replaces them (production: LR_INSTANCES=/opt/lr-prod:lr-prod). Each serves the tenants in its
-# <dir>/tenants.json (server/tenant.py; made from its .env once by server/tenants.sh), asked as them; a deploy installs
-# nothing anywhere unless the new server reads every instance's tenants.json (a server without one stops at its start).
+# The host: LR_DEPLOY_HOST=user@host (ssh and scp, with the caller's ssh config and agent). LR_DEPLOY_SHELL (default
+# `bash -s`) is the remote command this script is piped into; it must run as root (systemctl, the instance dirs):
+# `sudo bash -s`, `wsl -u root -e bash -s`, ... scp puts the release in the login's home as lr-deploy.tgz; a remote shell
+# whose $HOME is another one is told where: LR_TGZ (`wsl -u root -e env LR_TGZ=/mnt/c/Users/me/lr-deploy.tgz bash -s`).
+# Each instance serves the tenants in its <dir>/tenants.json (server/tenant.py; made from its .env once by
+# server/tenants.sh), asked as them; a deploy installs nothing anywhere unless the new server reads every instance's
+# tenants.json (a server without one stops at its start).
 # Each deploy keeps a backup with a copy of every tenant's live.db in <dir>/backup-deploy-<time>, <dir>/backup-last points
 # at it; a deploy that passes its check keeps only its own and the one before. An instance whose unit is disabled is
 # left alone: another one serves its tenants (server/tenants.sh merge).
 set -euo pipefail
-HOST=suyiiyii@203.0.113.10
-INSTANCES=${LR_INSTANCES:-/opt/live-record:live-record}
+INSTANCES=${LR_INSTANCES:-/opt/alldayrec:alldayrec}
 
-if [ "${1:-}" != remote ]; then  # on this Mac
+if [ "${1:-}" != remote ]; then  # on this machine
   mode=${1:-deploy}
-  case $mode in deploy | check | rollback) ;; *) sed -n 2,5p "$0" >&2; exit 2 ;; esac
+  case $mode in deploy | check | rollback) ;; *) sed -n 2,10p "$0" >&2; exit 2 ;; esac
+  HOST=${LR_DEPLOY_HOST:?set LR_DEPLOY_HOST=user@host (the comment at the top of $0)}
   root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
-  export SSH_AUTH_SOCK=${LR_DEPLOY_SSH_SOCK:-$SSH_AUTH_SOCK}
   if [ "$mode" = deploy ]; then
     git -C "$root" fetch -q origin main
     if [ -n "$(git -C "$root" status --porcelain -- server web)" ] || [ "$(git -C "$root" rev-parse HEAD)" != "$(git -C "$root" rev-parse origin/main)" ]; then
@@ -32,15 +35,15 @@ if [ "${1:-}" != remote ]; then  # on this Mac
     tar -tzf "$tmp/release.tgz" | grep -qx static/dist/index.html || { echo "static/dist/index.html is not in the release" >&2; exit 1; }
     scp -q "$tmp/release.tgz" "$HOST:lr-deploy.tgz"
   fi
-  ssh "$HOST" "wsl -u root -e bash -s -- remote $mode $INSTANCES" < "$0"
+  ssh "$HOST" "${LR_DEPLOY_SHELL:-bash -s} -- remote $mode $INSTANCES" < "$0"
   exit
 fi
 
-# in WSL on the deploy host, as root: remote <mode> <dir:unit>...
+# on the deploy host, as root: remote <mode> <dir:unit>...
 mode=$2; shift 2
 RUN=$(date +%Y%m%d-%H%M%S)
-TGZ=${LR_TGZ:-/mnt/c/Users/me/lr-deploy.tgz}  # where scp put it (the Windows home); LR_TGZ: test_deploy.py's
-UV=/root/.local/bin/uv
+TGZ=${LR_TGZ:-$HOME/lr-deploy.tgz}  # where scp put it (the top of this file); test_deploy.py's too
+UV=$(command -v uv || echo "$HOME/.local/bin/uv")  # ~/.local/bin is not on a non-interactive shell's PATH
 set -- $(for i in "$@"; do  # without the instances whose unit is disabled (merged into another one: not started again)
   if [ "$(systemctl is-enabled "${i#*:}" 2> /dev/null)" = enabled ]; then echo "$i"; else echo "  skip ${i%%:*}: ${i#*:} is disabled" >&2; fi
 done)
@@ -100,7 +103,7 @@ deploy() {  # dir unit: back up, install the release, restart, check
   # the release's packages (its uv.lock) into the instance's venv first: added or changed, none removed (--inexact), so
   # the code running now and a rollback's run on them too; a failure stops here, nothing installed, nothing restarted
   (cd "$b/new" && UV_PROJECT_ENVIRONMENT="$d/server/.venv" "$UV" sync --frozen --inexact -q)
-  # and every model file the release pins (infer.MODELS) in the instance's MODELS_DIR, or stop here the same way (#219)
+  # and every model file the release pins (infer.MODELS) in the instance's MODELS_DIR, or stop here the same way (a restart without them would fail)
   (cd "$b/new" && MODELS_DIR="$(env_of "$d" MODELS_DIR)" "$d/server/.venv/bin/python" -c "import infer; infer.check()")
   for f in pyproject.toml uv.lock; do [ ! -f "$d/server/$f" ] || cp -a "$d/server/$f" "$b/old/"; done
   # per tenant, the columns now (rollback drops those a release adds: old code inserts whole rows) and an online copy of the db

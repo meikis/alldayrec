@@ -606,7 +606,7 @@ async def summarize_loop():
 
 async def name_hints(c: dict, media: set[str]):
     """What each label was called (hints.py), once per conversation with a summary call (a rename carries them over in
-    apply_rename; backfill_hints.py asks history). A failure is logged and left to the backfill."""
+    apply_rename). A failure is logged."""
     if not set(c.get("participants") or []) - {"我", "S?"} - media:
         return
     try:
