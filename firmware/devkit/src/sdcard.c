@@ -25,7 +25,7 @@ static FATFS fat_fs;
 /* NCS 2.7's SD stack waits for the card on DISK_IOCTL_CTRL_SYNC, then answers -ENOTSUP: card_ioctl() (zephyr/subsys/sd/
  * sd_ops.c) lacks a break there. FatFs ends a close, an unlink, a mkdir with a sync, so each reported a disk error
  * after the work was done; on a card without LR/ the first boot's mkdir failed and nothing went to the card for a
- * minute (#137). The linker sends the SD disk's calls here (CMakeLists.txt, --wrap); drop it with an NCS that has
+ * minute. The linker sends the SD disk's calls here (CMakeLists.txt, --wrap); drop it with an NCS that has
  * the break. */
 int __real_sdmmc_ioctl(struct sd_card *card, uint8_t cmd, void *buf);
 static struct sd_card *disk_card;  // the SD disk's own card, kept by NCS's disk driver: each mount asks it (log_card)
@@ -39,7 +39,7 @@ int __wrap_sdmmc_ioctl(struct sd_card *card, uint8_t cmd, void *buf)
 uint8_t lr_sd_cid[16], lr_sd_csd[16];
 uint32_t lr_sd_err[LR_SD_ERR_N];
 
-/* Which card a board's trouble goes with (#155 F2): CID without its serial number, CSD's kind and size */
+/* Which card a board's trouble goes with: CID without its serial number, CSD's kind and size */
 static void log_card(void)
 {
     const uint8_t *c = lr_sd_cid;
@@ -61,7 +61,7 @@ static const struct gpio_dt_spec sd_pwr = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user),
 
 /* The card's SPI lines (SCK MOSI MISO, then CS). Driven, they feed a card whose supply is off, through the module's
  * 10k pull-ups and the card's protection diodes: CS above all, driven high (deselected) from the SPI driver's init on,
- * before main. LR-P3s with a card went flat in under two days "off" (#197), and the card never really lost power in
+ * before main. LR-P3s with a card went flat in under two days "off", and the card never really lost power in
  * a power cycle. */
 #define SD_LINE(node, prop, idx) NRF_GET_PIN(DT_PROP_BY_IDX(node, prop, idx)),
 static const uint32_t sd_lines[] = {
@@ -128,7 +128,7 @@ static void sd_spi_reset(void)
     lr_log(LR_SD_RESET, 0, r12, r0);
 }
 
-/* A board that switches the card's supply (LR-P3, LR-P1: the nice!nano's VCC on P0.13, #122 wire 12): off long enough
+/* A board that switches the card's supply (LR-P3, LR-P1: the nice!nano's VCC on P0.13): off long enough
  * to drain, its SPI lines let go meanwhile (sd_lines), then on, so the card starts from reset; the lines back as the SPI
  * driver set them (pinctrl, CS). LR-X1 feeds it from 3V3: nothing to do. */
 static void sd_power_cycle(void)

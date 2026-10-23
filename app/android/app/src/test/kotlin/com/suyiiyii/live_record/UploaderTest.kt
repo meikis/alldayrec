@@ -6,7 +6,7 @@ import org.junit.Test
 import java.io.File
 import java.lang.reflect.Proxy
 
-/** One request is one stretch from its first piece's start (#130): the backlog queued after what is said now is older
+/** One request is one stretch from its first piece's start: the backlog queued after what is said now is older
  *  and must not ride along in its batch (the emulator run lost 2 min of backlog that way). */
 class UploaderTest {
     private fun f(start: Long, dev: String = "LR-EMU-BEEF") = File("$start@$dev.ogg")
@@ -19,7 +19,7 @@ class UploaderTest {
         assertEquals(listOf(f(900_000)), Uploader.batch(listOf(f(900_000), f(960_000))))  // 60 s pieces go one by one
     }
 
-    /** A recorder's queue in its status (#155 A5): only its own finished pieces, the oldest's age from its start. */
+    /** A recorder's queue in its status: only its own finished pieces, the oldest's age from its start. */
     @Test fun queued() {
         val dir = kotlin.io.path.createTempDirectory().toFile()
         File(dir, "1000@LR-EMU-BEEF.ogg").writeBytes(ByteArray(2048))

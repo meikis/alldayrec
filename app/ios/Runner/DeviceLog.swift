@@ -24,7 +24,7 @@ enum DeviceLog {
   private static var src = ""    // this install's app events: "app:<id made at the first start>"
   private static var lastSeq: Int64 = 0  // an app event's seq: its time in ms, kept increasing (also across restarts)
   private static var steps: [String] = []  // the connection's steps so far, for its connect event
-  /// This build, 1.4.6+21: in every app event and status (#155 A1).
+  /// This build, 1.4.6+21: in every app event and status.
   static let version = "\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "?")+\(Bundle.main.infoDictionary?["CFBundleVersion"] ?? "?")"
 
   static func start(dir: URL, prefs p: UserDefaults) {
@@ -38,7 +38,7 @@ enum DeviceLog {
     p.set(src, forKey: "logSrc")
     lastSeq = Int64(p.integer(forKey: "logSeq"))
     Thread.detachNewThread {
-      while true { autoreleasepool(invoking: send); Thread.sleep(forTimeInterval: 30) }  // a pool per round (#109)
+      while true { autoreleasepool(invoking: send); Thread.sleep(forTimeInterval: 30) }  // a pool per round
     }
   }
 
@@ -123,7 +123,7 @@ enum DeviceLog {
   }
 
   /// The crashed thread's first frames in a MetricKit call stack tree (MXCallStackTree.jsonRepresentation()), as
-  /// binary+offset: a build's dSYM turns them into lines; no data (#155 A7).
+  /// binary+offset: a build's dSYM turns them into lines; no data.
   static func frames(_ json: Data, max n: Int = 5) -> [String] {
     guard let tree = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
           let stacks = tree["callStacks"] as? [[String: Any]] else { return [] }
@@ -152,10 +152,10 @@ enum DeviceLog {
   static func step(_ what: String, _ ms: Int) { lock.lock(); steps.append("\(what) \(ms) ms"); lock.unlock() }
 
   /// A connection's session starts: its steps from here. Not at the disconnect: the session it ends adds the step it
-  /// was in after that, and it showed up first in the next connect event (#239).
+  /// was in after that, and it showed up first in the next connect event.
   static func connecting() { lock.lock(); steps = []; lock.unlock() }
 
-  /// The link is up and the audio flows: the steps it took, and how long it was down (#239), as one event.
+  /// The link is up and the audio flows: the steps it took, and how long it was down, as one event.
   static func connected(_ device: String) {
     lock.lock(); let s = steps.joined(separator: "，"); steps = []; lock.unlock()
     let down = (prefs.object(forKey: "downAt") as? Int64).map { Int(Int64(Date().timeIntervalSince1970 * 1000) - $0) }
@@ -164,7 +164,7 @@ enum DeviceLog {
   }
 
   /// The link went down: why, as CoreBluetooth says it (nil: this phone ended it). The first of an outage dates it, in
-  /// prefs: iOS may end the app while it waits and relaunch it for the connection (10-15: 58 min, #239).
+  /// prefs: iOS may end the app while it waits and relaunch it for the connection (10-15: 58 min).
   static func disconnected(_ device: String, _ why: String?) {
     if prefs.object(forKey: "downAt") == nil { prefs.set(Int64(Date().timeIntervalSince1970 * 1000), forKey: "downAt") }
     app(device, "disconnect", "断开（\(why ?? "手机断开")）", level: "warn")
@@ -217,7 +217,7 @@ enum DeviceLog {
     }
   }
 
-  static let cap = 10 << 20  // the queue kept while sends fail (#155 A9): a recorder's log offline for weeks
+  static let cap = 10 << 20  // the queue kept while sends fail: a recorder's log offline for weeks
 
   /// The oldest files of the queue past `cap` bytes deleted, the newest always kept; how many bytes went.
   static func trim(_ files: [URL], cap: Int) -> Int {
@@ -233,7 +233,7 @@ enum DeviceLog {
   private static func post(_ url: String, _ body: Data) -> Int {
     guard let u = URL(string: url) else { return -1 }
     #if canImport(UIKit)
-    // the request finishes even if iOS would suspend the app meanwhile, as an upload's (#155 A9)
+    // the request finishes even if iOS would suspend the app meanwhile, as an upload's
     var task = UIBackgroundTaskIdentifier.invalid
     let release = { DispatchQueue.main.async { if task != .invalid { UIApplication.shared.endBackgroundTask(task); task = .invalid } } }
     task = UIApplication.shared.beginBackgroundTask(withName: "devlog", expirationHandler: release)

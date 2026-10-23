@@ -75,7 +75,7 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
                 "status" -> result.success(RecorderService.status(File(filesDir, "chunks")))
-                "error" -> {  // an error the Flutter side did not catch (#155 A7): its type and first frames, no message
+                "error" -> {  // an error the Flutter side did not catch: its type and first frames, no message
                     DeviceLog.app(DeviceLog.mine(), "app_error", "界面出错：${call.argument<String>("type")} ${call.argument<String>("stack")}", "error")
                     result.success(null)
                 }
@@ -255,7 +255,7 @@ class Slicer(private val dir: File, @Volatile var fgS: Int, @Volatile var bgS: I
         codec.start()
         rec.startRecording()
         // The encoder's own header says pre-skip 104: its 6.5 ms lookahead counted at 16 kHz, in a 48 kHz field
-        // (AOSP C2SoftOpusEnc), and every piece repeated it, cutting 2.2 ms of real audio at each seam (#45). The
+        // (AOSP C2SoftOpusEnc), and every piece repeated it, cutting 2.2 ms of real audio at each seam. The
         // encoder runs on across pieces, so only the run's first piece has the delay to skip: 6.5 ms = 312 at 48 kHz.
         val rest = Ble.opusFormat(0)
         format = Ble.opusFormat(312)

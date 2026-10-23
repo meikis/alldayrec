@@ -41,11 +41,11 @@ object DeviceLog {
     private var lastSeq = 0L                   // an app event's seq: its time in ms, kept increasing (also across restarts)
     private val steps = StringBuilder()        // the connection's steps so far, for its connect event
     private lateinit var ctx: Context
-    @Volatile var version = "?"                // this build, 1.4.6+21: in every app event and status (#155 A1)
+    @Volatile var version = "?"                // this build, 1.4.6+21: in every app event and status
         private set
 
     /** Once per process, by whichever starts first (`by`: the service, or the UI): the queue and its sender, and what
-     *  the app says of itself (#155 A2, A7, A8): this start, why the process before it ended, a crash handler, what it
+     *  the app says of itself: this start, why the process before it ended, a crash handler, what it
      *  is allowed to do. */
     fun start(ctx: Context, by: String) {
         synchronized(lock) {
@@ -150,7 +150,7 @@ object DeviceLog {
             .apply { if (level != null) put("level", level) })))
     }
 
-    /** The phone, for the status sent with its recorder's (#155 A1, A3): this build, the system, the model as the
+    /** The phone, for the status sent with its recorder's: this build, the system, the model as the
      *  maker names it (never the name the person gave the phone), its battery and whether it saves power or runs hot
      *  (the system slows or stops apps then), and this app's memory. */
     fun phone(): Map<String, Any?> {
@@ -166,7 +166,7 @@ object DeviceLog {
     }
 
     /** Why the app's processes before this one ended (Android 11+; not the WebView's sandboxed ones), each once, at the
-     *  time it ended (#155 A2): low memory, a crash, an ANR, stopped by the person or for using too much, an update. */
+     *  time it ended: low memory, a crash, an ANR, stopped by the person or for using too much, an update. */
     private fun exits() {
         if (Build.VERSION.SDK_INT < 30) return
         val seen = prefs.getLong("exitSeen", 0)
@@ -187,7 +187,7 @@ object DeviceLog {
         12 to ("依赖的进程结束了" to "warn"), 13 to ("系统的其他原因" to "warn"), 14 to ("被冻结后结束" to "warn"),
         15 to ("应用状态变了" to null), 16 to ("应用更新" to null))
 
-    /** An exception nothing caught goes into the queue before the process dies (#155 A7; the file is written at once),
+    /** An exception nothing caught goes into the queue before the process dies (the file is written at once),
      *  then the system's own handler runs. */
     private fun crashes() {
         val next = Thread.getDefaultUncaughtExceptionHandler()
@@ -202,7 +202,7 @@ object DeviceLog {
         x.javaClass.name + " " + x.stackTrace.take(4).joinToString(" < ") { "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}" }
     }
 
-    /** What the app may do, logged when it changes and the first time (#155 A8): without Bluetooth nothing connects;
+    /** What the app may do, logged when it changes and the first time: without Bluetooth nothing connects;
      *  without notifications the foreground service is hidden; without the battery exemption, or with the background
      *  restricted, the system stops the link. */
     private fun permissions() {
@@ -268,7 +268,7 @@ object DeviceLog {
         }
     }
 
-    const val CAP = 10L shl 20  // the queue kept while sends fail (#155 A9): a recorder's log offline for weeks
+    const val CAP = 10L shl 20  // the queue kept while sends fail: a recorder's log offline for weeks
 
     /** The oldest files of the queue past `cap` bytes deleted, the newest always kept; how many bytes went. */
     fun trim(files: List<File>, cap: Long): Long {

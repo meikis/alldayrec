@@ -26,7 +26,7 @@ struct bt_conn *get_current_connection();
 int bt_on();
 int bt_off();
 
-/* Bound and paused (issue #56): nothing is recorded while no phone is bonded or while a phone has paused it. */
+/* Bound and paused: nothing is recorded while no phone is bonded or while a phone has paused it. */
 int lr_bond_count(void);
 bool lr_paused(void);
 void lr_pause(uint32_t s);  // s seconds (0: resume now)

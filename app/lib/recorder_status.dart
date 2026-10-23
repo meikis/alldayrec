@@ -17,7 +17,7 @@ const chargeText = {'battery': '用电池', 'charging': '充电中', 'full': '�
   };
 }
 
-/// What a recorder's scan response says of its power and card, for the add-recorder list (firmware #155 F4: after the
+/// What a recorder's scan response says of its power and card, for the add-recorder list (after the
 /// state byte, whose bits 3-4 are the charge, the battery mV / 20 and the card's errno); '' from an older firmware.
 String advText(Map d) {
   final state = d['state'] as int, mv = d['mv'] as int? ?? -1, card = d['card'] as int? ?? -1;

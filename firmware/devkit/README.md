@@ -9,8 +9,8 @@ XIAO nRF52840 Sense 上的录音固件：PDM 麦克风 → Opus 16 kHz → 记�
 |---|---|---|---|
 | `LR-X1` | XIAO nRF52840 Sense（板载麦克风，焊 SD 模块和电池） | `sdmod` | 板载分压 AIN7 |
 | `LR-P1` | ProMicro nRF52840（nice!nano 兼容，外接 PDM 麦克风和 SD 模块） | `promicro` | 芯片内部 VDDH/5（电池接 VDDH，不用外接电阻） |
-| `LR-P2` | 同 LR-P1 的板子，专做测试的那一块（bootloader 0.10.0，SWD 线常接，#110） | `promicro-p2` | 同 LR-P1 |
-| `LR-P3` | 同 LR-P1 的板子，飞线接 SD 模块、PDM 麦（SEL 接 3V）和拨动开关（P1.15）装进外壳的量产版（#122）；新机先跑 `selftest.py run SERIAL --p3` | `promicro-p3` | 同 LR-P1 |
+| `LR-P2` | 同 LR-P1 的板子，专做测试的那一块（bootloader 0.10.0，SWD 线常接） | `promicro-p2` | 同 LR-P1 |
+| `LR-P3` | 同 LR-P1 的板子，飞线接 SD 模块、PDM 麦（SEL 接 3V）和拨动开关（P1.15）装进外壳的量产版；新机先跑 `selftest.py run SERIAL --p3` | `promicro-p3` | 同 LR-P1 |
 
 每台的蓝牙名是型号加身份地址末两字节，如 `LR-P1-BDAE`：地址跟着芯片走，刷固件不变。广播包放型号（`LR-P1`），扫描响应放完整名字；
 设备信息服务里 Model 是型号，Hardware Revision 是板子。客户端都按记录流服务 UUID `7c3e0000-…`（广播里有）找设备。
@@ -61,7 +61,7 @@ SD 模块跳线：P0.20–CS、P0.22–MOSI、P0.24–CLK、P1.00–MISO（左�
 
 用电池时每分钟读一次电池电压（LR-X1 是板载分压，LR-P 系列是芯片内部的 VDDH）。连续 3 次低于 `CONFIG_LR_LOW_BATTERY_MV`（默认 3300 mV，0 = 不关）时，固件依次：记一条 POWER（a=2），写完并关闭正在录的文件，断开手机，重启。重启后在挂卡、开蓝牙之前直接进入 System OFF。
 唤醒方式：插 USB；LR-P3 也可以拨一下开关（关→开）。插着 USB 时不做判断（读到的是线上的电压）。
-阈值依据（#95）：X1 三次放电，读数到 3.30 V 后还能录 25–29 分钟；读数到 2.98–3.08 V 时，离断电只剩 5–9 分钟，之后反复欠压重启。
+阈值依据：X1 三次放电，读数到 3.30 V 后还能录 25–29 分钟；读数到 2.98–3.08 V 时，离断电只剩 5–9 分钟，之后反复欠压重启。
 
 ## 记录流
 
@@ -89,11 +89,11 @@ uv run --no-project --with bleak python lr_listen.py --selftest
 
 ## 已知问题
 
-- SD 卡的 SPI 协议用 `src/sdhc_spi.c`：NCS 2.7 驱动的副本，改了三处（#105）。数据命令的 R1 晚于第 2 个字节时，原来要睡 10 ms；每次多块读后 CMD12 的忙超出缓冲，原来要睡 30 ms；现在都改成先连续轮询。写卡后卡一直忙，原来会永远轮询，现在每次 10 s 超时报错。主机检查：`test/sdhc_check.c`
-- SD 总线 8 MHz：ProMicro（LR-P1/P2/P3）用 SPIM（EasyDMA）；XIAO（LR-X1）仍用 legacy SPI（`nordic,nrf-spi`，每字节一次中断）。10-03 SPIM 在 XIAO 焊好的模块上初始化挂死，当时还没有 #59 的 SD 复位；它的 SD 接在 D7–D10，是 low frequency I/O 引脚。之后没有在 XIAO 上复测
-- NCS 2.7 `card_ioctl()` 在 `DISK_IOCTL_CTRL_SYNC` 后缺 `break`，FatFs 每次 sync 都报 -EIO（数据其实写进去了）：新卡第一次开机 `mkdir LR` 因此报错、一分钟不写卡（#137）。`sdcard.c` 用链接器 `--wrap=sdmmc_ioctl` 把这个假错改成 0，升级到修好的 NCS 后删掉
+- SD 卡的 SPI 协议用 `src/sdhc_spi.c`：NCS 2.7 驱动的副本，改了三处。数据命令的 R1 晚于第 2 个字节时，原来要睡 10 ms；每次多块读后 CMD12 的忙超出缓冲，原来要睡 30 ms；现在都改成先连续轮询。写卡后卡一直忙，原来会永远轮询，现在每次 10 s 超时报错。主机检查：`test/sdhc_check.c`
+- SD 总线 8 MHz：ProMicro（LR-P1/P2/P3）用 SPIM（EasyDMA）；XIAO（LR-X1）仍用 legacy SPI（`nordic,nrf-spi`，每字节一次中断）。10-03 SPIM 在 XIAO 焊好的模块上初始化挂死，当时还没有挂载前的 SD 复位；它的 SD 接在 D7–D10，是 low frequency I/O 引脚。之后没有在 XIAO 上复测
+- NCS 2.7 `card_ioctl()` 在 `DISK_IOCTL_CTRL_SYNC` 后缺 `break`，FatFs 每次 sync 都报 -EIO（数据其实写进去了）：新卡第一次开机 `mkdir LR` 因此报错、一分钟不写卡。`sdcard.c` 用链接器 `--wrap=sdmmc_ioctl` 把这个假错改成 0，升级到修好的 NCS 后删掉
 - 卡写失败或开机时没卡：流照常推（TIME 的 store 显示错误），每分钟重新挂载一次卡，成功后从新段继续写（开机时没卡的这次才计开机次数）
-- 写卡在自己的线程（`card_thread`）里做，切记录和 LIVE 不等卡（#166）：卡卡住时，记录照常发给手机。写卡队列（16 KB，约 4 s）放不下的批次只是不上卡，记一条 APPEND_ERR（x 1，−EAGAIN），这一段后面的也不再上卡；写卡线程追上后从新段继续。所以卡上每个文件仍是流里同名文件的开头
+- 写卡在自己的线程（`card_thread`）里做，切记录和 LIVE 不等卡：卡卡住时，记录照常发给手机。写卡队列（16 KB，约 4 s）放不下的批次只是不上卡，记一条 APPEND_ERR（x 1，−EAGAIN），这一段后面的也不再上卡；写卡线程追上后从新段继续。所以卡上每个文件仍是流里同名文件的开头
 - `'T'` 的帧号取的是对时那一刻正在编码的帧，这一帧的声音比它早约 0–100 ms（麦克风按 100 ms 一块交数据），时间系统性偏晚约 50 ms
 - 热复位时 SD 卡可能卡在命令中间只能断电恢复；1200 bps 复位前会先卸载，看门狗复位仍有风险
 - 开机前约 0.3 s 音频丢失；`MIC_GAIN` 偏高会削顶；BLE 连接间隔（~20 Hz）串进麦克风的「哒哒」声未修

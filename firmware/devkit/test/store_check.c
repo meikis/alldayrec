@@ -1,7 +1,7 @@
 // Host check of the record stream in src/lr_store.c: what a following phone gets (LIVE) and what the card gets are the
 // same bytes at the same file and offset, through batches, 'T' records, frame gaps and a card that stops taking writes;
-// the timing events (SD_WRITES, READ, READ_TIME) on a fake clock; LIVE behind a stalled link (#133), a notify with no TX
-// buffer and a link lost with records queued (#170).
+// the timing events (SD_WRITES, READ, READ_TIME) on a fake clock; LIVE behind a stalled link, a notify with no TX
+// buffer and a link lost with records queued.
 //   d=$(mktemp -d) && mkdir -p $d/zephyr/{bluetooth,fs,sys,logging,drivers,random} && for h in bluetooth/conn \
 //   bluetooth/gatt bluetooth/uuid fs/fs kernel logging/log sys/byteorder sys/ring_buffer drivers/sensor random/random; do
 //   touch $d/zephyr/$h.h; done && cc -O1 -w -I$d -o $d/store_check test/store_check.c && $d/store_check
@@ -100,7 +100,7 @@ static bool bt_addr_le_eq(const bt_addr_le_t *a, const bt_addr_le_t *b) { return
 static int bt_unpair(int id, const bt_addr_le_t *a) { return 0; }
 static void bt_foreach_bond(int id, void (*f)(const struct bt_bond_info *, void *), void *arg) {}
 static uint16_t bt_gatt_get_mtu(struct bt_conn *c) { return 185; }
-// LIVE's queue and its sending thread (#133): live_send() runs at each k_sem_give, unless the link is stalled
+// LIVE's queue and its sending thread: live_send() runs at each k_sem_give, unless the link is stalled
 struct ring_buf { uint8_t *buf; uint32_t size, head, tail, claim; };  // read, committed, claimed: running counts
 #define RING_BUF_DECLARE(name, n) static uint8_t name##_mem[n]; static struct ring_buf name = {name##_mem, n}
 static uint32_t ring_buf_space_get(struct ring_buf *r) { return r->size - (r->claim - r->head); }
@@ -135,7 +135,7 @@ static uint32_t ring_buf_get(struct ring_buf *r, uint8_t *d, uint32_t n)
 #define K_MUTEX_DEFINE(name) struct k_mutex name  // after "static"
 #define K_THREAD_DEFINE(...)
 static bool stalled;     // the link: nothing goes out (LIVE's thread waits on a TX buffer)
-static bool card_stuck;  // the card: its writer sits in one write (#166)
+static bool card_stuck;  // the card: its writer sits in one write
 static void sem_given(int *s);  // after lr_store.c: LIVE's thread or the card writer runs, unless held up
 static void k_sem_give(int *s) { sem_given(s); }
 static int k_sem_take(int *s, int t) { return 0; }
@@ -174,7 +174,7 @@ static uint8_t phone[FILES][1 << 16];
 static uint32_t phone_len[FILES];
 static const struct bt_gatt_attr *data_attr, *ctrl_attr;  // READ's: DATA offset:u32 bytes..., CTRL replies
 static uint32_t data_next;                                // the offset the next DATA notification must have
-static int live_nomem;     // LIVE notifies refused for want of a TX buffer (-ENOMEM) before one goes (#170)
+static int live_nomem;     // LIVE notifies refused for want of a TX buffer (-ENOMEM) before one goes
 static int live_gone = -1; // LIVE notifies that go before the link is lost (-ENOTCONN from then on); -1: never
 static int bt_gatt_notify(struct bt_conn *c, const struct bt_gatt_attr *a, const void *data, uint16_t len)
 {
@@ -396,7 +396,7 @@ int main(void)
     flush();
     assert(seg == 2 && card_len[2] == phone_len[2] && memcmp(card[2], phone[2], card_len[2]) == 0);
 
-    // the link stalls (#133): LIVE's queue fills and the records after it are left out of LIVE, not out of the card;
+    // the link stalls: LIVE's queue fills and the records after it are left out of LIVE, not out of the card;
     // once one goes again, LIVE_LOST says how many; the phone READs the gap
     n_logged = 0;
     stalled = true;
@@ -419,7 +419,7 @@ int main(void)
     assert(a == a0 + 400 + 100);  // every frame on the card
     holes_ok = false;
 
-    // no TX buffer for a while (-ENOMEM, #170): LIVE waits for one, nothing is left out, nothing logged
+    // no TX buffer for a while (-ENOMEM): LIVE waits for one, nothing is left out, nothing logged
     n_logged = 0;
     uint32_t at = seg_size;
     live_nomem = 25;
@@ -456,7 +456,7 @@ int main(void)
     flush();
     assert(card_len[2] > phone_len[2]);
 
-    // the card stalls (#166): the stream does not wait for it. LIVE gets every record; the card the batches its queue
+    // the card stalls: the stream does not wait for it. LIVE gets every record; the card the batches its queue
     // kept, then nothing more of that segment (APPEND_ERR x 1, -EAGAIN); once the writer has caught up, the stream goes
     // on in a new segment, which the card has from its start
     subscribed = true;
@@ -497,7 +497,7 @@ int main(void)
     assert(n_logged == 2 && logged[1].code == LR_SD_WRITES && logged[1].x == 2);
     assert(logged[1].a == (1602 | 1001 << 20) && logged[1].b == (4 | 2 << 10 | 2 << 20));
     assert(wr.start == now_ms && wr.ms == 0);
-    // the driver's failed tries (#155 F3), when there were any: with the next SD_WRITES, then cleared
+    // the driver's failed tries, when there were any: with the next SD_WRITES, then cleared
     lr_sd_err[LR_SD_CRC] = 2, lr_sd_err[LR_SD_TIMEOUT] = 70000, lr_sd_err[LR_SD_BUSY] = 3, lr_sd_err[LR_SD_RETRIED] = 300;
     now_ms += 10 * 60 * 1000;
     assert(append1() == 0);
@@ -538,7 +538,7 @@ int main(void)
     assert(n_logged == 1 && logged[0].code == LR_APPEND_ERR && logged[0].x == 2 && (int32_t) logged[0].a == -EDEADLK);
     card_held = false;
 
-    // the boot count (#207): never one used before, whatever the card says
+    // the boot count: never one used before, whatever the card says
     uint16_t c;
     n_logged = 0, boot_len = 0, chip_boot = 7;  // a new card (no BOOT yet), the chip's 7th boot
     assert(card_init(mount_sd_card, &c) == 0 && c == 7 + BOOT_FLOOR && sys_get_le16(boot_file) == c);
@@ -595,7 +595,7 @@ int main(void)
         assert(store_err == 0 && seg == s0 + 3);
     }
 
-    // a card that reads but does not write (#198: BDAE 10-11, the injector's "busy after a write"): every try mounts it,
+    // a card that reads but does not write (BDAE 10-11, the injector's "busy after a write"): every try mounts it,
     // its next write fails again. That is no card back: the tries count on, 6 quick mounts, then resets from scratch
     // once a minute 3 times, then every 10 minutes. Mounted, it is looked at every 5 s; once a write goes, quick again
     {
@@ -642,7 +642,7 @@ int main(void)
     assert(n_logged == 2 && logged[0].code == LR_STORE && logged[1].code == LR_SEGMENT && logged[1].a == (uint32_t) boot << 16);
 
     // lent to a computer that then leaves it alone (ejected: macOS's eject never reaches the disk driver; forgotten; never
-    // mounted) for 3 minutes: back by itself (#238); read now and then, it stays lent. Looked at every 5 s while lent
+    // mounted) for 3 minutes: back by itself; read now and then, it stays lent. Looked at every 5 s while lent
     usb_charge = true, retries = 9, n_logged = 0, now_ms = 0xFFFF0000;  // near the 32-bit clock's wrap
     usb_disk_used = 0x80000000;  // the last lend's reads, long ago
     reattached = 0;
@@ -672,7 +672,7 @@ int main(void)
     usb_charge = true;  // on the computer again for what follows
 
     // wiped on the computer it was lent to (X1 10-17: erased as exFAT on the Mac), or a blank card put in after a failed
-    // write: it mounts with no /LR, its writes failed -ENOENT for good (#243). Mounted, it gets its /LR and the hidden
+    // write: it mounts with no /LR, its writes failed -ENOENT for good. Mounted, it gets its /LR and the hidden
     // files again and takes the next write
     memset(phone_len, 0, sizeof(phone_len)), memset(card_len, 0, sizeof(card_len));  // the card-less boot's: from segment 0
     for (int i = 0; i < 2; i++) {

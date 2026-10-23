@@ -107,7 +107,7 @@ class StoreTest {
         assertEquals(0L, m2.have(f))
     }
 
-    /** The hold goes once the backlog is all up (#130): the last READ's bytes cut into pieces first, and all of it up to
+    /** The hold goes once the backlog is all up: the last READ's bytes cut into pieces first, and all of it up to
      *  where LIVE began, not to the hold a minute before (10-08: let go 1-3 s early, the backlog's last minute queued). */
     @Test fun backlogUp() {
         val dir = tmp(); val out = tmp(); val undated = tmp()
@@ -125,7 +125,7 @@ class StoreTest {
         assertTrue(m.up(out, live))
     }
 
-    /** #207: a boot number counted before. 10-10's boot 1: file 3 uploaded, file 4 cut but for its last frames; boot 1
+    /** A boot number counted before. 10-10's boot 1: file 3 uploaded, file 4 cut but for its last frames; boot 1
      *  again on 10-13 (the card's count read as 0), at frame 1000. The mirror's boot 1, read back from its state.txt,
      *  is that earlier boot's: file 4's last frames go up by 10-10's 'T', both files and the 'T' go, and today's file 3
      *  (the same name) is taken from 0 and dated by today's 'T', not 10-10's. */
@@ -160,7 +160,7 @@ class StoreTest {
         val n = Mirror(tmp()); val g = 7L shl 16
         n.put(g, 0, t(5000, old + 50_000) + a(5000, 10))
         assertTrue("frames went back", n.reused(7, 3000, old + 55_000 + 30_000, out, undated, "X"))
-        // the same boot, the link gone before the READ reached its 'T' (firmware before #135: the 'T' at the end of a
+        // the same boot, the link gone before the READ reached its 'T' (older firmware: the 'T' at the end of a
         // file recorded for hours): the mirror has its frames and no 'T'. Reconnected, they stay, and are dated once it comes
         val u = Mirror(tmp()); val offline = a(0, 10) + a(10, 10)
         u.put(g, 0, offline)
@@ -171,7 +171,7 @@ class StoreTest {
         assertFalse("boot 0: no count to reuse", u.reused(0, 100, now, out, undated, "X"))
     }
 
-    /** What is said now sent ahead of a backlog still on the card (#130): where its first piece starts, before it is made. */
+    /** What is said now sent ahead of a backlog still on the card: where its first piece starts, before it is made. */
     @Test fun nextStart() {
         val dir = tmp(); val out = tmp(); val undated = tmp()
         val m = Mirror(dir)
@@ -190,7 +190,7 @@ class StoreTest {
         assertEquals(listOf("4999800@X.ogg", "5000000@X.ogg"), names(out))  // older than what went ahead
     }
 
-    /** #109: a piece appends one line to the state instead of writing all of it again (at 1 s pieces that grew with
+    /** A piece appends one line to the state instead of writing all of it again (at 1 s pieces that grew with
      *  every piece of the open file); a restart reads the lines back, finds the 'T' again and goes on where it was. */
     @Test fun stateAppended() {
         val dir = tmp(); val out = tmp(); val undated = tmp()
@@ -260,7 +260,7 @@ class NameTest {
     }
 }
 
-/** The USB disk switch after CTRL 0x06 (#208): what the board reports decides, an answer that came late is no failure.
+/** The USB disk switch after CTRL 0x06: what the board reports decides, an answer that came late is no failure.
  *  10-13 BDAE: the card lent after more than 15 s, the app said 录音设备没有回应, a second tap took the disk back. */
 class UsbDiskTest {
     private fun status(store: Int) = ByteArray(48).also { java.nio.ByteBuffer.wrap(it).order(java.nio.ByteOrder.LITTLE_ENDIAN).putShort(6, store.toShort()) }

@@ -1,5 +1,5 @@
 #!/bin/bash
-# #77's iPhone + recorder test, the hands taken over by XCUITest (../RunnerUITests): the taps in the app, iOS's
+# The iPhone + recorder test, the hands taken over by XCUITest (../RunnerUITests): the taps in the app, iOS's
 # permission and pairing dialogs, Settings › Bluetooth (listed? forget it, Bluetooth off and on), home, quit. It runs a
 # test app next to the real one (com.suyiiyii.liverecord.uitest, "live-record测试": its own settings, binding and queue;
 # the real app and its recorder are never opened or changed) against a throwaway server (server.py behind a cloudflared

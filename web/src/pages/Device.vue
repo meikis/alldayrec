@@ -30,7 +30,7 @@ import {
 } from "../lib/recorderLog";
 
 // One device's history: its battery (the mV its recorder logs every 10 min, the % its phone reads every minute), how
-// its audio sounded and arrived (a point a minute, the server's measure of each piece: levels only, #155), and what
+// its audio sounded and arrived (a point a minute, the server's measure of each piece: levels only), and what
 // happened, the recorder's own event log and the app's, newest first, with each firmware update in a line.
 const props = defineProps<{ name: string }>();
 const RANGES: [string, number][] = [
@@ -161,7 +161,7 @@ const sound = computed(() => {
     lag: lags.length ? [lags[lags.length >> 1], lags[lags.length - 1]] : null,
   };
 });
-// its phone and the link, from the status its phone sends every minute (#155 App 1.4.6 on): the newest one says what
+// its phone and the link, from the status its phone sends every minute (App 1.4.6 on): the newest one says what
 // the phone runs and how its uploads go, the chart one measure over time
 const PHONE: [string, string, (s: RecorderStatus) => number | null | undefined][] = [
   ["信号", "dBm", (s) => s.rssi],

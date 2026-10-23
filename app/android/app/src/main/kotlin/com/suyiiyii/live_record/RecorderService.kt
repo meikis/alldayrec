@@ -48,7 +48,7 @@ class RecorderService : Service() {
         }
 
         /** A firmware update ended (Dfu.kt): the BLE link back at once, set up as the last start left it, as the home
-         *  page's ticker would bring it (on iOS the ticker does not run in the background: 18 min without LIVE, #199).
+         *  page's ticker would bring it (on iOS the ticker does not run in the background: 18 min without LIVE).
          *  From the background the system may refuse a foreground service start: the ticker is left to it then. */
         fun relink(ctx: Context) {
             val p = ctx.getSharedPreferences("recorder", Context.MODE_PRIVATE)
@@ -80,7 +80,7 @@ class RecorderService : Service() {
             val total = s["syncTotal"] as Long? ?: 0L
             val title = when {
                 s["source"] != "ble" -> "live-record 正在录音"
-                // LIVE goes on while the backlog is read (#130); before that only the file being recorded is waited for
+                // LIVE goes on while the backlog is read; before that only the file being recorded is waited for
                 total > 0 -> if ((s["link"] as String?).orEmpty().startsWith("已连接"))
                     "实时上传 · 后台补传 %.1f / %.1f MB".format((s["syncDone"] as Long? ?: 0L) / 1024.0, total / 1024.0)
                 else "接上实时前先取正在录的这段 · 还差 %.1f MB".format((s["syncLive"] as Long? ?: 0L) / 1024.0)
@@ -272,7 +272,7 @@ class Uploader(private val prefs: android.content.SharedPreferences, private val
 
         /** The first pieces of the queue `q` of one device that follow each other without a gap (a stop or a kill
          *  leaves one), at most MAX_BATCH: one request, one stretch from its first piece's start. Following means
-         *  later: with what is said now first (#130), the backlog after it is older and goes on its own. */
+         *  later: with what is said now first, the backlog after it is older and goes on its own. */
         fun batch(q: List<File>): List<File> {
             val out = mutableListOf(q[0])
             for (f in q.drop(1)) {
@@ -283,7 +283,7 @@ class Uploader(private val prefs: android.content.SharedPreferences, private val
         }
     }
 
-    /** A recorder's pieces from its hold on go first (what is said now, ahead of a backlog read off its card, #130). */
+    /** A recorder's pieces from its hold on go first (what is said now, ahead of a backlog read off its card). */
     private fun files(): List<File> {
         val q = queue(dir)
         val ahead = { f: File -> hold(deviceOf(f))?.let { startMs(f) >= it } ?: false }
@@ -338,7 +338,7 @@ class Uploader(private val prefs: android.content.SharedPreferences, private val
     }
 
     /** What the phone last read from its BLE recorder, for the server's progress page, with the phone's own state and
-     *  this recorder's upload queue (#155); best effort, off this thread. */
+     *  this recorder's upload queue; best effort, off this thread. */
     fun report(device: String, hw: Map<String, Any?>) = Thread {
         try { post("$server/api/device-status?device=${enc(device)}", org.json.JSONObject(hw + DeviceLog.phone() + queued(device)).toString().toByteArray(), "application/json") } catch (_: Exception) {}
     }.start()

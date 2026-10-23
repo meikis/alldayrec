@@ -1,4 +1,4 @@
-"""A recorder's 10 ms hum (#204: the encoder's work in each 10 ms frame couples into the microphone) is taken out of its
+"""A recorder's 10 ms hum (the encoder's work in each 10 ms frame couples into the microphone) is taken out of its
 pieces as they are read; speech stays, a piece with too few quiet frames and an iPhone microphone piece (SILK) are
 read as decoded. Synthetic: white noise at a quiet room's floor, a fixed 160-sample waveform (the hum), 3 s of "speech"."""
 import datetime as dt

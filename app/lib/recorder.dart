@@ -56,7 +56,7 @@ class Recorder {
   }
 }
 
-/// An error as its type and first frames (function, file:line); no message: it may carry data (#155 A7).
+/// An error as its type and first frames (function, file:line); no message: it may carry data.
 (String, List<String>) errorSummary(Object e, StackTrace? s, {int n = 5}) => (
       '${e.runtimeType}',
       (s?.toString() ?? '').split('\n').map((l) => l.replaceFirst(RegExp(r'^#\d+\s+'), '').trim())

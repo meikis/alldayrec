@@ -9,7 +9,7 @@ import 'recorder.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  // errors nothing caught go into the device log too (#155 A7); Flutter reports them as before
+  // errors nothing caught go into the device log too; Flutter reports them as before
   FlutterError.onError = (d) {
     FlutterError.presentError(d);
     Recorder.error(d.exception, d.stack);

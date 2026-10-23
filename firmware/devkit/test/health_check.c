@@ -1,4 +1,4 @@
-// Host check of src/mic_health.h (#155 F1): cc -o health_check test/health_check.c && ./health_check
+// Host check of src/mic_health.h: cc -o health_check test/health_check.c && ./health_check
 #include <assert.h>
 #include <stdio.h>
 #include "../src/mic_health.h"

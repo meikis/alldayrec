@@ -1,4 +1,4 @@
-"""Silence squeezed out of the audio the ASR engine gets (#87): the engine bills by audio seconds, and a final piece goes
+"""Silence squeezed out of the audio the ASR engine gets: the engine bills by audio seconds, and a final piece goes
 whole when it has any speech. Each VAD silence longer than `keep` is cut down to `keep` (keep/2 after the speech before
 it, keep/2 before the speech after it; at the window's edges keep/2 next to the speech). unsqueeze maps the engine's
 times back to the window, so nothing after the engine sees the cut. lift then brings quiet audio up to a level the

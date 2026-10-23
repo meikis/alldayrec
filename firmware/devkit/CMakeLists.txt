@@ -174,4 +174,4 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DHAVE_ALLOCA_H")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsingle-precision-constant") # A lot of constants are written as doubles
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DHAVE_LRINT -DHAVE_LRINTF")
 
-zephyr_ld_options(-Wl,--wrap=sdmmc_ioctl)  # NCS 2.7's SD sync answers -ENOTSUP (sdcard.c, #137)
+zephyr_ld_options(-Wl,--wrap=sdmmc_ioctl)  # NCS 2.7's SD sync answers -ENOTSUP (sdcard.c)

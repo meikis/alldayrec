@@ -152,7 +152,7 @@ def test_backlog_does_not_hold_drafts(tmp_path, monkeypatch):
 
 def test_hold_keeps_backlog_final(tmp_path, monkeypatch):
     """The phone sends what is said now first and the backlog it reads off the card after it, each upload with hold =
-    where now began (#130): drafts follow now at once, finalization takes the whole backlog in order (none arrives
+    where now began: drafts follow now at once, finalization takes the whole backlog in order (none arrives
     behind it) and waits at the hold; once the phone lets go, now is finalized after it."""
     sent, fed = rig(tmp_path, monkeypatch, hear)
     n = 20  # 20 min of backlog
@@ -214,7 +214,7 @@ def test_hold_keeps_backlog_final(tmp_path, monkeypatch):
 
 def test_hold_expires(tmp_path, monkeypatch):
     """A phone that never comes back: a hold not said again for HOLD_MAX_S is let go and the queue goes on; older audio
-    arriving after that is kept, not finalized (as before #130)."""
+    arriving after that is kept, not finalized (as before there were holds)."""
     monkeypatch.setattr(audio, "HOLD_MAX_S", 2)
     db.open_db(tmp_path / "live.db")
     t = lambda m: dt.datetime(2026, 10, 6, 10, m)

@@ -1,7 +1,7 @@
 """Fixed questions to ask.py against a live.db opened read only, the right conversations for each found from the
 data itself (the people, days and tags in the questions are picked by query, so it runs on any instance). One JSON
-line per question, then the totals. Acceptance (#70): cites right >= 8 of Q1-Q10, no made-up citation, median < 20 s;
-Q11 (a count, miscounted from the digest after #84 went live) must give the number from the db and cite.
+line per question, then the totals. Acceptance: cites right >= 8 of Q1-Q10, no made-up citation, median < 20 s;
+Q11 (a count, miscounted from the digest when 问 AI first went live) must give the number from the db and cite.
 The lines carry the question and the answer: keep them local, report only the numbers.
 
     uv run python ask_eval.py <live.db> [Q1 Q3 ...]

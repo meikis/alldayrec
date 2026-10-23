@@ -109,7 +109,7 @@ def celt10(packet: bytes) -> bool:
 
 
 def dehum(x: np.ndarray) -> np.ndarray:
-    """A recorder piece without its board's hum. Since the 10 ms microphone buffers (#204) the encoder's burst of work
+    """A recorder piece without its board's hum. Since the 10 ms microphone buffers the encoder's burst of work
     in each 10 ms frame couples into the microphone (on battery: 100 Hz at about -80 dBFS, the level of a quiet room's
     floor, and its harmonics): a waveform that repeats every 160 samples. The mean of the piece's quiet frames is that
     waveform (the room's noise averages out) and is taken from every frame, speech too (the hum is under it as well);
@@ -167,7 +167,7 @@ ZERO_RUN = SR // 100  # exact zeros this long (10 ms) in a row: the mic sent not
 def health(x: np.ndarray) -> tuple[float, float, int, int]:
     """How a piece sounds, measured as lr_listen.py does each second (no content: levels only): RMS and mains hum (the
     50..250 Hz harmonics, each second's, averaged) in dBFS, ms in runs of exact zeros of 10 ms or more (no data from
-    the mic: a loose wire, #155), and full-scale samples (clipping)."""
+    the mic: a loose wire), and full-scale samples (clipping)."""
     f = x.astype(np.float64)
     hum = sum((2 * np.abs(f[i:i + SR] @ HUM[:len(f[i:i + SR])]) ** 2).sum() / len(f[i:i + SR]) for i in range(0, len(f), SR))
     edges = np.flatnonzero(np.diff(np.r_[0, x == 0, 0]))  # where each run of zeros starts and ends
@@ -212,7 +212,7 @@ def save(device: str, start_ms: int, body: bytes, content_type: str, n: int | No
         return r[0]
     ext = {"audio/ogg": "ogg", "audio/webm": "webm", "audio/aac": "aac"}.get(content_type.split(";")[0], "bin")
     x = decode(body, aac=ext == "aac", n=n, prev=before(device, start_ms) if ext == "ogg" else None)
-    if x is None:  # the client drops it on the 400 that follows: its bytes stay here, for a look later (#155)
+    if x is None:  # the client drops it on the 400 that follows: its bytes stay here, for a look later
         f = T().recordings / "rejected" / re.sub(r"[^\w.-]", "_", device) / f"{start_ms}.{ext}"
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_bytes(body)
@@ -250,7 +250,7 @@ def samples(p) -> np.ndarray | None:
 def fresh(p, end: float) -> tuple[float, np.ndarray] | None:
     """A pieces row's audio after `end` (unix ms: where its device's audio a reader has taken so far ends) and where
     that starts (unix ms); None when the piece adds nothing (all of it before `end`: not decoded; not audio). Pieces
-    of a device may overlap (#217: 10-12 859 of 3184 of LR-P3-BDAE's, by 22 s median, up to 60 s): a reader taking
+    of a device may overlap (10-12: 859 of 3184 of LR-P3-BDAE's, by 22 s median, up to 60 s): a reader taking
     them in start order whole went back in time at the second copy and heard what was said there twice."""
     if p["start_ms"] + p["seconds"] * 1000 <= end:
         return None
@@ -328,7 +328,7 @@ def pending(after: dict[str, dt.datetime | None]) -> list[str]:
 
 def hold(device: str, at_ms: int | None):
     """A phone still has audio of `device` older than at_ms to send (a backlog it reads off the recorder's card while it
-    sends what is said now, #130): the device's queue (stream without edge_s) hands out nothing from at_ms on until
+    sends what is said now): the device's queue (stream without edge_s) hands out nothing from at_ms on until
     that audio is in, so none of it arrives behind the reader. None: nothing older is coming. Every upload says it
     again; kept across a restart."""
     db.put_kv(f"hold:{device}", None if at_ms is None else {"at": at_ms, "seen": time.time()})
@@ -356,7 +356,7 @@ async def stream(device: str, after: dt.datetime | None, edge_s: float | None = 
     ms = int(after.timestamp() * 1000) if after else 0
     p = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms + seconds * 1000 > ? ORDER BY start_ms LIMIT 1", (device, ms)).fetchone()
     # from `after` (or the piece holding it), not from the first piece there is now: that one may be held, older
-    # audio after `after` still on its way (#130: a pipeline started mid catch-up took 3 such pieces as late)
+    # audio after `after` still on its way (a pipeline started mid catch-up took 3 such pieces as late)
     at, lo, end = min(p["start_ms"] - 1, ms) if p else ms, 0, 0.0
     while True:
         if edge_s is None:

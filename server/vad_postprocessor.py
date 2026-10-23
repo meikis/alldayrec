@@ -1,7 +1,7 @@
 # Copyright 2026 Xiaohongshu. (Author: Kaituo Xu, Wenpeng Li, Kai Huang, Kun Liu)
 # Apache License 2.0. Unchanged copy of fireredvad/core/stream_vad_postprocessor.py from FireRedVAD 0.0.2
 # (https://github.com/FireRedTeam/FireRedVAD): the package imports torch in its __init__, so this pure-Python part is
-# vendored for infer.py (#219).
+# vendored for infer.py.
 
 import enum
 from collections import deque

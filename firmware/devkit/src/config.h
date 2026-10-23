@@ -3,7 +3,7 @@
 // #define SAMPLE_RATE 16000
 // PDM GAINL/GAINR (mic.c): 0x28 = 0 dB, 0.5 dB a step, 0x00 = -20 dB .. 0x50 = +20 dB (nrf52840_bitfields.h).
 // Not 0x40 (+12 dB, full scale near 105 dB SPL): in 10-03 device audio 36-37% of seconds peaked above -1 dBFS, and
-// clipping costs ASR (a sample clipped at 32%: CER 19.6% -> 30.4%). Not lower either: at -12 dB quiet voices lose words (#72)
+// clipping costs ASR (a sample clipped at 32%: CER 19.6% -> 30.4%). Not lower either: at -12 dB quiet voices lose words
 #define MIC_GAIN 0x28
 #define MIC_HPF_HZ 80              // 4th-order Butterworth high-pass before the codec: the PDM path carries 2-20 Hz at up to -8 dBFS
 #define MIC_IRC_PRIORITY 7

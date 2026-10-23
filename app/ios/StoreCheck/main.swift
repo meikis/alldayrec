@@ -89,7 +89,7 @@ do {
   check(m2.have(f), 0, "dropped")
 }
 
-// the hold goes once the backlog is all up (#130): the last READ's bytes cut into pieces first, and all of it up to where
+// the hold goes once the backlog is all up: the last READ's bytes cut into pieces first, and all of it up to where
 // LIVE began, not to the hold a minute before (10-08: let go 1-3 s early, the backlog's last minute queued);
 // StoreTest.backlogUp's case
 do {
@@ -108,7 +108,7 @@ do {
   check(m.up(out, before: live), true, "all up")
 }
 
-// what is said now sent ahead of a backlog still on the card (#130): where its first piece starts, before it is made
+// what is said now sent ahead of a backlog still on the card: where its first piece starts, before it is made
 do {
   let dir = tmp(), out = tmp(), undated = tmp()
   let m = Mirror(dir)
@@ -152,7 +152,7 @@ do {
   check(m.files[old]!.closed, true, "short LIST: old closed")
 }
 
-// #207: a boot number counted before. 10-10's boot 1 (StoreTest.bootReused's case): file 3 uploaded, file 4 cut but
+// a boot number counted before. 10-10's boot 1 (StoreTest.bootReused's case): file 3 uploaded, file 4 cut but
 // for its last frames; boot 1 again on 10-13 (the card's count read as 0), at frame 1000. The mirror's boot 1, read
 // back from its state.txt, is that earlier boot's: file 4's last frames go up by 10-10's 'T', both files and the 'T'
 // go, and today's file 3 (the same name) is taken from 0 and dated by today's 'T', not 10-10's
@@ -187,7 +187,7 @@ do {
   let n = Mirror(tmp()), g: Int64 = 7 << 16
   _ = try n.put(g, 0, t(5000, old + 50_000) + a(5000, 10))
   check(try n.reused(boot: 7, frame: 3000, at: old + 55_000 + 30_000, out: out, undated: undated, tag: "X"), true, "frames went back")
-  // the same boot, the link gone before the READ reached its 'T' (firmware before #135: the 'T' at the end of a file
+  // the same boot, the link gone before the READ reached its 'T' (older firmware: the 'T' at the end of a file
   // recorded for hours): the mirror has its frames and no 'T'. Reconnected, they stay, and are dated once it comes
   let u = Mirror(tmp()), offline = a(0, 10) + a(10, 10)
   _ = try u.put(g, 0, offline)
@@ -238,7 +238,7 @@ do {
   }
 }
 
-// #109: a piece appends one line to the state instead of writing all of it again (at 1 s pieces that grew with every
+// a piece appends one line to the state instead of writing all of it again (at 1 s pieces that grew with every
 // piece of the open file); a restart reads the lines back, finds the 'T' again and goes on where the last piece ended
 do {
   let dir = tmp(), out = tmp(), undated = tmp()
@@ -323,7 +323,7 @@ do {
   check(DeviceLog.why(own, server: ""), "x（\"\" NSURLErrorDomain -1000）", "no address")
 }
 
-// #155: the queue kept while sends fail loses its oldest files first, never the newest (DeviceLogTest.trim's case); a
+// the queue kept while sends fail loses its oldest files first, never the newest (DeviceLogTest.trim's case); a
 // MetricKit crash as the crashed thread's first frames, binary+offset
 do {
   let d = tmp()
@@ -458,7 +458,7 @@ do {
 #endif
 
 #if canImport(ObjectiveC)
-// #109: the BLE session's loop (Ble.swift) on a thread that lives for hours: LIVE bytes into the mirror, then pieces().
+// the BLE session's loop (Ble.swift) on a thread that lives for hours: LIVE bytes into the mirror, then pieces().
 // Foundation autoreleases what Mirror reads (FileHandle.readToEnd), so without a pool per pass the thread keeps all of
 // it: 3.4 GB on the iPhone 10-06. Only on a Mac: Linux has no autorelease pools (CI runs the rest there).
 do {
@@ -513,7 +513,7 @@ do {
   check(no(id: nil), "none", "no recorder bound")
   check(no(id: "LR-P3-116C"), "none", "a name where the identifier goes")
   check(no(linked: true), "busy", "the link still up")
-  check(no(running: "20261011.164128-098861b"), "same", "#199: the version the recorder runs already")
+  check(no(running: "20261011.164128-098861b"), "same", "the version the recorder runs already")
   check(no(running: nil), nil, "a revision never read: go")
   Dfu.busy = true
   check(no(), "busy", "an update under way")

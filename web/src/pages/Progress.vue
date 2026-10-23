@@ -32,7 +32,7 @@ useSocket(
   async () => (status.value = await get<Status>("/api/status")),
 );
 
-// what transcription and the AI calls did today, and the money left for them (#155); every minute
+// what transcription and the AI calls did today, and the money left for them; every minute
 const calls = ref<Calls | null>(null);
 const today = () => {
   const d = new Date();
@@ -99,7 +99,7 @@ watch(
   },
 );
 // an app older than the newest build any phone runs or /app.apk has (both platforms share the build number): the
-// iPhone that stayed on 1.3.0 for days (#155)
+// iPhone that stayed on 1.3.0 for days
 const apk = ref(0);
 onMounted(async () => {
   apk.value = await get<{ versionCode: number }>("/api/app/latest").then(
@@ -129,7 +129,7 @@ const card = (h: RecorderStatus) =>
             ? `剩 ${((h.free_kb ?? 0) / 1048576).toFixed(1)} / ${(h.total_kb / 1048576).toFixed(1)} GB`
             : "—";
 const caughtUp = (d: DeviceStatus) => d.left_s < 30;
-// Held (#130): the phone reads older audio off the recorder's card in the background while it sends what is said now;
+// Held: the phone reads older audio off the recorder's card in the background while it sends what is said now;
 // finals wait at the hold for it, so the server's own estimate does not apply
 const held = (d: DeviceStatus) => {
   const kb = d.hw?.backlog_kb,
@@ -137,7 +137,7 @@ const held = (d: DeviceStatus) => {
   if (holdLeft(d)) return `定稿停在 ${at(d.hold!)}，等卡里更早的录音；${holdLeft(d)}`;
   return `定稿停在 ${at(d.hold!)}，等手机在后台补传卡里更早的录音${kb ? `（还有 ${(kb / 1024).toFixed(1)} MB${eta ? `，约 ${span(eta)}` : ""}）` : ""}，补完再接着定稿；初稿照常`;
 };
-// how late its newest audio came (a backlog blocking what is said now, #130), how its last 10 min sounded (#155)
+// how late its newest audio came (a backlog blocking what is said now), how its last 10 min sounded
 const arrived = (d: DeviceStatus) =>
   d.arrival
     ? `${d.arrival.lag_s < 120 ? `${Math.round(d.arrival.lag_s)} 秒` : span(d.arrival.lag_s)}（最新一块 ${new Date(d.arrival.at).toTimeString().slice(0, 5)} 收到）`

@@ -3,8 +3,8 @@
 #   ./lr.sh build [sdmod|expansion]   sdmod: SPI SD module on the right header row (overlay/lr_sdmod.overlay); expansion: Seeed
 #                                     Expansion Board Base for XIAO, SD CS on D2 (tests only)
 #   ./lr.sh build promicro            ProMicro nRF52840 (nice!nano clone) + external PDM mic and SD module
-#   ./lr.sh build promicro-p2         the same board as LR-P2: the spare ProMicro kept for tests (bootloader 0.10.0, #110)
-#   ./lr.sh build promicro-p3         the same board as LR-P3: the ProMicro wired into the boxed recorder (#122)
+#   ./lr.sh build promicro-p2         the same board as LR-P2: the spare ProMicro kept for tests (bootloader 0.10.0)
+#   ./lr.sh build promicro-p3         the same board as LR-P3: the ProMicro wired into the boxed recorder
 #   ./lr.sh flash [sdmod|expansion|promicro|promicro-p2|promicro-p3]   a running firmware is sent to the UF2 bootloader by a 1200 bps touch
 #   ./lr.sh pkg [sdmod|promicro|promicro-p2|promicro-p3]    the build as a DFU package (build/lr-V/lr-V.zip) for lr_dfu.py; lr_release.py
 #                                     builds, packs and uploads it to the server, where the app finds it
@@ -23,8 +23,8 @@ case $V in
             EXTRA+=(-DCONFIG_LR_BATTERY_VDDH=y "-DCONFIG_LR_NAME_PREFIX=\"$M\"" "-DCONFIG_BT_DEVICE_NAME=\"$M\""
                     "-DCONFIG_BT_DIS_MODEL=\"$M\"" '-DCONFIG_BT_DIS_HW_REV_STR="ProMicro nRF52840"'
                     -DCONFIG_LR_ONE_LED=y  # only P0.15's LED is fitted: short flash codes
-                    -DCONFIG_CLOCK_CONTROL_NRF_K32SRC_100PPM=y)  # its 32.768 kHz crystals run +47..+81 ppm (#110)
-            # only LR-P3 has the switch on P1.15 (#122), and keeps a power trail while its battery cuts out (#137)
+                    -DCONFIG_CLOCK_CONTROL_NRF_K32SRC_100PPM=y)  # its 32.768 kHz crystals run +47..+81 ppm
+            # only LR-P3 has the switch on P1.15, and keeps a power trail while its battery cuts out
             [ "$V" != promicro-p3 ] || EXTRA+=(-DCONFIG_LR_SWITCH=y -DCONFIG_LR_POWER_TRACE=y) ;;
   *) echo "unknown variant $V" >&2; exit 2 ;;
 esac

@@ -84,7 +84,7 @@ ENGINE = os.environ.get("ENGINE") or "qwen"  # final layer's ASR provider (PROVI
 DRAFT_ENGINE = os.environ.get("DRAFT_ENGINE") or ENGINE  # draft layer's (stepfun-sse: fast, no speakers, drafts are replaced anyway;
                                                          # qwen-stream: one streaming session while a page watches, stream_loop)
 ENGINE_FALLBACK = os.environ.get("ENGINE_FALLBACK", "")  # a window the provider fails on (402, 451, 5xx, timeout) goes here; empty: none
-SQUEEZE_KEEP_S = float(os.environ.get("SQUEEZE_KEEP_S", "3"))  # VAD silences longer than this go to the engine cut to this (#87); 0: whole
+SQUEEZE_KEEP_S = float(os.environ.get("SQUEEZE_KEEP_S", "3"))  # VAD silences longer than this go to the engine cut to this; 0: whole
 SQUEEZE_VAD = float(os.environ.get("SQUEEZE_VAD", "0.3"))  # ... silences by this VAD threshold: 0.5 (cutting pieces) misses short replies
 BUFFER_S = 900                             # audio kept for refinement; pieces are fed only while finalization is within BUFFER_S - 300
 LIVE_EVERY_S = int(os.environ.get("LIVE_EVERY_S", "120"))  # new speech in the open conversation before the live analysis is redone
@@ -254,12 +254,12 @@ async def volc(x: np.ndarray, partial=None) -> list[dict]:
 
 
 async def stepfun_sse(x: np.ndarray, partial=None) -> list[dict]:
-    """StepFun's SSE alone (#96 H3): text and character times, sentences cut by punctuation and pauses, no speakers."""
+    """StepFun's SSE alone: text and character times, sentences cut by punctuation and pauses, no speakers."""
     return stepfun_asr.sentences(await stepfun_asr.sse(x, partial and (lambda ds: partial(stepfun_asr.sentences(ds)))))
 
 
 async def stepfun(x: np.ndarray, partial=None) -> list[dict]:
-    """StepFun's SSE text on the sentences and speakers of a file job on the same audio (#96 H1), both at once: either
+    """StepFun's SSE text on the sentences and speakers of a file job on the same audio, both at once: either
     failing cancels the other (an SSE failure goes to the fallback at once), raised in an ExceptionGroup."""
     file = []
 
@@ -631,7 +631,7 @@ async def write_recap(day: str) -> dict | None:
 
 
 async def balance_loop():
-    """The StepFun balance every hour (#155): what transcription costs a day, and when the money runs out. One account
+    """The StepFun balance every hour: what transcription costs a day, and when the money runs out. One account
     for every tenant: kept in the first one's store, the others' pages show none."""
     while True:
         try:
@@ -652,7 +652,7 @@ def prom_line(name: str, labels: dict, v) -> str:
 
 
 def metrics() -> str:
-    """The current tenant's numbers in Prometheus text (#155), its id the instance label: status(), db.calls and
+    """The current tenant's numbers in Prometheus text, its id the instance label: status(), db.calls and
     db.balance. Devices by their LR-… name, a phone (named by its owner) by a hash of it; never what was said, nor a name
     of anyone."""
     s, now, out = status(), dt.datetime.now(), []
@@ -760,7 +760,7 @@ async def pipeline(device: str):
     to the engine once, become the device's sentences, conversations and summaries. The draft layer runs only while
     a page watches and the device is recording now, on its own stream of the device's newest audio (edge_feed): each
     pause its VAD sees sends the stretch before it at once; its rows go to the drafts table and the page until the
-    final layer covers their time (issue #9)."""
+    final layer covers their time."""
     seg, dseg = Segmenter(), Segmenter()  # the final layer's audio, the draft layer's
     resume = db.kv(f"finalized_to:{device}")
     done0 = dt.datetime.fromisoformat(resume) if resume else None
@@ -2126,7 +2126,7 @@ async def voices_loop():
             log.exception("self voice round")
 
 
-# 「哪个是你？」(selfvoice.py, #206): on an instance without 我's voiceprint a card lets the user pick their own voice;
+# 「哪个是你？」(selfvoice.py): on an instance without 我's voiceprint a card lets the user pick their own voice;
 # the pick is written as that voiceprint and the pipelines take it from their next conversation on
 CLIP_CONVS = 6  # a candidate's clips come from its biggest conversations: a sentence decoded costs ~5 CPU-s of ReDimNet2
 
@@ -2300,7 +2300,7 @@ def main():
     missing += [k for k in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL") if not os.environ.get(k)]
     if missing:
         raise SystemExit(f"not set: {', '.join(missing)} (see .env.example)")
-    infer.check()  # every model file there and the pinned one, before anything starts (#219)
+    infer.check()  # every model file there and the pinned one, before anything starts
     h = logging.StreamHandler()
     h.addFilter(TenantTag())
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(tenant)s%(message)s", handlers=[h])

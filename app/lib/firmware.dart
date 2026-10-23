@@ -189,7 +189,7 @@ class _FirmwarePageState extends State<FirmwarePage> {
     final canUpdate = m != null && newer(m);
     // LR-P1's bootloader (nice!nano 0.6.0) erases the firmware when the transfer starts, and a reset midway leaves it
     // in USB-only update mode: a failed Bluetooth update always ends on USB (10-05), so it is updated over USB only
-    // (LR-P2, the same board kept for tests with bootloader 0.10.0, keeps the button: its updates are the test, #110)
+    // (LR-P2, the same board kept for tests with bootloader 0.10.0, keeps the button: its updates are the test)
     final usbOnly = widget.model == 'LR-P1';
     final (String chip, Color chipColor, IconData chipIcon) = versions == null && versionsError == null
         ? ('检查中', cs.outline, Icons.hourglass_empty_rounded)

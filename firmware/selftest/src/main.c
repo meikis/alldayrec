@@ -105,7 +105,7 @@ static const uint8_t pins[] = {
 };
 #define LED_PIN P(0, 15)
 
-/* LR-P3 (#122): the recorder's parts wired to the Pro Micro, pins as firmware/devkit's lr_promicro.overlay. Only the
+/* LR-P3: the recorder's parts wired to the Pro Micro, pins as firmware/devkit's lr_promicro.overlay. Only the
  * sd, mic and sw commands use them; "gpio p3" leaves them out, since the parts drive some of them */
 #define SD_PWR P(0, 13)  /* the VCC pin's switch (high: on), the SD module's supply */
 #define SD_CS P(0, 20)

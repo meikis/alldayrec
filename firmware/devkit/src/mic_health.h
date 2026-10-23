@@ -1,5 +1,5 @@
 #pragma once
-// The mic over the last 10 minutes, for the event log's HEALTH (lr_log.h, #155 F1): the codec thread counts each
+// The mic over the last 10 minutes, for the event log's HEALTH (lr_log.h): the codec thread counts each
 // 10 ms frame, lr_log.c packs the counts and clears them every 10 minutes.
 // ponytail: plain counters, written by the codec thread and cleared by the system workqueue: an increment may be lost
 // at the clearing; fine for counts of 10 minutes

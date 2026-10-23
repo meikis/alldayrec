@@ -1,5 +1,5 @@
 // The update with Nordic's DFU library (NordicDFU, a Swift package), as Dfu.kt does it on Android: the recorder reboots
-// into its Adafruit bootloader (legacy DFU) and the package goes in 20-byte packets, a receipt every 8 (lr_dfu.py, #33).
+// into its Adafruit bootloader (legacy DFU) and the package goes in 20-byte packets, a receipt every 8 (lr_dfu.py).
 // Where iOS differs:
 //  - the app sends the recorder into the bootloader itself, with the control point's 0x06 as lr_dfu.py does. The
 //    library's way (Start DFU, 0x01 0x04) gets a one-byte notification back from our firmware (transport.c), which the
@@ -136,7 +136,7 @@ private final class DfuRun: NSObject, CBCentralManagerDelegate, CBPeripheralDele
     case .uploading: Dfu.log?.reached("send")
     case .completed:  // no .aborted: nothing here aborts (Android's notification can)
       Dfu.log?.done()
-      if let to = Dfu.log?.to { Recorder.defaults.set(to, forKey: "bleFw") }  // what the page shows until the link reads it (#199)
+      if let to = Dfu.log?.to { Recorder.defaults.set(to, forKey: "bleFw") }  // what the page shows until the link reads it
       Dfu.end("升级完成，录音设备已重启")
     default: break
     }

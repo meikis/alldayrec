@@ -1,4 +1,4 @@
-"""Tenants (#200 B1): each person's own store, recordings and in-memory state, side by side in one process.
+"""Tenants: each person's own store, recordings and in-memory state, side by side in one process.
 
 The tenant of whatever runs now is in a context variable with no default: a request takes its token's (server.py's
 middleware), a background task its own (run_tenant), a thread the caller's (anyio.to_thread copies the context). Code

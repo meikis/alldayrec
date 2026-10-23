@@ -1,4 +1,4 @@
-"""A device's pieces that overlap (#217: what its phone sent live and its card read again over it, both kept) are one
+"""A device's pieces that overlap (what its phone sent live and its card read again over it, both kept) are one
 stream: a backlog of both finalized at once has every utterance once, in time order, at its own time; playback and
 listening play every moment once. Real store, stream and pipeline; test_backlog's energy VAD and fake engines."""
 import datetime as dt

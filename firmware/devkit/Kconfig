@@ -56,7 +56,7 @@ config LR_STORE_BATCH
     default 4096
 
 config LR_SDHC_SPI
-    bool "SD card over SPI by src/sdhc_spi.c: NCS 2.7's driver without its 10 and 30 ms sleeps per command (#105)"
+    bool "SD card over SPI by src/sdhc_spi.c: NCS 2.7's driver without its 10 and 30 ms sleeps per command"
     default y
     depends on DT_HAS_ZEPHYR_SDHC_SPI_SLOT_ENABLED && !SPI_SDHC
     select SPI

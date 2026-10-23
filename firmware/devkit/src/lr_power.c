@@ -1,7 +1,7 @@
-/* Power (#95 #122 #137). On battery the battery is read once a minute; three readings in a row under
+/* Power. On battery the battery is read once a minute; three readings in a row under
  * CONFIG_LR_LOW_BATTERY_MV end recording while the cell still holds the board up: a POWER event, the open file closed,
  * the phone told, and a restart into System OFF until USB (VBUS) comes, or LR-P3's switch moves. Without it the X1 ran
- * to ~3.0 V and browned out over and over, a card mount each time; at 3.3 V there were still 25-29 minutes left (#95).
+ * to ~3.0 V and browned out over and over, a card mount each time; at 3.3 V there were still 25-29 minutes left.
  *
  * LR-P3 (CONFIG_LR_POWER_TRACE) also keeps a power trail: a POWER record with VDDH every minute, and the chip's
  * power-fail warning (VDDH under 3.3 V or VDD under 2.8 V) as it comes, each written to flash at once (lr_log.c
@@ -63,7 +63,7 @@ void lr_power_off(void)
     // (a hardware fix: the resistor); left open, the pull-up turns VCC on
     nrf_gpio_pin_clear(LR_PIN(sd_pwr_gpios));
     nrf_gpio_cfg_output(LR_PIN(sd_pwr_gpios));
-    sd_lines_release();  // or they feed the card on through the night (#197)
+    sd_lines_release();  // or they feed the card on through the night
 #endif
     nrf_gpio_pin_clear(PDM_PWR_PIN);
     nrf_gpio_cfg_output(PDM_PWR_PIN);

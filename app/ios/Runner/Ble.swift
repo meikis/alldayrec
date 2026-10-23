@@ -37,7 +37,7 @@ enum Ble {
     return Int(d[d.startIndex + 2])
   }
 
-  /// The two bytes after it (firmware #155 F4): the battery, mV / 20, and the card, the store's errno; -1: an older
+  /// The two bytes after it: the battery, mV / 20, and the card, the store's errno; -1: an older
   /// firmware, or no scan response in this advertisement.
   static func extra(_ adv: [String: Any], _ i: Int) -> Int {
     guard let d = adv[CBAdvertisementDataManufacturerDataKey] as? Data, d.count > 2 + i, d.prefix(2) == Data([0xFF, 0xFF]) else { return -1 }
@@ -57,7 +57,7 @@ enum Ble {
   static func store(_ status: [UInt8]) -> Int { Int(Int16(truncatingIfNeeded: Store.le(status, 6, 2))) }
 
   /// What the USB disk switch says after CTRL 0x06 asked for `on`: `err` its answer (nil: none in 15 s), `store` the
-  /// card's state the board reports since. A slow card answers late (#208: lend() flushes, closes and unmounts before it
+  /// card's state the board reports since. A slow card answers late (lend() flushes, closes and unmounts before it
   /// answers; 10-13 BDAE went past 15 s and the app said it failed, a second tap took the disk back): no answer is not a
   /// failure, the board's state is what the switch shows and the note says.
   static func usbNote(on: Bool, err: Int?, store: Int) -> String? {
@@ -155,7 +155,7 @@ final class Nearby: NSObject, CBCentralManagerDelegate {
 /// every 10 minutes, turn the mirror into dated Ogg pieces in `chunks` (the upload queue) and delete from the card what
 /// is mirrored and uploaded. Battery and card are read every minute. A dropped link is connected again with a request
 /// iOS keeps until the recorder is back in range.
-/// Binding is the app's soft limit (issue #56): a recorder that forgot this phone (another phone took it) is not
+/// Binding is the app's soft limit: a recorder that forgot this phone (another phone took it) is not
 /// paired again behind the person's back; the link stops and says so (prefs bleKicked) until they add it again.
 final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   static let kicked = "已被其他手机绑定：在「录音设备」页重新添加"
@@ -171,7 +171,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   @Shared var syncNote: String?        // the last catch-up, for the app's recorder page
   @Shared var syncDoneKb: Int64 = 0    // the catch-up under way: taken of total (0 of 0: none)
   @Shared var syncTotalKb: Int64 = 0
-  @Shared var syncLiveKb: Int64 = 0    // of it, what LIVE still waits for: the file being recorded (#130, #135)
+  @Shared var syncLiveKb: Int64 = 0    // of it, what LIVE still waits for: the file being recorded
   @Shared private(set) var listening: Listen?  // the recorder's sound played on this phone too (Listen.swift)
 
   private let prefs = Recorder.defaults
@@ -187,8 +187,8 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   @Shared private var pairingFailed = false
   @Shared private var lastSeen: String?   // HH:mm the link last went down
   @Shared private var staleNote: String?  // iOS still has keys the recorder forgot: what the person has to do
-  @Shared private var bluetoothOff = false  // as last logged (#155 A2)
-  @Shared private var waiting = false  // a reconnect request said in the device log, until the link is up again (#239)
+  @Shared private var bluetoothOff = false  // as last logged
+  @Shared private var waiting = false  // a reconnect request said in the device log, until the link is up again
 
   init(chunks: URL, undated: URL, mirrors: URL, sliceS: @escaping () -> Int, report: @escaping (String, [String: Any]) -> Void) {
     self.chunks = chunks; self.undated = undated; self.mirrors = mirrors; self.sliceS = sliceS; self.report = report
@@ -205,7 +205,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
   private func begin(_ p: CBPeripheral) {
     // its session runs already: iOS connected while the app was not running, the restored link started one at
-    // poweredOn and iOS still says didConnect (10-09, 10-15: services read twice, #239)
+    // poweredOn and iOS still says didConnect (10-09, 10-15: services read twice)
     if conn?.p === p { return }
     let c = Conn(p)
     conn = c
@@ -259,7 +259,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   }
 
   /// The app relaunched in the background for the recorder: what iOS kept for it. The launch's options never said so
-  /// (no .bluetoothCentrals in 13 background launches, #239).
+  /// (no .bluetoothCentrals in 13 background launches).
   func centralManager(_ c: CBCentralManager, willRestoreState dict: [String: Any]) {
     let p = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral])?.first
     Ble.log("restored \(p.map { "\($0.identifier) state \($0.state.rawValue)" } ?? "nothing")")
@@ -504,7 +504,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       }
       let m = Mirror(mirrors.appendingPathComponent(Ble.tag(name)))
       if try m.reused(boot: Int64(st.boot), frame: st.frame, at: st.at, out: chunks, undated: undated, tag: Ble.tag(name)) {
-        Ble.log("boot \(st.boot) was counted before: the mirror's files and 'T' records of it dropped (#207)")
+        Ble.log("boot \(st.boot) was counted before: the mirror's files and 'T' records of it dropped")
         DeviceLog.app(Ble.tag(name), "boot_reused", "开机号 \(st.boot) 以前用过：手机上这个开机号的旧 TIME 记录和文件状态作废，卡上的文件从头再取",
                       level: "warn", fields: ["boot": st.boot, "frame": st.frame])
       }
@@ -515,12 +515,12 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
       state = "正在接上实时"
       var live0 = false  // LIVE taken since the file it goes on in was caught up
       var lastStatus = Date(), lastPieces = Date.distantPast, lastCharge = Date()
-      // One loop for the link (#130): LIVE as it comes, and one READ at a time alongside it for what the mirror lacks
+      // One loop for the link: LIVE as it comes, and one READ at a time alongside it for what the mirror lacks
       // (nextRead). LIVE waits only while the file it goes on in is READ (at connect, after a hole, at a new file):
       // a backlog of days no longer holds back what is said now
       while alive(p) {
         // a pool per pass: this thread lives as long as the link, and what Foundation autoreleases here (each pieces()'s
-        // read of the live file) would stay until it ends: 3.4 GB and killed by iOS within hours on 10-06 (#109)
+        // read of the live file) would stay until it ends: 3.4 GB and killed by iOS within hours on 10-06
         try autoreleasepool {
           if refollow {  // a hole in the live file no card can fill: LIVE goes on in a new file, dated at once
             refollow = false
@@ -548,8 +548,8 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
           if reading == nil { try nextRead(p, m) }
           if -lastPieces.timeIntervalSinceNow >= 0.5 { try pieces(m); lastPieces = Date() }
           if Recorder.now() - synced > Ble.timeEveryMs { try endRead(p, m); synced = try sync(p) }
-          var changed = false  // plugged or unplugged, the card lent or back (#208: the USB disk switch follows the board)
-          // not while a READ is in flight: the backlog's DATA keeps the link (#130); the minute's status reads it then
+          var changed = false  // plugged or unplugged, the card lent or back (the USB disk switch follows the board)
+          // not while a READ is in flight: the backlog's DATA keeps the link; the minute's status reads it then
           if reading == nil && -lastCharge.timeIntervalSinceNow >= Ble.chargeEvery {
             lastCharge = Date()
             let t = try read(p, Ble.store, Ble.time)
@@ -591,7 +591,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
 
   /// The board's state, kept for the app's page and sent to the server under the board's name. Its model and revision
   /// are read again on each connection (`fresh`): a board flashed over USB meanwhile came back on another one, and the
-  /// page offered it the update it already ran (#199).
+  /// page offered it the update it already ran.
   private func status(_ p: Conn, _ name: String, fresh: Bool = false) throws -> Status {
     let t = try read(p, Ble.store, Ble.time)
     guard t.count >= 16 else { throw Fail(description: "状态只有 \(t.count) 字节") }
@@ -600,7 +600,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     let left = syncTotalKb - syncDoneKb, rate = caughtSince.map { Double(caught) / max(1, -$0.timeIntervalSinceNow) } ?? 0
     let dbm = try rssi(p)
     var h: [String: Any] = ["name": name, "store": s.store, "free_kb": Ble.u32(t, 8), "total_kb": Ble.u32(t, 12),
-                            // a backlog read in the background (#130): what is left, and when it is done at this pace
+                            // a backlog read in the background: what is left, and when it is done at this pace
                             "backlog_kb": left, "backlog_eta_s": rate > 0 && left > 0 ? Int(Double(left * 1024) / rate) : NSNull(),
                             // optional: macOS cannot publish 180F, so the Mac's fake recorder (app/ios/e2e) has none
                             "battery": (try? read(p, Ble.bas, Ble.battery))?.first.map { Int($0) } ?? NSNull(),
@@ -626,7 +626,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     return s
   }
 
-  /// The link's signal in dBm (#155 A4: a timeout drop from distance, the case's effect); nil: iOS had none.
+  /// The link's signal in dBm (a timeout drop from distance, the case's effect); nil: iOS had none.
   private func rssi(_ c: Conn) throws -> Int? {
     do { return Int(Int8(bitPattern: try op(c, "rssi") { c.p.readRSSI() }.first ?? 0)) } catch is Gone { throw Gone() } catch { return nil }
   }
@@ -693,7 +693,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   }
 
   //
-  // What the mirror lacks, READ alongside LIVE (#130). At most one READ at a time; the board ends one at any other
+  // What the mirror lacks, READ alongside LIVE. At most one READ at a time; the board ends one at any other
   // command or TIME write, so the session ends it first (endRead) and the next READ goes on from what the mirror has.
   // Order: the file LIVE goes on in (and the one before it, after a new file) while LIVE waits; then the rest, oldest
   // first: what the board recorded while the phone was away, files of earlier boots, a lost notify
@@ -772,7 +772,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     if liveRead {
       // the file before the live one, its end (LIVE may have missed it), then the live one: once, up to the stream's
       // end as the READ starts; LIVE (subscribed first) has every record from there. Reading on never ended while
-      // recording: each READ found what the last one took time for (#56)
+      // recording: each READ found what the last one took time for
       if let (f, _) = missing.first(where: { $0.0 >= liveFloor && $0.0 != open }) { return try startRead(p, m, f) }
       return try startRead(p, m, open)
     }
@@ -878,7 +878,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     return liveRead
   }
 
-  /// LIVE from a new file: the board starts one for a phone that subscribes (#135), so LIVE has it from offset 0 again.
+  /// LIVE from a new file: the board starts one for a phone that subscribes, so LIVE has it from offset 0 again.
   /// What the old one lacks is lost (the board had no card for it); the caller dates the new one (boot 0 dates each
   /// file by its own 'T').
   private func follow(_ p: Conn) throws {
@@ -893,7 +893,7 @@ final class BleLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
   }
 
   /// Where the server's finalization waits while a backlog goes up after what is said now (`hold:<tag>`, sent with
-  /// every upload, #130): a minute before the first piece that goes ahead of it (its start, as pieces() will put it,
+  /// every upload): a minute before the first piece that goes ahead of it (its start, as pieces() will put it,
   /// may still move by the clock's drift). Set before that piece exists, so no upload has it without the hold.
   private func holdAhead(_ m: Mirror) {
     guard ahead >= 0, let tag, Recorder.hold(tag) == nil, let at = m.nextStart(from: ahead) else { return }

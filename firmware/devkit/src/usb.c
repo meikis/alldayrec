@@ -36,8 +36,8 @@ static int lr_disk_init(struct disk_info *disk)
     return 0;
 }
 
-/* The computer's access to the lent card, under the SD mutex: the MSC thread is preemptible (#208), and the store
- * thread taking the card back (lend(false): the phone, unplugged, or left alone, #238) powers it off and on and mounts
+/* The computer's access to the lent card, under the SD mutex: the MSC thread is preemptible, and the store
+ * thread taking the card back (lend(false): the phone, unplugged, or left alone) powers it off and on and mounts
  * it with that mutex held; NCS 2.7's sd_init re-inits the card's own lock, so that one does not keep them apart. Not
  * lent: no wait (the card writer may hold the mutex for seconds on a slow card) */
 static int lr_disk_status(struct disk_info *disk)
@@ -180,7 +180,7 @@ int init_usb()
     // The MSC class reads and writes the card for the computer in its own thread, which NCS 2.7 starts cooperative
     // (usbd_msc.c: CONFIG_SYSTEM_WORKQUEUE_PRIORITY, -1): while a slow card kept the SD stack waiting and retrying,
     // the codec (4) got no CPU for over a second and the mic's 1 s ring overflowed (BDAE 10-13, a computer reading the
-    // lent card: 1.3-1.8 s of audio lost in 10 minutes, #208). Below everything that records (the codec 4, LIVE and
+    // lent card: 1.3-1.8 s of audio lost in 10 minutes). Below everything that records (the codec 4, LIVE and
     // the pusher 7, the card writer 8, the store 9, which answers the phone's CTRL to take the card back)
     extern const k_tid_t usbd_msc;
     k_thread_priority_set(usbd_msc, K_PRIO_PREEMPT(10));

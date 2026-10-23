@@ -56,7 +56,7 @@ class DfuLogTest {
     }
 
     /** What an update checks first, StoreCheck's case for Dfu.swift: only the recorder's own model, not the version it
-     *  runs already (#199: 098861b sent to a board on 098861b, the page offering it from a stale revision), only the
+     *  runs already (098861b sent to a board on 098861b, the page offering it from a stale revision), only the
      *  bytes the server listed, only with the link down. */
     @Test fun refusal() {
         val sha = "ab".repeat(32); val running = "20261009.183242-1749146"; val version = "20261011.164128-098861b"

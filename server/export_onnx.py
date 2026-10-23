@@ -1,5 +1,5 @@
 """Make the model files infer.py runs, into DIR (default MODELS_DIR, else /opt/lr-models), and check each against the
-sha256 infer.MODELS pins (#219). Needs torch, only here: the export dependency group.
+sha256 infer.MODELS pins. Needs torch, only here: the export dependency group.
 
     uv run --group export python export_onnx.py [DIR]
 

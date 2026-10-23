@@ -19,7 +19,7 @@ def test_backfill():
         assert audio.save("iphone", T(m), enc("aac", "adts"), "audio/aac")
     assert audio.save("phone", T(0), enc("libopus", "ogg"), "audio/ogg")
     right = {r["start_ms"]: r["seconds"] for r in db.conn().execute("SELECT * FROM pieces WHERE device = 'iphone'")}
-    db.conn().execute("UPDATE pieces SET seconds = seconds + 0.18 WHERE device = 'iphone'")  # as stored before #20
+    db.conn().execute("UPDATE pieces SET seconds = seconds + 0.18 WHERE device = 'iphone'")  # as stored before the AAC trim
     db.conn().execute("UPDATE pieces SET seconds = 99 WHERE device = 'phone'")
     db.conn().execute("VACUUM INTO ?", (str(rec / "copy.db"),))  # the script runs on a copy, as on a server
     backfill_seconds.backfill(rec / "copy.db", rec)

@@ -1,4 +1,4 @@
-"""audio.py's self-check (synthetic tones): the stream's order, resume point, late pieces, and holds (#130)."""
+"""audio.py's self-check (synthetic tones): the stream's order, resume point, late pieces, and holds."""
 import runpy
 from pathlib import Path
 

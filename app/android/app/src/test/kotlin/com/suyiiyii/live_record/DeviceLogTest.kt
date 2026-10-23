@@ -47,7 +47,7 @@ class DeviceLogTest {
         assertEquals(5007L, DeviceLog.cursor(emptyList(), 5007))            // nothing new
     }
 
-    /** A queue past the cap loses its oldest files first, never the newest; under it nothing goes (#155 A9). */
+    /** A queue past the cap loses its oldest files first, never the newest; under it nothing goes. */
     @Test fun trim() {
         val dir = kotlin.io.path.createTempDirectory().toFile()
         val q = (1..4).map { File(dir, "devlog-$it.send").apply { writeBytes(ByteArray(400)) } }
@@ -59,7 +59,7 @@ class DeviceLogTest {
         dir.deleteRecursively()
     }
 
-    /** A crash as classes and frames, its cause after it; the message (it may carry data) left out (#155 A7). */
+    /** A crash as classes and frames, its cause after it; the message (it may carry data) left out. */
     @Test fun trace() {
         val e = IllegalStateException("secret", java.io.IOException("also secret"))
         val t = DeviceLog.trace(e)

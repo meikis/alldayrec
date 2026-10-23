@@ -1,4 +1,4 @@
-"""One-off (10-04, #46): the iPhone's AAC pieces stored before #20 still have the seconds of their padded decode
+"""One-off (10-04): the iPhone's AAC pieces stored before the AAC trim still have the seconds of their padded decode
 (0.18 s too long each), so their rows overlap the next piece. Recomputes `seconds` of every .aac row from what
 audio.samples() now returns for it (read at its pos in its hour file). Back up live.db first; safe to run again.
     python backfill_seconds.py LIVE_DATA/live.db RECORDINGS_DIR

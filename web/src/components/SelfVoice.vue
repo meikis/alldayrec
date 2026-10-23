@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 「哪个是你？」(server selfvoice.py, #206): on an instance that does not know the user's voice yet, the voices that
+// 「哪个是你？」(server selfvoice.py): on an instance that does not know the user's voice yet, the voices that
 // recur most, a few sentences of each to play. None is preselected (a whole first day with one person can put them
 // first) and there is no %: a tier word. The pick is 我 from the next conversation on; the ones before stay as they are
 import { onMounted, ref } from "vue";

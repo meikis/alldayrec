@@ -1,4 +1,4 @@
-"""The calls table (#155): every ASR try and LLM call with its time, failure and size, never its text; the summary by
+"""The calls table: every ASR try and LLM call with its time, failure and size, never its text; the summary by
 kind and engine; the StepFun balance and how long it lasts."""
 import contextvars
 import datetime as dt

@@ -143,7 +143,7 @@ class _UploadPageState extends State<UploadPage> {
                       const SizedBox(height: 10),
                       const LinearProgressIndicator(minHeight: 6),
                       const SizedBox(height: 6),
-                      // held (#132): finals wait for the backlog the phone reads in the background; the server's
+                      // held: finals wait for the backlog the phone reads in the background; the server's
                       // own estimate does not know when that is in
                       Text(
                           hold != null

@@ -155,7 +155,7 @@ async def main(name: str, seconds: float):
             try:
                 async with BleakClient(dev, disconnected_callback=lambda _: gone.set()) as c:
                     # a bonded Mac is subscribed again as the link is encrypted, before we listen: off and on again,
-                    # so the recorder starts a new file we take from its start (#130)
+                    # so the recorder starts a new file we take from its start
                     for on in (True, False, True):
                         await (c.start_notify(LIVE, lambda _, d: listen(bytes(d))) if on else c.stop_notify(LIVE))
                     await c.write_gatt_char(TIME, struct.pack("<Q", int(time.time() * 1000)), response=True)  # the stream on the wall clock

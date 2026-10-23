@@ -83,7 +83,7 @@ object Ble {
     const val CONNECTED = 2
     const val PAUSED = 4
     fun state(r: ScanResult) = r.scanRecord?.getManufacturerSpecificData(0xFFFF)?.firstOrNull()?.toInt()?.and(0xff) ?: -1
-    /** The two bytes after it (firmware #155 F4): the battery, mV / 20, and the card, the store's errno; -1: an older
+    /** The two bytes after it: the battery, mV / 20, and the card, the store's errno; -1: an older
      *  firmware, or no scan response in this result. */
     fun extra(r: ScanResult, i: Int) = r.scanRecord?.getManufacturerSpecificData(0xFFFF)?.getOrNull(i)?.toInt()?.and(0xff) ?: -1
 
@@ -96,7 +96,7 @@ object Ble {
     fun store(status: ByteArray): Int = ByteBuffer.wrap(status).order(ByteOrder.LITTLE_ENDIAN).getShort(6).toInt()
 
     /** What the USB disk switch says after CTRL 0x06 asked for [on]: [err] its answer (null: none in 15 s), [store] the
-     *  card's state the board reports since. A slow card answers late (#208: lend() flushes, closes and unmounts before
+     *  card's state the board reports since. A slow card answers late (lend() flushes, closes and unmounts before
      *  it answers; 10-13 BDAE went past 15 s and the app said it failed, a second tap took the disk back): no answer is
      *  not a failure, the board's state is what the switch shows and the note says. */
     fun usbNote(on: Boolean, err: Int?, store: Int): String? = when {
@@ -152,7 +152,7 @@ class Nearby(ctx: Context) {
  *  delete from the card what is mirrored and uploaded. Battery and card are read every minute. A dropped link is
  *  reconnected with autoConnect, which waits for the device to come back in range. Permissions are checked before the
  *  service starts.
- *  Binding is the app's soft limit (issue #56): a recorder that forgot this phone (another phone took it) is not
+ *  Binding is the app's soft limit: a recorder that forgot this phone (another phone took it) is not
  *  paired again behind the person's back; the link stops and says so (prefs bleKicked) until they add it again. */
 @SuppressLint("MissingPermission")
 class BleLink(private val ctx: Context, private val prefs: SharedPreferences, private val chunks: File, private val undated: File,
@@ -177,7 +177,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             when (i.getIntExtra(BluetoothAdapter.EXTRA_STATE, 0)) {
                 BluetoothAdapter.STATE_TURNING_OFF -> {
                     Log.i("live-record", "ble adapter off")
-                    // the link goes without a disconnect callback (gatt is gone first): said here (#155 A2)
+                    // the link goes without a disconnect callback (gatt is gone first): said here
                     DeviceLog.app(DeviceLog.mine(), "bluetooth", "手机蓝牙关了" + if (gatt != null) "，连接随之断开" else "", "warn", mapOf("on" to false))
                     main.removeCallbacksAndMessages(null)
                     gatt?.let { abort(it) }
@@ -359,7 +359,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             val m = Mirror(File(ctx.filesDir, "recorder/${Ble.tag(name)}"))
             mirrorName = Ble.tag(name); boot = st.boot
             if (m.reused(st.boot.toLong(), st.frame, st.at, chunks, undated, mirrorName)) {
-                Log.w("live-record", "ble boot ${st.boot} was counted before: the mirror's files and 'T' records of it dropped (#207)")
+                Log.w("live-record", "ble boot ${st.boot} was counted before: the mirror's files and 'T' records of it dropped")
                 DeviceLog.app(mirrorName, "boot_reused", "开机号 ${st.boot} 以前用过：手机上这个开机号的旧 TIME 记录和文件状态作废，卡上的文件从头再取",
                               "warn", mapOf("boot" to st.boot, "frame" to st.frame))
             }
@@ -371,7 +371,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
             var lastStatus = android.os.SystemClock.elapsedRealtime()
             var lastCharge = lastStatus
             var lastPieces = 0L
-            // One loop for the link (#130): LIVE as it comes, and one READ at a time alongside it for what the mirror
+            // One loop for the link: LIVE as it comes, and one READ at a time alongside it for what the mirror
             // lacks (nextRead). LIVE waits only while the file it goes on in is READ (at connect, after a hole, at a new
             // file): a backlog of days no longer holds back what is said now
             while (gatt === g && on) {
@@ -401,8 +401,8 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
                 val now = android.os.SystemClock.elapsedRealtime()
                 if (now - lastPieces >= 500) { pieces(m); lastPieces = now }
                 if (System.currentTimeMillis() - synced > Ble.TIME_EVERY_MS) { endRead(g, m); synced = sync(g) }
-                // not while a READ is in flight: the backlog's DATA keeps the link (#130); the minute's status reads it then
-                // plugged or unplugged, the card lent or back (#208: the USB disk switch follows the board)
+                // not while a READ is in flight: the backlog's DATA keeps the link; the minute's status reads it then
+                // plugged or unplugged, the card lent or back (the USB disk switch follows the board)
                 val changed = reading == null && now - lastCharge >= Ble.CHARGE_EVERY_MS &&
                     run { lastCharge = now; read(g, Ble.STORE, Ble.TIME).let { Ble.charge(it) != hw["charge"] || Ble.store(it) != hw["store"] } }
                 if (changed || now - lastStatus > 60_000) {
@@ -486,7 +486,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
     @Volatile var syncNote: String? = null  // the last catch-up, for the app's recorder page
     @Volatile var syncDoneKb = 0L           // the catch-up under way: taken of total (0 of 0: none)
     @Volatile var syncTotalKb = 0L
-    @Volatile var syncLiveKb = 0L           // of it, what LIVE still waits for: the file being recorded (#130, #135)
+    @Volatile var syncLiveKb = 0L           // of it, what LIVE still waits for: the file being recorded
 
     /** The board's SD card as a USB disk on the computer it is plugged into (CTRL 0x06), or back. */
     fun usbDisk(on: Boolean) {
@@ -514,7 +514,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
 
     /** The board's state, kept for the app's page and sent to the server under the board's name. Its model and revision
      *  are read again on each connection ([fresh]): a board flashed over USB meanwhile came back on another one, and the
-     *  page offered it the update it already ran (#199). */
+     *  page offered it the update it already ran. */
     private fun status(g: BluetoothGatt, name: String, fresh: Boolean = false): Status {
         val raw = read(g, Ble.STORE, Ble.TIME)
         val t = le(raw)
@@ -525,7 +525,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         val h = mutableMapOf<String, Any?>("name" to name, "store" to s.store, "free_kb" to (t.getInt(8).toLong() and 0xffffffffL),
             "total_kb" to (t.getInt(12).toLong() and 0xffffffffL), "battery" to read(g, Ble.BAS, Ble.BATTERY).firstOrNull()?.toInt(),
             "charge" to Ble.charge(raw),
-            // a backlog read in the background (#130): what is left, and when it is done at this pace
+            // a backlog read in the background: what is left, and when it is done at this pace
             "backlog_kb" to left, "backlog_eta_s" to if (rate > 0 && left > 0) (left * 1024 / rate).toLong() else null,
             "live_gaps" to liveGaps,  // holes in LIVE the card could not fill this session (follow())
             "rssi" to rssi(g))
@@ -543,11 +543,11 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         return s
     }
 
-    /** The link's signal in dBm (#155 A4: a timeout drop from distance, the case's effect); null: the stack had none. */
+    /** The link's signal in dBm (a timeout drop from distance, the case's effect); null: the stack had none. */
     private fun rssi(g: BluetoothGatt): Int? = try { op("rssi") { g.readRemoteRssi() }[0].toInt() } catch (e: Gone) { throw e } catch (e: Exception) { null }
 
     //
-    // What the mirror lacks, READ alongside LIVE (#130). At most one READ at a time; the board ends one at any other
+    // What the mirror lacks, READ alongside LIVE. At most one READ at a time; the board ends one at any other
     // command or TIME write, so the session ends it first (endRead) and the next READ goes on from what the mirror has.
     // Order: the file LIVE goes on in (and the one before it, after a new file) while LIVE waits; then the rest, oldest
     // first: what the board recorded while the phone was away, files of earlier boots, a lost notify
@@ -627,7 +627,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         if (liveRead) {
             // the file before the live one, its end (LIVE may have missed it), then the live one: once, up to the
             // stream's end as the READ starts; LIVE (subscribed first) has every record from there. Reading on never
-            // ended while recording: each READ found what the last one took time for (#56)
+            // ended while recording: each READ found what the last one took time for
             missing.firstOrNull { it.first >= liveFloor && it.first != open }?.let { return startRead(g, m, it.first) }
             return startRead(g, m, open)
         }
@@ -740,7 +740,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
         return liveRead
     }
 
-    /** LIVE from a new file: the board starts one for a phone that subscribes (#135), so LIVE has it from offset 0 again.
+    /** LIVE from a new file: the board starts one for a phone that subscribes, so LIVE has it from offset 0 again.
      *  What the old one lacks is lost (the board had no card for it); the caller dates the new one (boot 0 dates each
      *  file by its own 'T'). */
     private fun follow(g: BluetoothGatt) {
@@ -754,7 +754,7 @@ class BleLink(private val ctx: Context, private val prefs: SharedPreferences, pr
     }
 
     /** Where the server's finalization waits while a backlog goes up after what is said now (prefs hold:<name>, sent
-     *  with every upload, #130): a minute before the first piece that goes ahead of it (its start, as pieces() will put
+     *  with every upload): a minute before the first piece that goes ahead of it (its start, as pieces() will put
      *  it, may still move by the clock's drift). Set before that piece exists, so no upload has it without the hold. */
     private fun holdAhead(m: Mirror) {
         if (ahead < 0 || mirrorName.isEmpty() || prefs.contains("hold:$mirrorName")) return

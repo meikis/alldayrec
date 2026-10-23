@@ -2,7 +2,7 @@
 #define MIC_RING_H
 // The mic's 10 ms buffers on their way to the codec, each with its number (codec.c). One buffer is one codec frame.
 // The PDM interrupt puts, the codec thread gets (one of each: no lock). A buffer the ring has no room for (the codec
-// thread got no CPU for a second: a cooperative thread reading the card for a computer, #208) is left out but its
+// thread got no CPU for a second: a cooperative thread reading the card for a computer) is left out but its
 // number is used, so the codec numbers its frames on past it: a gap the store counts (DROPPED, HEARTBEAT b), not a
 // shift of every later frame. Host check: test/mic_ring_check.c
 #include <stdbool.h>

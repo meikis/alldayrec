@@ -1,4 +1,4 @@
-"""#234: a run of StepFun SSE deltas on one time spread between the timed deltas around it (stepfun_asr.spread), as
+"""A run of StepFun SSE deltas on one time spread between the timed deltas around it (stepfun_asr.spread), as
 sse() hands the deltas to every reader (final: merge, draft: sentences).
 
 The 10-15 13:38 window of main's LR-P3-BDAE, replayed as the engine got it (squeezed, 263 s), its times only: 460

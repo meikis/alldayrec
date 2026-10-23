@@ -1,4 +1,4 @@
-"""「哪个是你？」(selfvoice.py, #206): candidates and their probabilities, when the card pops, which sentences it plays;
+"""「哪个是你？」(selfvoice.py): candidates and their probabilities, when the card pops, which sentences it plays;
 the card's round trip on the server (only without a voiceprint, nothing taken before the user picks); a pick reaches
 the pipeline at its next conversation, never the open one."""
 import datetime as dt

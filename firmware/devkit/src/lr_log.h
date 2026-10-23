@@ -26,7 +26,7 @@
  *                   (-EDEADLK), 3 the file's length on the card (fs_sync, or fs_close with b the file's bytes)
  *     7 CARD_FULL   x 1 recording stopped / 0 resumed, a free KB
  *     8 USB_DISK    x 1 card lent to USB / 0 back, a error, b (back) why: 1 the phone, 2 unplugged, 3 the computer had
- *                   not read or written it for 3 minutes (#238; 0: firmware before it)
+ *                   not read or written it for 3 minutes (0: firmware older than this field)
  *     9 CONNECT     a interval (1.25 ms) | latency << 16, b supervision timeout (10 ms)
  *    10 DISCONNECT  x HCI reason
  *    11 PARAM       a interval | latency << 16, b timeout: connection parameters changed
@@ -61,22 +61,22 @@
  *                   chip's power-fail warning (LR-P3: VDDH under 3.3 V or VDD under 2.8 V; x 0, not measured in the
  *                   interrupt), 2: low battery, recording ended, System OFF next until USB (or LR-P3's switch) wakes it
  *    30 LIVE_LOST   a records, b bytes left out of LIVE; on the card all the same, the phone READs them. x 0: in a
- *                   row, its queue full (the link stalled), by the next one that goes (#133); x 1: queued, then lost
+ *                   row, its queue full (the link stalled), by the next one that goes; x 1: queued, then lost
  *                   to the link (gone, or the phone unsubscribed; a record cut short counts whole), once the queue is
- *                   empty (#170)
+ *                   empty
  *    31 HEALTH      the mic and the chip over the last 10 minutes, with HEARTBEAT: x die temperature (°C, signed),
  *                   a ms of all-zero 10 ms frames from the mic (bits 0-19) | PDM errors << 20, b samples at full scale
  *                   (bits 0-23) | the loudest sample after the high-pass >> 7 << 24 (255: full scale); zeros and full
- *                   scale are counted before the high-pass; every field saturates (#155 F1)
+ *                   scale are counted before the high-pass; every field saturates
  *    32 CARD_ID     the card's CID at each mount (no serial number): x manufacturer ID, a product name characters 1-4
  *                   (the first in bits 0-7), b its 5th | OEM ID << 8 (two characters, the first in bits 8-15) |
- *                   product revision << 24 (BCD n.m) (#155 F2)
+ *                   product revision << 24 (BCD n.m)
  *    33 CARD_SIZE   with CARD_ID: x CSD structure (0: SDSC, 1: SDHC/SDXC), a 512 B sectors, b manufacture date from the
  *                   CID (years since 2000 << 4 | month)
  *    34 SD_ERRORS   the SD driver's failed tries in the last 10 minutes, with SD_WRITES, only when there were any: x
  *                   transfers tried again, a CRC errors (bits 0-15) | timeouts << 16 (no answer, or busy past its
  *                   deadline), b of those timeouts the busy ones (bits 0-15) | other errors << 16 (an error token or
- *                   R1); every field saturates (#155 F3)
+ *                   R1); every field saturates
  *
  * Each record has a sequence number, one more than the last, across boots: a reader asks for those from the last
  * it has. Records gather in RAM (__noinit: a crash or watchdog reset keeps them for the next boot) and go to flash

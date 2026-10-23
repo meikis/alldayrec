@@ -57,7 +57,7 @@ CREATE INDEX IF NOT EXISTS device_log_at ON device_log(device, at);
 CREATE TABLE IF NOT EXISTS device_status (    -- every status a client read from a BLE recorder (battery, card, firmware)
     device TEXT NOT NULL, at TEXT NOT NULL, body TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS device_status_at ON device_status(device, at);
-CREATE TABLE IF NOT EXISTS calls (            -- every ASR and LLM call (#155): how it went and what it took, never what it said.
+CREATE TABLE IF NOT EXISTS calls (            -- every ASR and LLM call: how it went and what it took, never what it said.
     at TEXT NOT NULL, kind TEXT NOT NULL,     -- kind: final, draft (ASR); summary, hints, profile, recap, live, ask (LLM)
     engine TEXT NOT NULL, device TEXT,        -- engine: the provider or model; device: whose audio (ASR)
     ms INTEGER NOT NULL, error TEXT,          -- error: NULL when it answered, else its class, code and first words
@@ -88,10 +88,10 @@ def init():
         conn().execute("ALTER TABLE pieces ADD COLUMN size INTEGER")
     if "n" not in {r[1] for r in conn().execute("PRAGMA table_info(pieces)")}:  # 10-04: iPhone pieces say how many samples they hold
         conn().execute("ALTER TABLE pieces ADD COLUMN n INTEGER")
-    if "received_ms" not in {r[1] for r in conn().execute("PRAGMA table_info(pieces)")}:  # 10-07: when each came, how it sounds (#155)
+    if "received_ms" not in {r[1] for r in conn().execute("PRAGMA table_info(pieces)")}:  # 10-07: when each came, how it sounds
         for col in ("received_ms INTEGER", "rms REAL", "hum REAL", "zero_ms INTEGER", "full INTEGER"):
             conn().execute(f"ALTER TABLE pieces ADD COLUMN {col}")
-    if "level" not in {r[1] for r in conn().execute("PRAGMA table_info(voices)")}:  # 10-14: how loud each voice is (#206)
+    if "level" not in {r[1] for r in conn().execute("PRAGMA table_info(voices)")}:  # 10-14: how loud each voice is
         conn().execute("ALTER TABLE voices ADD COLUMN level REAL")
 
 
@@ -464,7 +464,7 @@ def device_status(device: str) -> dict | None:
     return {**json.loads(r[1]), "at": r[0]} if r else None
 
 
-# what the ASR and LLM calls took (#155)
+# what the ASR and LLM calls took
 
 def add_call(kind: str, engine: str, device: str | None, ms: int, error: str | None = None, audio_s: float | None = None,
              sent_s: float | None = None, prompt_tokens: int | None = None, completion_tokens: int | None = None):

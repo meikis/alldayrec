@@ -26,7 +26,7 @@ object Dfu {
 
     /** Why the package may not go onto the bound recorder (error code, message), as Dfu.refusal in Dfu.swift: the model
      *  the recorder said it is must be the package's, its revision as last read ([running]) not the package's [version]
-     *  (#199: the same build sent again, a page that offered it from a stale revision), and the bytes must be the ones
+     *  (the same build sent again, a page that offered it from a stale revision), and the bytes must be the ones
      *  the server listed ([expected]). Null: go on. */
     fun refusal(want: String?, model: String?, address: String?, linked: Boolean, sha256: String, expected: String?,
                 version: String?, running: String?): Pair<String, String>? = when {
@@ -53,7 +53,7 @@ object Dfu {
             }
             override fun onDfuCompleted(a: String) {
                 log?.done(); state = "升级完成，录音设备已重启"; busy = false
-                // what the page shows until the link reads it (#199)
+                // what the page shows until the link reads it
                 log?.let { ctx.getSharedPreferences("recorder", Context.MODE_PRIVATE).edit().putString("bleFw", it.to).apply() }
                 ended()
             }
@@ -71,7 +71,7 @@ object Dfu {
         DfuServiceInitiator(address).setDeviceName(name).setKeepBond(true)
             .setForceDfu(false)
             .setForceScanningForNewAddressInLegacyDfu(true)  // the bootloader advertises as AdaDFU on another address
-            // As lr_dfu.py (issue #33): the Adafruit bootloader stalls mid-image on PRN 16 (XIAO) and on big packets.
+            // As lr_dfu.py: the Adafruit bootloader stalls mid-image on PRN 16 (XIAO) and on big packets.
             // The library asks for MTU 517 and sends MTU-3 bytes a packet (244 at the bootloader's 247): keep 20 B.
             .setPacketsReceiptNotificationsValue(8)
             .disableMtuRequest()

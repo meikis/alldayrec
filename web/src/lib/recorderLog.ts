@@ -90,8 +90,8 @@ const reas = (v: number) =>
     .join("+") || "上电";
 const param = (a: number, b: number) =>
   `间隔 ${(a & 0xffff) * 1.25} ms，延迟 ${a >>> 16}，超时 ${b * 10} ms`;
-// USB_DISK x 0's b (lr_log.h): why the card came back (#238)
-const BACK = ["", "手机关的", "拔了线", "电脑 3 分钟没读写"];  // 0: firmware before #238
+// USB_DISK x 0's b (lr_log.h): why the card came back
+const BACK = ["", "手机关的", "拔了线", "电脑 3 分钟没读写"];  // 0: firmware older than this field
 // APPEND_ERR's x (lr_log.h): which part of an append failed
 const APPEND = ["", "写卡跟不上，本段余下只走实时：", "重启时卡卡在写入：", "文件长度没写上卡："];
 const stack = (v: number) => (v === 0xffff ? "-" : String(v));

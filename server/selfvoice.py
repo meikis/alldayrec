@@ -1,9 +1,9 @@
-"""Who is 我 on an instance without a voiceprint (issue #206): the card "哪个是你？". The voice that recurs across the
+"""Who is 我 on an instance without a voiceprint: the card "哪个是你？". The voice that recurs across the
 most conversations is most likely the wearer's. The voices table (one ReDimNet2 mean per conversation x label) is
 peeled into candidates: the most recurrent voice with at most one member per conversation (wearer), then its members
 and look-alikes leave and the next is taken, KMAX at most. Each is scored by the share of conversations it is in, its
 share of the speech and how much louder it is than the others of the same conversation, as a conditional logit with
-a "none of them" option (fitted on the owner's live era, issue #206 comment 6139656831). The card pops at a
+a "none of them" option (fitted on the owner's live era). The card pops at a
 conversation's close once the first candidate is clear (due), else 24 h after the first voice. The voiceprint is taken
 only when the user picks a candidate on the card, never by itself, however clear.
 

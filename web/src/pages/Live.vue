@@ -58,7 +58,7 @@ function doneTo(device: string) {
 }
 // Per device, the time between its final rows and its drafts (or, with none, its newest audio): the drafts follow
 // what is said now while a backlog (a phone back after hours offline) is finalized in order, so this time is not lost.
-// Held (#130): the phone still reads older audio off the recorder's card in the background; finals wait for it
+// Held: the phone still reads older audio off the recorder's card in the background; finals wait for it
 const catchups = computed(() =>
   (live.value ? (status.value?.devices ?? []) : []).flatMap((d) => {
     const from = doneTo(d.device);

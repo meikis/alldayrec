@@ -41,7 +41,7 @@ static uint32_t total_kb;
 /* The record stream in RAM: `done` bytes of finished records not yet on their way to the card, then the open 'A'
  * record. Every record the card gets goes to a following phone too (LIVE), with the same file and offset, as it closes.
  * The stream (pend, done, rec_*, seg, seg_size) changes under stream_mtx, which is never held across card I/O: a card
- * that stalls holds up the card writer only (#166). The card itself (seg_file, the card queue's reading end) is the SD
+ * that stalls holds up the card writer only. The card itself (seg_file, the card queue's reading end) is the SD
  * mutex's. Both taken: the SD mutex first. */
 static uint8_t pend[BATCH + 6 + REC_FRAMES * 256];
 static uint32_t done, rec_len, rec_next;  // finished bytes; bytes of the open record; the frame that may extend it
@@ -87,7 +87,7 @@ static bool seg_open;              // as the file grew (4 KB clusters): ~0.5 s p
 static uint32_t card_file = UINT32_MAX, card_at;  // the file seg_file is (or was last), and its bytes on the card
 static char card_path[32];
 
-/* Finished batches on their way to the card (#166): the stream puts each one here, its file and offset first, and
+/* Finished batches on their way to the card: the stream puts each one here, its file and offset first, and
  * never waits for the card; the card writer (card_thread) appends them, SD mutex held. A card that stalls fills it
  * (~4 s of audio) and the batches after go to LIVE only: the stream goes on in a new segment once the writer has caught
  * up, so a file on the card is still the start of the stream's file of that name. One writer at a time (stream mutex),
@@ -116,9 +116,9 @@ static void close_segment(void)
 }
 
 static bool append_failed;  // only the first failure of a run goes to the event log
-static int retries;  // tries of the card (retry_card) since it last took a write (append): a mount alone is not a card that works (#198)
+static int retries;  // tries of the card (retry_card) since it last took a write (append): a mount alone is not a card that works
 
-/* Appends summed up for 10 minutes into one SD_WRITES event: how long the card keeps the chip busy (power, #95) */
+/* Appends summed up for 10 minutes into one SD_WRITES event: how long the card keeps the chip busy (power) */
 static struct {
     int64_t start;
     uint32_t ms, max, n[4];  // under 20 ms, 20-49, 50-200, over 200
@@ -204,7 +204,7 @@ static int append(uint32_t len)
         }
         uint32_t ms = k_uptime_get() - t0;
         append_max = MAX(append_max, (uint16_t) MIN(ms, UINT16_MAX));
-        if (ms > 1000) {  // SD_WRITES counts those over 200 ms: one event each filled LR-P1's log in 80 min (#99)
+        if (ms > 1000) {  // SD_WRITES counts those over 200 ms: one event each filled LR-P1's log in 80 min
             lr_log(LR_SLOW, 0, ms, len);
         }
         count_write(ms);
@@ -323,7 +323,7 @@ static void next_segment(void)
     restart_segment();
 }
 
-/* A frame from the codec into the stream (the pusher's thread): never waits for the card (#166) */
+/* A frame from the codec into the stream (the pusher's thread): never waits for the card */
 void lr_store_frame(uint32_t frame_no, const uint8_t *data, uint16_t len, bool after_gap)
 {
     if (len > 255) {
@@ -382,8 +382,8 @@ struct cmd {
 K_MSGQ_DEFINE(cmds, sizeof(struct cmd), 8, 4);
 
 /* A phone starts following the stream: it goes on in a new file, so the phone has that one from offset 0 by LIVE and
- * all before it in closed files it READs in the background; a backlog of days does not hold back what is said now
- * (#130). While the card does not take the stream, nothing before this could be READ anyway. */
+ * all before it in closed files it READs in the background; a backlog of days does not hold back what is said now.
+ * While the card does not take the stream, nothing before this could be READ anyway. */
 static void live_ccc(const struct bt_gatt_attr *attr, uint16_t value)
 {
     if (value == BT_GATT_CCC_NOTIFY) {
@@ -492,7 +492,7 @@ BT_GATT_SERVICE_DEFINE(lr_svc,
 /* LIVE goes out on a thread of its own (live_thread). The pusher only queues a finished record here, never waiting for
  * Bluetooth with the SD mutex held: a notify waits for a TX buffer, and a link that stalls (going down: up to the
  * supervision timeout; coming up: MTU, security, PHY) held the pusher until the codec's queue overflowed and frames
- * were lost from the card too (#133: 2.5-4.5 s at each drop of the X1's link). Now a stalled link fills this queue
+ * were lost from the card too (2.5-4.5 s at each drop of the X1's link). Now a stalled link fills this queue
  * (~2 s) and the records after are left out of LIVE only: the phone READs the gap from the card. One producer (the
  * pusher, SD mutex held), one consumer: no lock (ring_buf_put publishes the whole record at once). */
 #define LIVE_QUEUE (8 * 1024)
@@ -551,7 +551,7 @@ static bool notify(struct bt_conn *conn, const struct bt_gatt_attr *attr, const 
     }
 }
 
-/* The queued records to the phone that follows, split to the MTU, each notify waiting for a TX buffer (#170). Only the
+/* The queued records to the phone that follows, split to the MTU, each notify waiting for a TX buffer. Only the
  * link loses a record: one for a link that went (or a phone that unsubscribed) is dropped, and a notify that fails
  * drops the rest of its record; LIVE_LOST x 1 counts them once the queue is empty. A gap the phone fills with READ. */
 static void live_send(void)
@@ -765,7 +765,7 @@ extern volatile uint32_t usb_disk_used;  // usb.c: when the computer last read o
 extern bool usb_charge;
 static int mount_card(int (*mount)(void));
 
-/* A lent card the computer has not read or written for this long comes back by itself (#238): ejected (macOS's eject
+/* A lent card the computer has not read or written for this long comes back by itself: ejected (macOS's eject
  * never reaches the disk driver), forgotten, or never mounted. Lent, nothing records to the card and the stream goes
  * to LIVE only: a phone gone or a LIVE gap meanwhile was audio kept nowhere (BDAE 10-15: 60 of 107 minutes lent). */
 #define LEND_IDLE_MS (3 * 60 * 1000)
@@ -838,7 +838,7 @@ static int card_init(int (*mount)(void), uint16_t *counted);
  * boot 01:50, one put in ~02:2x was not up by 02:31, tried once a minute all the while; the next boot's reset mounted
  * it at once): boot's own reset (sdcard.c, sd_spi_reset) is what wakes a card up properly. The tries count until the
  * card takes a write again, not until it mounts: one that reads but does not write mounted at every quick try, each
- * mount started the count again and the reset never came (#198: BDAE 10-11, writes stuck busy 57 s, then EIO, then
+ * mount started the count again and the reset never came (BDAE 10-11, writes stuck busy 57 s, then EIO, then
  * mounted again, over and over). A working card is looked at every RETRY_FAST_MS: back by a reset, the next failure
  * is tried again in seconds once it has taken a write, not in 10 minutes. */
 #define RETRY_FAST 6
@@ -1029,8 +1029,8 @@ int lr_store_init(void)
 
 /* The audio's boot numbers name its files (boot << 16 | segment) and the app keeps TIME records and files by them, for
  * good: a number must never come back. Counted on the card alone it did: a card that lost its /LR (BDAE 10-13 11:18, a
- * dying card: BOOT read back nothing) started again at 1, and the app timed the new audio by 10-10's records of boot 1
- * (#207). So a boot also counts past the newest file on the card and past the chip's own count (lr_log, in its flash)
+ * dying card: BOOT read back nothing) started again at 1, and the app timed the new audio by 10-10's records of boot 1.
+ * So a boot also counts past the newest file on the card and past the chip's own count (lr_log, in its flash)
  * plus BOOT_FLOOR, above anything a card counted before (815 at most, 10-09). A card that is falling apart says
  * anything (BDAE's /LR was 105 entries of garbage): a count more than BOOT_SLACK past the chip's, or one that would not
  * fit 16 bits, is not taken; nor is a name other than 8 hex digits and .BIN. */
@@ -1084,7 +1084,7 @@ static uint16_t next_boot(uint32_t on_card, uint32_t newest, uint32_t chip, bool
 /* Mount the card (boot's mount, one try, from scratch) and set it up: its DIR, and a computer the card is lent to (USB
  * disk) leaves it alone: no Spotlight index, no fseventsd log. Every mount, not boot's alone: a card wiped on the
  * computer it was lent to (X1 10-17: erased as exFAT) came back without its DIR, mounted at every try, and each
- * write failed (-ENOENT) until a reboot (#243); so would a blank card put in while it runs. */
+ * write failed (-ENOENT) until a reboot; so would a blank card put in while it runs. */
 static int mount_card(int (*mount)(void))
 {
     int err = mount();

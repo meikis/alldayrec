@@ -3,5 +3,5 @@
 &sdhc0 { spi-max-frequency = <8000000>; };
 
 /* The XIAO keeps the board's legacy nrf-spi (an interrupt per byte): 10-03 nordic,nrf-spim hung its SD init (watchdog
- * resets, the card left stuck) on D7-D10, which are "low frequency I/O" pins, before the stuck-card reset of #59; not
- * tried there since. The ProMicro boards run SPIM (lr_promicro.overlay, #105). */
+ * resets, the card left stuck) on D7-D10, which are "low frequency I/O" pins, before the stuck-card reset at mount; not
+ * tried there since. The ProMicro boards run SPIM (lr_promicro.overlay). */

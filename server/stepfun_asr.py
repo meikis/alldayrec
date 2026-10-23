@@ -1,6 +1,6 @@
-"""StepFun stepaudio-2.5-asr for engine_segs (#96): the pay-as-you-go SSE call (text with per-character times, no
+"""StepFun stepaudio-2.5-asr for engine_segs: the pay-as-you-go SSE call (text with per-character times, no
 sentences, no speakers), its characters cut into sentences, and the merge onto the sentences and speakers of a file
-job on the same audio (#96's H1).
+job on the same audio.
 
     uv run python stepfun_asr.py     the self-check (no network)
 """
@@ -15,8 +15,8 @@ import net
 import threads
 
 URL = os.environ.get("STEPFUN_SSE_URL") or "https://api.stepfun.com/v1/audio/asr/sse"  # pay-as-you-go; /step_plan/v1/... is the Plan's
-ACCOUNT = "https://api.stepfun.com/v1/accounts"  # the pay-as-you-go account the key draws on (#155)
-GAP_MS = 600     # a pause this long between characters ends a sentence (#96)
+ACCOUNT = "https://api.stepfun.com/v1/accounts"  # the pay-as-you-go account the key draws on
+GAP_MS = 600     # a pause this long between characters ends a sentence
 REACH_MS = 1000  # a character this close to a file sentence joins it (the rule of replay_case.words_to_turns)
 END = "。？！?!"   # ... and these end one
 
@@ -66,7 +66,7 @@ async def sse(x: np.ndarray, on_sentence=None) -> list[dict]:
 def spread(deltas: list[dict], end_ms: float | None = None) -> list[dict]:
     """The deltas, each run of them on one time (the same start_time and end_time) spread evenly from the end of the
     delta before it (0 at the start) to the start of the one after it (end_ms, the audio's end, at the end): StepFun
-    sometimes gives a stretch of speech one time (#234: 10-15 460 deltas, 118 s, on one instant: rows of no length,
+    sometimes gives a stretch of speech one time (10-15: 460 deltas, 118 s, on one instant: rows of no length,
     every file sentence of the stretch dropped). A run the delta after it does not follow (it starts on or before the
     run's time: also each burst of fast speech) stays as it is. end_ms None (the stream goes on): a run at the end is
     left out until the delta after it comes. Copies; the deltas given stay as they are."""
@@ -114,7 +114,7 @@ def sentences(deltas: list[dict]) -> list[dict]:
 
 
 def merge(deltas: list[dict], file_segs: list[dict]) -> list[dict]:
-    """The file job's sentences and speakers with the SSE text (#96 H1): each character goes to the sentence its midpoint
+    """The file job's sentences and speakers with the SSE text: each character goes to the sentence its midpoint
     falls in, or the nearest within REACH_MS; characters no sentence takes become sentences of their own, without a
     speaker (the diarist labels them one by one); a file sentence no character went to is dropped."""
     turns = sorted(({"start_ms": g["start_ms"], "end_ms": g["end_ms"], "speaker": g.get("speaker"), "text": ""} for g in file_segs),

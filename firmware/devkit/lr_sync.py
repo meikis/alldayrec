@@ -266,8 +266,8 @@ ERRNO = {**{n: errno.errorcode[n] for n in range(1, 35) if n in errno.errorcode}
          77: "EBADMSG", 105: "ENOBUFS", 116: "ETIMEDOUT", 120: "EALREADY", 128: "ENOTCONN", 134: "ENOTSUP"}  # Zephyr's
 
 
-# USB_DISK x 0's b (lr_log.h): why the card came back (#238)
-BACK = ("", "the phone", "unplugged", "the computer left it 3 min")  # 0: firmware before #238
+# USB_DISK x 0's b (lr_log.h): why the card came back
+BACK = ("", "the phone", "unplugged", "the computer left it 3 min")  # 0: firmware older than this field
 # APPEND_ERR's x (lr_log.h): which part of an append failed
 APPEND = ("", "writer behind, rest of the segment LIVE only: ", "restart with the card stuck: ", "file length not on the card: ")
 

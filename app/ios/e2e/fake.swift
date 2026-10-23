@@ -213,7 +213,7 @@ final class Fake: NSObject, CBPeripheralManagerDelegate {
     log("subscribed \(c.uuid) mtu \(mtu + 3)")
     if c.uuid == live.uuid {
       p.stopAdvertising(); event(9, 24, 400)  // connected: only this phone (the board goes non-connectable)
-      if !(files[open] ?? Data()).isEmpty {  // as the board: the stream goes on in a new file for its follower (#130)
+      if !(files[open] ?? Data()).isEmpty {  // as the board: the stream goes on in a new file for its follower
         open += 1; files[open] = Data(); rolled = Date()
         log("segment \(String(format: "%08X", open)) for the follower")
       }

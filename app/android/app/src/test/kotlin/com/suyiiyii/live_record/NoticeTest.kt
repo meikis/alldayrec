@@ -12,11 +12,11 @@ class NoticeTest {
     @Test fun link() {
         assertEquals("正在找 LR-X1-567E" to "", ble("link" to "正在找 LR-X1-567E", "hw" to hw))  // the battery read before is stale
         assertEquals("已连接 · 实时上传" to "电量 68%", ble("link" to "已连接 · 实时上传", "hw" to hw, "pending" to 1, "oldest" to now - 25_000))
-        // at connect only the file being recorded holds back LIVE, not the backlog (old firmware: up to 16 MiB; #135: none)
+        // at connect only the file being recorded holds back LIVE, not the backlog (old firmware: up to 16 MiB; newer firmware: none)
         assertEquals("接上实时前先取正在录的这段 · 还差 1.2 MB" to "电量 68%",
             ble("link" to "正在接上实时", "hw" to hw, "syncDone" to 512L, "syncTotal" to 45568L, "syncLive" to 1228L))
         assertEquals("正在接上实时" to "", ble("link" to "正在接上实时", "hw" to hw))
-        assertEquals("实时上传 · 后台补传 1.5 / 44.5 MB" to "电量 68%",  // #130: a backlog no longer holds back what is said now
+        assertEquals("实时上传 · 后台补传 1.5 / 44.5 MB" to "电量 68%",  // a backlog no longer holds back what is said now
             ble("link" to "已连接 · 实时上传", "hw" to hw, "syncDone" to 1536L, "syncTotal" to 45568L))
         assertEquals("已连接 · 实时上传" to "上传失败 HTTP 502 · 已暂停，还剩 15 分钟 · 电量 9% · 存储卡已满 · 待传 40 块",
             ble("link" to "已连接 · 实时上传", "note" to "上传失败 HTTP 502", "pausedUntil" to now + 14 * 60_000 + 1,

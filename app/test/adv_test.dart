@@ -1,4 +1,4 @@
-// advText: a recorder's power and card from its scan response (firmware #155 F4), as the add-recorder list shows them.
+// advText: a recorder's power and card from its scan response, as the add-recorder list shows them.
 import 'package:flutter_test/flutter_test.dart';
 import 'package:live_record/recorder_status.dart';
 

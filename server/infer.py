@@ -1,4 +1,4 @@
-"""Speech detection and voiceprints on onnxruntime, in this process, without torch (#219): FireRedVAD Stream-VAD and
+"""Speech detection and voiceprints on onnxruntime, in this process, without torch: FireRedVAD Stream-VAD and
 ReDimNet2 B6, the same models as before (on the main instance's audio: the same utterances and squeezed seconds, cosine
 >= 0.9999998, the same diarist labels). The files live in MODELS_DIR, each pinned by its sha256 below; check() stops
 the server at start when one is missing or different, there is no fallback. Where they come from and how to make
@@ -18,7 +18,7 @@ from vad_postprocessor import StreamVadPostprocessor
 
 DIR = Path(os.environ.get("MODELS_DIR") or "/opt/lr-models")
 THREADS = int(os.environ.get("INFER_THREADS", "4"))  # onnxruntime threads per voiceprint call (threads.INFER: calls at once)
-# The VAD hears its stream lifted to a level (#253): its features take a fixed global CMVN, so speech 6-10 dB below the
+# The VAD hears its stream lifted to a level: its features take a fixed global CMVN, so speech 6-10 dB below the
 # usual (a far lecture through a PA, a quieter speaker) had p > 0.5 on no frame at all and was never sent. Each frame is
 # lifted by what brings the 90th percentile of the last 10 s's frame levels to VAD_TARGET_DB, 0 to VAD_GAIN_MAX_DB;
 # only the VAD's features: the audio every other path takes (engines, voiceprints, playback) stays as it came.

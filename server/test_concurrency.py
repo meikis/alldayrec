@@ -1,4 +1,4 @@
-"""One way to run things side by side in server/ (#200): anyio. Threads only through anyio.to_thread.run_sync with a
+"""One way to run things side by side in server/: anyio. Threads only through anyio.to_thread.run_sync with a
 limiter (threads.py), tasks in TaskGroups, timeouts with fail_after / move_on_after, queues as memory object streams. No
 asyncio primitives, no threading.Thread, no concurrent.futures pools, except where ALLOWED says why."""
 import io
@@ -20,7 +20,7 @@ ALLOWED = {
     },
     "migrate.py": {"import concurrent.futures as cf": "one-off (10-02 SQLite cutover): to delete",
                    "with cf.ThreadPoolExecutor(16) as ex:": "one-off: to delete"},
-    "backfill_hints.py": {"import concurrent.futures as cf": "one-off (#86 history backfill): to delete",
+    "backfill_hints.py": {"import concurrent.futures as cf": "one-off (history backfill): to delete",
                           "with cf.ThreadPoolExecutor(args.workers) as ex:": "one-off: to delete"},
 }
 

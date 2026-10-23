@@ -1,7 +1,7 @@
-// Host check of src/sdhc_spi.c's waits (#105) against a fake SD card on a fake 8 MHz SPI clock (1 us a byte): an R1
+// Host check of src/sdhc_spi.c's waits against a fake SD card on a fake 8 MHz SPI clock (1 us a byte): an R1
 // that comes late, a multi-block read with CMD12's busy, a write's busy, and a card that stays busy. Upstream slept
 // 10 + 30 ms per read and polled a stuck card forever; this fails on either, and on a sleep inside a short busy. Also the
-// CID it keeps and the failed tries it counts for the event log (#155 F2 F3).
+// CID it keeps and the failed tries it counts for the event log.
 //   d=$(mktemp -d) && mkdir -p $d/zephyr/{drivers,logging,sys} && for h in drivers/sdhc drivers/gpio drivers/spi \
 //   logging/log sys/byteorder sys/crc; do touch $d/zephyr/$h.h; done && cc -w -I$d -o $d/sdhc_check \
 //   test/sdhc_check.c && $d/sdhc_check
@@ -252,14 +252,14 @@ int main(void)
     assert(request(SD_WRITE_SINGLE_BLOCK, 1, buf, &us, &ms) == 0);
     assert(!memcmp(got, buf, 512));
     printf("write 1 block: %llu us, slept %llu ms\n", (unsigned long long) us, (unsigned long long) ms);
-    assert(ms == 0 && us < 4000);  // polled through the 3 ms: a sleep there costs more than it is (codec, #105)
+    assert(ms == 0 && us < 4000);  // polled through the 3 ms: a sleep there costs more than it is (codec)
 
-    // the CID as init reads it in SPI mode, kept for CARD_ID (#155 F2); nothing failed so far
+    // the CID as init reads it in SPI mode, kept for CARD_ID; nothing failed so far
     assert(request(SD_SEND_CID, 1, buf, &us, &ms) == 0 && !memcmp(lr_sd_cid, blk, 16));
     static const uint32_t none[LR_SD_ERR_N];
     assert(!memcmp(lr_sd_err, none, sizeof(none)));
 
-    // a write the card takes with a CRC error token first: tried again (#155 F3)
+    // a write the card takes with a CRC error token first: tried again
     prog_us = 0, crc_errs = 1;
     assert(request(SD_WRITE_SINGLE_BLOCK, 1, buf, &us, &ms) == 0);
     assert(lr_sd_err[LR_SD_CRC] == 1 && lr_sd_err[LR_SD_RETRIED] == 1 && lr_sd_err[LR_SD_TIMEOUT] == 0);

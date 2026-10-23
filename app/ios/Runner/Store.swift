@@ -150,7 +150,7 @@ final class Mirror {
   }
 
   /// A piece made (`name`) or frames passed over: one line appended, not the whole state again. save() per piece wrote
-  /// every piece name of the open file each time: at 1 s pieces ~150 MB an hour, more the longer the file (#109). The
+  /// every piece name of the open file each time: at 1 s pieces ~150 MB an hour, more the longer the file. The
   /// next save() folds these lines in; tscan is not in them: a restart scans again from the saved one, finding the
   /// same 'T' records.
   private func cut(_ f: Int64, _ name: String?) {
@@ -237,7 +237,7 @@ final class Mirror {
   }
 
   /// Where the next piece of the files from `f0` on will start (unix ms), as pieces() will name it; nil when none of
-  /// them has a dated frame yet. A phone sending these ahead of older audio still on the card says so first (#130).
+  /// them has a dated frame yet. A phone sending these ahead of older audio still on the card says so first.
   func nextStart(from f0: Int64) -> Int64? {
     scanSyncs()
     for f in files.keys.sorted() where f >= f0 {
@@ -330,7 +330,7 @@ final class Mirror {
   }
 
   /// None of the pieces it cut that start before `until` is still in `out` waiting to go up. With `until` where LIVE
-  /// began and pieces() run just before, the backlog is all up and the server's hold may go (#130). 10-08: the hold went
+  /// began and pieces() run just before, the backlog is all up and the server's hold may go. 10-08: the hold went
   /// 1-3 s early, before the last READ's bytes were cut, and while the backlog's last minute (between the hold and where
   /// LIVE began) was still queued; those pieces came in behind the server's queue.
   func up(_ out: URL, before until: Int64) -> Bool {
@@ -350,16 +350,16 @@ final class Mirror {
   }
 
   /// How far one boot's 'T' records may disagree on when it began (epochMs - frame * 10 ms): the frame clock runs
-  /// within ~30 ppm of the phone's (59998-60000 frames in 10 min, #208), frames a stalled codec lost move it on.
+  /// within ~30 ppm of the phone's (59998-60000 frames in 10 min), frames a stalled codec lost move it on.
   static let sameBootMs: Int64 = 60_000
 
   /// The board is on boot `b` at `frame` now (`at`: the phone's clock then). A boot number can come back: the card's
-  /// count read as 0 and it counted from 1 again (#207, 10-13: the new audio dated by 10-10's 'T' records of boot 1,
+  /// count read as 0 and it counted from 1 again (10-13: the new audio dated by 10-10's 'T' records of boot 1,
   /// three days back; its files taken for 10-10's of the same name: not READ, deleted from the card). Firmware e4cefed
   /// counts past the chip's own count too, which an erased chip still loses. The mirror's files and 'T' records of
   /// boot `b` are an earlier boot's when a 'T' is at a later frame than now (a boot's frames only go on) or puts the
   /// boot's start elsewhere. Files of `b` with no 'T' at all are taken for this boot's: a link that dropped before the
-  /// READ reached this boot's 'T' leaves just that (firmware before #135 wrote it at the end of a file of hours).
+  /// READ reached this boot's 'T' leaves just that (older firmware wrote it at the end of a file of hours).
   /// Those files are cut into pieces as far as the mirror has them, by their own 'T' records, then gone with the 'T'
   /// records: the card's files of that name are this boot's, READ from 0. True: there was such a boot.
   func reused(boot b: Int64, frame: Int64, at: Int64, out: URL, undated: URL, tag: String) throws -> Bool {

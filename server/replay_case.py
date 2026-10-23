@@ -9,7 +9,7 @@ Candidates
   volc-window    same windows through Volcengine seed-asr-2.0 (streaming API, speaker ids), cached in work/volc/
   volc-sentence  the live pipeline since 09-29 21:40: no context, Volcengine sentences, conversation clustering (diarist)
   volc-stream    one Volcengine two-pass streaming session per stretch of VAD speech, definite sentences, diarist labels
-  final-pieces   the live final layer since issue #9: server.next_cut pieces (<= CHUNK_S, cut in pauses) as the
+  final-pieces   the live final layer: server.next_cut pieces (<= CHUNK_S, cut in pauses) as the
                  audio arrives in 5 s pieces, each piece once to Volcengine, diarist labels; FINAL_LABELS=online (as
                  each piece comes) | offline (diarist.relabel at the end) | engine (the engine's ids per piece as
                  units) | guarded (engine units split when their voices disagree: the server's relabel at a close)

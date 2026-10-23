@@ -240,7 +240,7 @@ static char lr_name[CONFIG_BT_DEVICE_NAME_MAX + 1];
 // bit 0 bound to a phone, bit 1 a phone connected, bit 2 recording paused, bits 3-4 lr_charge() (0 on battery,
 // 1 charging, 2 full); the battery, mV / 20 (BAS's ~1 minute average; 0: not read yet); the card, the store's error
 // negated (lr_store_err: 0 recording to it, 19 none, 28 full, 16 lent to USB, others failed). A phone that cannot
-// connect still sees it alive, and how (#155 F4); one that reads only the first byte (apps before it) is not affected
+// connect still sees it alive, and how; one that reads only the first byte (apps before it) is not affected
 #define LR_BOUND BIT(0)
 #define LR_CONNECTED BIT(1)
 #define LR_PAUSED BIT(2)
@@ -267,8 +267,8 @@ static void lr_set_name(void)
 }
 
 //
-// Bound, paused, advertising. The recorder keeps nothing until a phone binds it, nor while a phone has paused it
-// (issue #56); the frames are still counted, the frame number being the offline store's clock (lr_store.h).
+// Bound, paused, advertising. The recorder keeps nothing until a phone binds it, nor while a phone has paused it;
+// the frames are still counted, the frame number being the offline store's clock (lr_store.h).
 // ponytail: mic and codec run while nothing is kept; turn the mic off (and sync the clock again after) to save power.
 //
 
@@ -559,7 +559,7 @@ static struct bt_gatt_cb gatt_cb = {.att_mtu_updated = att_mtu_updated};
 //
 // Pairing: every characteristic but battery and device info needs an encrypted link (LESC, Just Works). Any phone may
 // pair at any time; which recorder a phone binds, and not taking one bound to another phone, is the app's choice
-// (issue #56: development, phones change often). Bonded phones reconnect with their keys, no pairing.
+// (development: phones change often). Bonded phones reconnect with their keys, no pairing.
 //
 
 static void pairing_complete(struct bt_conn *conn, bool bonded)
@@ -594,7 +594,7 @@ static void bond_find(const struct bt_bond_info *info, void *data)
 
 /* "PIN or key missing": keys that do not match. A bond of ours the phone no longer has (app reinstalled, Bluetooth
  * reset) goes, so it pairs afresh on its next connection (10-03: the Mac stuck at "PIN or key missing"). A phone this
- * recorder does not know (another phone bound it, issue #56) keeps its link, unencrypted: the app's first encrypted
+ * recorder does not know (another phone bound it) keeps its link, unencrypted: the app's first encrypted
  * read fails and it shows it was kicked; the unencrypted timeout ends the link if nothing does. bt_unpair here dropped
  * the link at once, so a kicked phone never got that far and came back every 2 s (10-05). */
 static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_security_err err)
@@ -645,7 +645,7 @@ static uint32_t tx_frame_no;
 static bool tx_after_gap;  // the loaded frame follows frames left out on purpose (unbound, paused)
 static bool skipped;       // frames have been left out since the last one queued
 // Frames queued by their real size (header + Opus, ~46 B), not in fixed 326 B slots: 8 KB hold ~1.7 s. The pusher no
-// longer waits for the card (its batches queue in lr_store.c, #166), so this covers a busy CPU only; 16 KB held a card
+// longer waits for the card (its batches queue in lr_store.c), so this covers a busy CPU only; 16 KB held a card
 // that stalled for most of a second (769 ms seen, 10-04)
 static uint8_t tx_queue[8192];
 static uint8_t tx_buffer[CODEC_OUTPUT_MAX_BYTES + RING_BUFFER_HEADER_SIZE];
@@ -720,7 +720,7 @@ void pusher(void)
         k_sem_take(&pusher_wake_sem, K_FOREVER);
 
         // every frame into the record stream (lr_store.c): to the card always, to a phone that follows it (LIVE); the
-        // card's own thread writes it, a card that stalls does not hold this one (#166)
+        // card's own thread writes it, a card that stalls does not hold this one
         while (load_tx_frame()) {
             lr_store_frame(tx_frame_no, tx_buffer + RING_BUFFER_HEADER_SIZE, tx_buffer_size, tx_after_gap);
             consume_tx_frame();

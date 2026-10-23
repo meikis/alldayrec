@@ -1,4 +1,4 @@
-/* LR-P3's slide switch (#122), CONFIG_LR_SWITCH: P1.15 on its pull-up, closed to GND = on. A position counts once
+/* LR-P3's slide switch, CONFIG_LR_SWITCH: P1.15 on its pull-up, closed to GND = on. A position counts once
  * it has read the same for 0.5 s (lr_switch_debounce): 116C's lever bounced on and off for seconds on 10-07, four
  * boots in a row, two of them mounting the card. Off ends the open file, drops the phone and restarts; a boot that
  * finds the switch off, or not on for 0.5 s within 3 s, goes to System OFF at once, before the card or the radio, its

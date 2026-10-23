@@ -1,4 +1,4 @@
-// Host check of src/mic_ring.h (#208): cc -o mic_ring_check test/mic_ring_check.c && ./mic_ring_check
+// Host check of src/mic_ring.h: cc -o mic_ring_check test/mic_ring_check.c && ./mic_ring_check
 #include <assert.h>
 #include <stdio.h>
 #include "../src/mic_ring.h"

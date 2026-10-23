@@ -1,4 +1,4 @@
-"""Two tenants in one process (#200 B1): each sees only its own data through every route and its WebSocket, and its
+"""Two tenants in one process: each sees only its own data through every route and its WebSocket, and its
 requests never change the other's store or recordings; their pipelines run side by side on devices of the same name;
 code outside any tenant fails instead of reaching one; nothing per person stays in a module. A route added without a
 line in REQUESTS (or a reason in SHARED) fails test_every_route."""

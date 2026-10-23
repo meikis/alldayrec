@@ -32,7 +32,7 @@ static K_MUTEX_DEFINE(battery_mut);
 #define GPIO_BATTERY_CHARGE_SPEED 13
 // The charger's ~CHG (BQ25101, open drain): low while it charges, open when done or without USB. Its red LED hangs off
 // it (3V3, 2.2k, LED, P0.17), so an input reads it with the LED as it is; Omi drove it low as a "charge enable", which
-// only kept the LED lit on the battery (~0.65 mA, #95). The pull-up: a bare input costs ~50 uA (Seeed's forum).
+// only kept the LED lit on the battery (~0.65 mA). The pull-up: a bare input costs ~50 uA (Seeed's forum).
 #define GPIO_BATTERY_CHG 17
 #define GPIO_BATTERY_READ_ENABLE 14
 
@@ -80,9 +80,9 @@ typedef struct {
 
 #define BATTERY_STATES_COUNT 14
 // The share of a full charge's recording time left, by the reading, measured on LR-X1-567E's 602030 recording to its
-// card (#95): its HEARTBEATs over three runs to empty, 10-05 and 10-06, agree within ~10 minutes below 3.75 V; a full
-// charge records ~10.5 h to 3.3 V (#95's 10-12 h to empty), the flat stretches (4.00-4.02 V, 3.83-3.85 V) hold hours.
-// 0% at 3.3 V: the low-battery cut-off (#148). The old table (Omi's, a straight line) said 50% with 2.5 h of 10.5 left.
+// card: its HEARTBEATs over three runs to empty, 10-05 and 10-06, agree within ~10 minutes below 3.75 V; a full
+// charge records ~10.5 h to 3.3 V (of the 10-12 h to empty), the flat stretches (4.00-4.02 V, 3.83-3.85 V) hold hours.
+// 0% at 3.3 V: the low-battery cut-off. The old table (Omi's, a straight line) said 50% with 2.5 h of 10.5 left.
 BatteryState battery_states[BATTERY_STATES_COUNT] = {
     {4100, 100},
     {4020, 94},
@@ -137,7 +137,7 @@ int battery_set_slow_charge()
 int battery_charging()
 {
     if (IS_ENABLED(CONFIG_LR_BATTERY_VDDH)) {
-        return -ENOTSUP; // the ProMicro's charger drives its blue LED only (#122 has the wire that would read it)
+        return -ENOTSUP; // the ProMicro's charger drives its blue LED only (a wire from its CHRG would read it)
     }
     if (!is_initialized) {
         return -ECANCELED;

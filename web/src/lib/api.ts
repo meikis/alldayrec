@@ -119,7 +119,7 @@ export interface DeviceStatus {
   left_s: number;
   rate: number | null;
   eta_s: number | null;
-  hold?: string | null; // finals wait here for older audio the phone is still sending (#130)
+  hold?: string | null; // finals wait here for older audio the phone is still sending
   hold_seen?: string | null; // when its phone last said the hold
   hold_until?: string | null; // when the queue stops waiting without the phone (12 h after hold_seen)
   recording?: boolean; // its newest audio came in the last 2 min: behind_s and latency_s are about now
@@ -144,10 +144,10 @@ export interface RecorderStatus {
   store?: number; // 0 recording to the card; an errno otherwise: with total_kb 0 no card (-19, -116), -28 full, -16 lent
   free_kb?: number;
   total_kb?: number;
-  backlog_kb?: number; // left on the card for the phone to read in the background (#130)
+  backlog_kb?: number; // left on the card for the phone to read in the background
   backlog_eta_s?: number; // at the phone's own reading rate
-  rssi?: number | null; // the link's signal, dBm (#155 A4)
-  // its phone (#155, App 1.4.6 on): the build (1.4.6+21), system, model identifier; its battery, power saving and heat
+  rssi?: number | null; // the link's signal, dBm
+  // its phone (App 1.4.6 on): the build (1.4.6+21), system, model identifier; its battery, power saving and heat
   // (the system slows or ends apps then), the app's memory; this recorder's pieces waiting to go up and how uploads go
   app?: string;
   os?: string;
@@ -244,7 +244,7 @@ export interface Upgrade {
 }
 
 export interface Status {
-  balance?: Balance | null; // StepFun's prepaid account (#155)
+  balance?: Balance | null; // StepFun's prepaid account
   device?: string | null;
   behind_s?: number | null;
   queued?: number; // uploaded pieces the server has not fed yet, all devices'
@@ -259,7 +259,7 @@ export interface Status {
   summaries_pending?: number;
 }
 
-// GET /api/calls: the ASR and LLM calls since a time, by kind and engine (#155), and the StepFun balance
+// GET /api/calls: the ASR and LLM calls since a time, by kind and engine, and the StepFun balance
 export interface CallSum {
   kind: string; // final, draft (ASR); summary, hints, profile, recap, live, ask (LLM)
   engine: string;
@@ -307,7 +307,7 @@ export async function post<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export const hhmm = (iso: string) => iso.slice(11, 16);
-// A hold (#130) its phone has not said for 5 min: the phone went away with older audio still on the recorder's card
+// A hold its phone has not said for 5 min: the phone went away with older audio still on the recorder's card
 // (10-07: LR-P3-116C, unbound at 17:58); the queue waits for it until hold_until, then finalizes what it has
 export const holdLeft = (d: DeviceStatus) =>
   d.hold && d.hold_seen && Date.now() - +new Date(d.hold_seen) > 5 * 60_000

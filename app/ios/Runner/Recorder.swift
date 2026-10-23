@@ -42,7 +42,7 @@ enum Recorder {
         for k in ["foreground", "background"] { defaults.set(a[k] as? Int ?? 20, forKey: k) }
         result(nil)
       case "status": result(status())
-      case "error":  // an error the Flutter side did not catch (#155 A7): its type and first frames, no message
+      case "error":  // an error the Flutter side did not catch: its type and first frames, no message
         DeviceLog.app(DeviceLog.mine(), "app_error", "界面出错：\(a["type"] as? String ?? "?") \(a["stack"] as? String ?? "")", level: "error")
         result(nil)
       case "deviceName": result(UIDevice.current.name)  // "iPhone" since iOS 16 without the user-assigned-device-name entitlement
@@ -134,7 +134,7 @@ enum Recorder {
 
   /// A firmware update ended (DfuRun.swift): the BLE link back at once, set up as the last start left it. The home
   /// page's ticker would start it, but iOS does not run it in the background, and nothing else wakes the app with the
-  /// link down: after an update in the background, 18 min without LIVE until iOS relaunched the app (#199). Started
+  /// link down: after an update in the background, 18 min without LIVE until iOS relaunched the app. Started
   /// here, the link's connect request waits for the recorder's reboot and wakes the app for it.
   static func relink() {
     guard slicer == nil, link == nil, defaults.string(forKey: "source") == "ble" else { return }
@@ -243,7 +243,7 @@ enum Recorder {
     }
     DeviceLog.start(dir: dir.deletingLastPathComponent(), prefs: defaults)
     foregroundApp = UIApplication.shared.applicationState != .background
-    // what the app says of itself (#155 A2, A7, A8): this launch (in the background: iOS brought it back for the
+    // what the app says of itself: this launch (in the background: iOS brought it back for the
     // recorder, state restoration: BleLink's restore event says what it kept), how its processes ended and crashed
     // (MetricKit, a day later), what it may do
     DeviceLog.app(DeviceLog.mine(), "launch", foregroundApp ? "App 启动" : "App 启动（在后台被系统拉起）")
@@ -292,9 +292,9 @@ enum Recorder {
   /// Where the server's finalization waits for a recorder's backlog (BleLink.holdAhead), nil: it does not.
   static func hold(_ tag: String) -> Int64? { (defaults.object(forKey: "hold:\(tag)") as? NSNumber)?.int64Value }
 
-  /// The phone, for the status sent with its recorder's (#155 A1, A3): this build, the system, the model identifier
+  /// The phone, for the status sent with its recorder's: this build, the system, the model identifier
   /// (iPhone18,1; never the name the person gave the phone), its battery and whether it saves power or runs hot (iOS
-  /// slows or ends apps then), and this app's memory (#109). Off the main thread (UIDevice is read on it).
+  /// slows or ends apps then), and this app's memory. Off the main thread (UIDevice is read on it).
   static func phone() -> [String: Any] {
     var u = utsname()
     uname(&u)
@@ -311,7 +311,7 @@ enum Recorder {
             "thermal": ["nominal", "fair", "serious", "critical"][min(p.thermalState.rawValue, 3)], "app_mb": footprintMB()]
   }
 
-  /// What the app may do, logged when it changes and the first time (#155 A8): Bluetooth, without which nothing connects;
+  /// What the app may do, logged when it changes and the first time: Bluetooth, without which nothing connects;
   /// background app refresh (also off in Low Power Mode). On the main thread.
   static func permissions(_ refresh: UIBackgroundRefreshStatus) {
     let ble = CBManager.authorization
@@ -505,8 +505,8 @@ final class Uploader: Thread {
   }
 
   /// The first pieces of the queue of one BLE recorder that follow each other (a stop or a kill leaves a gap), at most
-  /// 30: one request, one stretch from its first piece's start. Following means later: with what is said now first
-  /// (#130), the backlog after it is older and goes on its own. The microphone's go one at a time, each with its n.
+  /// 30: one request, one stretch from its first piece's start. Following means later: with what is said now first,
+  /// the backlog after it is older and goes on its own. The microphone's go one at a time, each with its n.
   private func batch(_ q: [URL]) -> [URL] {
     guard let d = Uploader.piece(q[0])?.device else { return [q[0]] }
     var out = [q[0]]
@@ -526,11 +526,11 @@ final class Uploader: Thread {
   static func pending(_ dir: URL) -> Int { files(dir).count }
 
   /// A pool per pass: this thread never ends, and what Foundation autoreleases on it (the directory listed every second,
-  /// each batch read) would otherwise stay for good (#109).
+  /// each batch read) would otherwise stay for good.
   override func main() { while true { autoreleasepool(invoking: pass) } }
 
   private func pass() {
-    // a recorder's pieces from its hold on go first (what is said now, ahead of a backlog read off its card, #130)
+    // a recorder's pieces from its hold on go first (what is said now, ahead of a backlog read off its card)
     let all = Uploader.files(dir), ahead = { (f: URL) in
       Uploader.piece(f).map { p in p.device.flatMap(Recorder.hold).map { p.start >= $0 } ?? false } ?? false
     }
@@ -575,7 +575,7 @@ final class Uploader: Thread {
   }
 
   /// What the phone last read from its BLE recorder, for the server's progress page, with the phone's own state and this
-  /// recorder's upload queue (#155); best effort, off this thread.
+  /// recorder's upload queue; best effort, off this thread.
   func report(_ device: String, _ hw: [String: Any]) {
     Thread.detachNewThread { [self] in
       let body = hw.merging(Recorder.phone()) { a, _ in a }.merging(queued(device)) { a, _ in a }
@@ -630,7 +630,7 @@ final class Uploader: Thread {
   private func enc(_ s: String) -> String { s.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? s }
 }
 
-/// What iOS reports of the app afterwards (MetricKit, #155 A2, A7): every day how its processes ended in front and in
+/// What iOS reports of the app afterwards (MetricKit): every day how its processes ended in front and in
 /// the background (the memory limit, memory pressure, the watchdog, a crash...), and on the next launch each crash (its
 /// kind, the reason iOS gave, the first frames as binary+offset), hang, CPU or disk-write overrun. No data.
 final class Metrics: NSObject, MXMetricManagerSubscriber {

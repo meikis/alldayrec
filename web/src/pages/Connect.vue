@@ -19,7 +19,7 @@ onMounted(async () => {
   }
 });
 
-// 接入 AI: the agents that take a URL and a header (server mcp_server.py, #203), with the same token as the app.
+// 接入 AI: the agents that take a URL and a header (server mcp_server.py), with the same token as the app.
 // Shown with the token hidden; 复制 always copies the real one.
 const mcp = `${location.origin}/mcp`;
 const json = (server: object) => JSON.stringify({ mcpServers: { "live-record": server } }, null, 2);

@@ -5,21 +5,21 @@
  */
 
 /* live-record: NCS v2.7.0's zephyr/drivers/sdhc/sdhc_spi.c with the changes below, each marked "LR:", built in its
- * place (CONFIG_SPI_SDHC=n, CONFIG_LR_SDHC_SPI=y). Upstream main still has the sleeps (#105):
+ * place (CONFIG_SPI_SDHC=n, CONFIG_LR_SDHC_SPI=y). Upstream main still has the sleeps:
  * 1. A data command's R1 that comes after the second byte cost a 10 ms sleep: polled for the 8 bytes NCR allows first.
  * 2. Busy after CMD12 (every multi-block read) past the 21-byte command buffer cost a 30 ms sleep (1000 ticks):
  *    polled for 50 ms, then 1 ms sleeps. Writes' busy wait, which polled without a deadline, gets the same loop and its
  *    timeout.
  * 3. No 512-byte block of 0xFF in flash to clock reads with: nRF SPI and SPIM send their overrun character, 0xFF, when
  *    there is no TX buffer (upstream main does this too); SPIM could not DMA from flash without a RAM copy.
- * 4. The card's CID and CSD and the failed tries of data transfers go to the event log (sdcard.h, #155 F2 F3).
+ * 4. The card's CID and CSD and the failed tries of data transfers go to the event log (sdcard.h).
  * 5. A read's data token waited for SD_SPI_SKIP_MS, yielding (sdhc_skip): upstream polled 1e6 times without yielding.
- * 6. lr_sdhc_spi_unlock(): the bus let go before #188's reset. card_busy's config has SPI_LOCK_ON, so a write whose
+ * 6. lr_sdhc_spi_unlock(): the bus let go before sd_spi_reset. card_busy's config has SPI_LOCK_ON, so a write whose
  *    busy wait timed out (sdmmc_wait_ready) leaves the bus held, and the next transfer with another config waits
- *    forever (k_sem_take): sdcard.c's sd_spi_reset (reached since #228; LR-X1 10-16: the store thread stuck there for
- *    good), and a request after set_io swaps cfg_a/cfg_b (sd_init's 400 kHz). Not in card_busy itself (#242 did that):
+ *    forever (k_sem_take): sdcard.c's sd_spi_reset (LR-X1 10-16: the store thread stuck there for
+ *    good), and a request after set_io swaps cfg_a/cfg_b (sd_init's 400 kHz). Not in card_busy itself (an earlier fix did that):
  *    spi_release also takes CS high, so every poll of a busy wait deselected the card, and LR-X1 10-17 lent to a Mac
- *    twice ended with the card holding DO low for good (CMD0 r1 0x00) until its supply went (#249).
+ *    twice ended with the card holding DO low for good (CMD0 r1 0x00) until its supply went.
  * Before, on LR-P3-92D2: a 4 KB read took ~48 ms (~84 KB/s), an append of ~4 KB with its sync ~95 ms. */
 #define DT_DRV_COMPAT zephyr_sdhc_spi_slot
 
@@ -107,7 +107,7 @@ static int sdhc_spi_init_card(const struct device *dev)
 	return ret;
 }
 
-/* LR: the bus a busy wait that timed out left held (SPI_LOCK_ON) let go, CS high: before #188's reset talks to the card
+/* LR: the bus a busy wait that timed out left held (SPI_LOCK_ON) let go, CS high: before sd_spi_reset talks to the card
  * with its own config (sdcard.c). Nothing to do when the bus is free or was last used with another config. */
 void lr_sdhc_spi_unlock(const struct device *dev)
 {

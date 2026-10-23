@@ -64,7 +64,7 @@ class Slices {
   }
 }
 
-/// The server stops waiting for the older audio on a recorder's card (its hold, #130) once this phone no longer has
+/// The server stops waiting for the older audio on a recorder's card (its hold) once this phone no longer has
 /// the recorder: unbound, or another bound in its place. The backlog will not come from here; without this the server
 /// waited 12 h after the phone last said the hold (10-07: LR-P3-116C, 17:47 to 05:47). Best effort.
 Future<void> releaseHold(String name) async {

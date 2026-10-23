@@ -1,4 +1,4 @@
-"""How a device's audio sounded and arrived (#155): /api/device-log brings it by the minute, the status the last 10 min
+"""How a device's audio sounded and arrived: /api/device-log brings it by the minute, the status the last 10 min
 and the newest piece's lag, and an upload that cannot be decoded is logged and its bytes kept before the 400."""
 import datetime as dt
 import logging

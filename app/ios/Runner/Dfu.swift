@@ -16,8 +16,8 @@ enum Dfu {
   }
 
   /// Why the package may not go onto the bound recorder (error code, message), as Dfu.refusal in Dfu.kt: the model the
-  /// recorder said it is must be the package's, its revision as last read (`running`) not the package's `version` (#199:
-  /// the same build sent again, a page that offered it from a stale revision), and the bytes must be the ones the
+  /// recorder said it is must be the package's, its revision as last read (`running`) not the package's `version`
+  /// (the same build sent again, a page that offered it from a stale revision), and the bytes must be the ones the
   /// server listed. Nil: go on.
   static func refusal(want: String?, model: String?, id: String?, linked: Bool, sha256: String, expected: String?,
                       version: String?, running: String?) -> (String, String)? {

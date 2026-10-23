@@ -244,8 +244,8 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
               const SizedBox(width: 12),
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-                  // LIVE goes on while the backlog is read (#130); before that only the file being recorded is waited
-                  // for (old firmware: up to 16 MiB; since #135 a new one at connect: a moment)
+                  // LIVE goes on while the backlog is read; before that only the file being recorded is waited
+                  // for (old firmware: up to 16 MiB; newer firmware starts a new one at connect: a moment)
                   Text(!syncing ? link : connected
                           ? '实时上传 · 后台补传 ${(syncDone / 1024).toStringAsFixed(1)} / ${(syncTotal / 1024).toStringAsFixed(1)} MB'
                           : '接上实时前先取正在录的这段 · 还差 ${(syncLive / 1024).toStringAsFixed(1)} MB',
