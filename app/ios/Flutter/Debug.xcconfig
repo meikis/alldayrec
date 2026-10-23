@@ -1,1 +1,2 @@
+#include? "Signing.local.xcconfig"
 #include "Generated.xcconfig"

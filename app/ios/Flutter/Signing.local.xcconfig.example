@@ -1,0 +1,8 @@
+// Signing for a build on a real iPhone. Copy this file to Signing.local.xcconfig (git ignores it) and fill it in;
+// Debug.xcconfig and Release.xcconfig include it. `flutter build ios --no-codesign` and the simulator need none of it.
+
+// Your Team ID: Xcode > Settings > Accounts, or Membership on developer.apple.com
+DEVELOPMENT_TEAM = XXXXXXXXXX
+
+// The bundle id com.suyiiyii.liverecord is its author's: with another team, give it a suffix of your own
+// LR_TEST_ID = .yourname
