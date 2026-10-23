@@ -14,10 +14,6 @@ jobs:
     defaults:
       run:
         working-directory: server
-    env:  # server.py refuses to import without these; the tests never reach the model or the services
-      LIVE_DATA: unused
-      ASR_UPLOAD_BRIDGE_URL: unused
-      ASR_SERVICE_URL: unused
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, the job's only action: a runner downloads every action its job names, skipped or not
       - if: runner.environment == 'github-hosted'  # the tests encode Opus and AAC pieces; .54 has ffmpeg from apt

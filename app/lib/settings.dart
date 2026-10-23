@@ -10,7 +10,7 @@ import 'recorder.dart';
 const defaultSlices = {'foreground': 1, 'background': 20, 'screenOff': 60};
 
 class Settings {
-  String server = 'https://lr.example.com', token = '';
+  String server = '', token = '';  // your server: typed in 设置 or scanned from the web page's 连接手机 QR
   String device = 'phone';  // the phone's own name from the system settings, not set here (BLE audio goes up as the board's name)
   String source = 'mic';  // 'mic' or 'ble' (the BLE recorder)
   bool archive = true;

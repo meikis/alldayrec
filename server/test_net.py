@@ -231,8 +231,8 @@ def test_ask_tool_loop(monkeypatch, llm):
 def test_diarize(monkeypatch):
     """The file-mode ASR: the window encoded, a presigned upload by the bridge, a job polled until done; StepFun's risk
     control refusing it sends it to Doubao; another failure raises."""
-    monkeypatch.setattr(server, "BRIDGE", "http://bridge/presign")
-    monkeypatch.setattr(server, "DIARIZE", "http://asr")
+    monkeypatch.setenv("ASR_UPLOAD_BRIDGE_URL", "http://bridge/presign")
+    monkeypatch.setenv("ASR_SERVICE_URL", "http://asr")
     monkeypatch.setenv("ASR_UPLOAD_BRIDGE_TOKEN", "bt")
     monkeypatch.setenv("ASR_SERVICE_BASIC_AUTH", "u:p")
     seg = {"start_ms": 0, "end_ms": 500, "speaker": "SPEAKER_0", "text": "你好", "words": []}

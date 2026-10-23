@@ -1,9 +1,9 @@
 import vue from "@vitejs/plugin-vue";
 import { defineConfig, lazyPlugins } from "vite-plus";
 
-// dev reads and writes the live server (decided 09-30: still in development); the token comes from the shell:
-//   LIVE_RECORD_TOKEN=... pnpm dev
-const target = process.env.LIVE_SERVER ?? "https://lr.example.com";
+// dev proxies /api and /ws to a running server: a local one by default, or yours with its token from the shell:
+//   LIVE_SERVER=https://your.server LIVE_RECORD_TOKEN=... pnpm dev
+const target = process.env.LIVE_SERVER ?? "http://127.0.0.1:8770";
 const headers = { Authorization: `Bearer ${process.env.LIVE_RECORD_TOKEN ?? ""}` };
 
 export default defineConfig({

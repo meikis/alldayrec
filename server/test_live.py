@@ -146,12 +146,12 @@ def test_engine_squeeze(monkeypatch):
         return us, {}
     monkeypatch.setitem(sys.modules, "volc_asr", types.SimpleNamespace(transcribe=transcribe))
     got = []
-    segs = anyio.run(server.engine_segs, np.zeros(60 * SR, np.int16), [(10, 12), (30, 31.5)], got.append)  # kept: 8.5-13.5, 28.5-33
+    segs = anyio.run(server.engine_segs, np.zeros(60 * SR, np.int16), [(10, 12), (30, 31.5)], got.append, "volc")  # kept: 8.5-13.5, 28.5-33
     assert sent == [9.5]
     assert [(g["start_ms"], g["end_ms"]) for g in got[0]] == [(10100, 11900)]
     assert [(g["start_ms"], g["end_ms"], g["engine"]) for g in segs] == [(10100, 11900, "volc"), (28500, 29500, "volc")]
     monkeypatch.setattr(server, "SQUEEZE_KEEP_S", 0.0)  # off: the window whole, times as the engine gave them
-    assert anyio.run(server.engine_segs, np.zeros(60 * SR, np.int16), [(10, 12)])[1]["start_ms"] == 5000 and sent[-1] == 60
+    assert anyio.run(server.engine_segs, np.zeros(60 * SR, np.int16), [(10, 12)], None, "volc")[1]["start_ms"] == 5000 and sent[-1] == 60
 
 
 def test_engine_fallback(monkeypatch):
@@ -225,6 +225,41 @@ def test_engine_fallback(monkeypatch):
         await anyio.sleep(1.5)
         assert polled == [], "the file job's polling stopped"
     anyio.run(run)
+
+
+def test_main_settings(monkeypatch):
+    """ENGINE=qwen starts on a DashScope key and the LLM settings alone (server imported without the rest, as this
+    suite is); stepfun and stepfun-file, also as the fallback, need the upload bridge and the file-mode ASR service."""
+    import sys
+
+    import pytest
+
+    import infer
+    import server
+
+    class Started(Exception):
+        pass
+
+    def started(d=None):
+        raise Started
+    monkeypatch.setattr(infer, "check", started)  # past the settings
+    monkeypatch.setattr(sys, "argv", ["server.py"])
+    for k in ("ASR_UPLOAD_BRIDGE_URL", "ASR_UPLOAD_BRIDGE_TOKEN", "ASR_SERVICE_URL", "ASR_SERVICE_BASIC_AUTH", "STEPFUN_API_KEY",
+              "VOLC_ASR_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    for k in ("DASHSCOPE_API_KEY", "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL"):
+        monkeypatch.setenv(k, "x")
+    monkeypatch.setattr(server, "ENGINE", "qwen")
+    monkeypatch.setattr(server, "DRAFT_ENGINE", "qwen-stream")
+    monkeypatch.setattr(server, "ENGINE_FALLBACK", "")
+    with pytest.raises(Started):
+        server.main()
+    monkeypatch.setattr(server, "ENGINE_FALLBACK", "stepfun")
+    monkeypatch.setenv("STEPFUN_API_KEY", "x")
+    monkeypatch.setenv("ASR_SERVICE_URL", "http://asr")
+    with pytest.raises(SystemExit, match=r"not set: ASR_UPLOAD_BRIDGE_URL \(for stepfun\), ASR_UPLOAD_BRIDGE_TOKEN \(for stepfun\), "
+                                         r"ASR_SERVICE_BASIC_AUTH \(for stepfun\)"):
+        server.main()
 
 
 def test_speech_in():

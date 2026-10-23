@@ -61,11 +61,6 @@ from pipeline_state import PipelineState
 from tenant import T
 
 HERE = Path(__file__).resolve().parent
-def env(name: str) -> str:
-    v = os.environ.get(name)
-    if not v:
-        raise SystemExit(f"{name} is not set (see .env.example)")
-    return v
 
 
 SR = 16000
@@ -85,7 +80,7 @@ SLICE_FOREGROUND_S = int(os.environ.get("SLICE_FOREGROUND_S", "1"))   # the apps
 SLICE_BACKGROUND_S = int(os.environ.get("SLICE_BACKGROUND_S", "20"))  # ... in the background             (drafts ~8 s vs ~13 s at 5 s)
 SLICE_SCREEN_OFF_S = int(os.environ.get("SLICE_SCREEN_OFF_S", "60"))  # ... screen off (Android)
 LIVE_AUDIO_S = 120                         # a device whose audio came this recently is recording now: drafts and live analysis
-ENGINE = os.environ.get("ENGINE") or "volc"  # final layer's ASR provider (PROVIDERS): volc | qwen | stepfun | stepfun-sse | stepfun-file
+ENGINE = os.environ.get("ENGINE") or "qwen"  # final layer's ASR provider (PROVIDERS): volc | qwen | stepfun | stepfun-sse | stepfun-file
 DRAFT_ENGINE = os.environ.get("DRAFT_ENGINE") or ENGINE  # draft layer's (stepfun-sse: fast, no speakers, drafts are replaced anyway;
                                                          # qwen-stream: one streaming session while a page watches, stream_loop)
 ENGINE_FALLBACK = os.environ.get("ENGINE_FALLBACK", "")  # a window the provider fails on (402, 451, 5xx, timeout) goes here; empty: none
@@ -95,8 +90,6 @@ BUFFER_S = 900                             # audio kept for refinement; pieces a
 LIVE_EVERY_S = int(os.environ.get("LIVE_EVERY_S", "120"))  # new speech in the open conversation before the live analysis is redone
 TURN_GAP_S = float(os.environ.get("TURN_GAP_S", "1.0"))  # same speaker, closer than this: one final row; 0 keeps the engine's sentences as rows
 EDGE_S = 3.0                               # rows touching the window edges may be cut: left to the next pass
-BRIDGE = env("ASR_UPLOAD_BRIDGE_URL")             # returns {upload_url, download_url} for a file name
-DIARIZE = env("ASR_SERVICE_URL")                   # file-mode ASR service: POST /audio/transcriptions, GET /jobs/{id}
 TENANTS: list[tenant.Tenant] = []  # every tenant of this process (tenant.load at the start); the first one's data has the
                                    # firmware, the APK and the StepFun balance, shared by all
 
@@ -292,15 +285,17 @@ PROVIDERS = {"volc": volc, "qwen": qwen, "stepfun": stepfun, "stepfun-sse": step
 
 
 async def upload(data: bytes, content_type: str) -> str:
-    """A file up through the upload bridge (a presigned PUT); its download URL, for a provider to fetch."""
-    up = json.loads(await _http(BRIDGE, json.dumps({"filename": "live." + content_type.split("/")[1], "content_type": content_type}).encode(),
+    """A file up through the upload bridge (ASR_UPLOAD_BRIDGE_URL: POST {filename, content_type} -> {upload_url,
+    download_url}, then a presigned PUT); its download URL, for a provider to fetch."""
+    up = json.loads(await _http(os.environ["ASR_UPLOAD_BRIDGE_URL"], json.dumps({"filename": "live." + content_type.split("/")[1], "content_type": content_type}).encode(),
                                 {"Authorization": f"Bearer {os.environ['ASR_UPLOAD_BRIDGE_TOKEN']}", "Content-Type": "application/json"}))
     await _http(up["upload_url"], data, {"Content-Type": content_type}, "PUT")
     return up["download_url"]
 
 
 async def diarize(x: np.ndarray, model: str = FILE_MODELS[0]) -> list[dict]:
-    """File-mode ASR with speakers and word times on a window of audio (via the file-mode ASR service).
+    """File-mode ASR with speakers and word times on a window of audio (via the file-mode ASR service, ASR_SERVICE_URL:
+    POST /audio/transcriptions, GET /jobs/{id}; stepfun and stepfun-file only, main() checks its settings).
     StepFun's risk control refuses some content outright; that window is then sent to Doubao and every
     segment carries `engine` so the rows say which engine wrote them."""
     t_enc = time.perf_counter()
@@ -310,11 +305,12 @@ async def diarize(x: np.ndarray, model: str = FILE_MODELS[0]) -> list[dict]:
     t_up = time.perf_counter()
     url = await upload(ogg, "audio/ogg")
     auth = {"Authorization": "Basic " + base64.b64encode(os.environ["ASR_SERVICE_BASIC_AUTH"].encode()).decode()}
-    job = json.loads(await _http(f"{DIARIZE}/audio/transcriptions", json.dumps({"audio_url": url, "model": model}).encode(),
+    service = os.environ["ASR_SERVICE_URL"]
+    job = json.loads(await _http(f"{service}/audio/transcriptions", json.dumps({"audio_url": url, "model": model}).encode(),
                                  {**auth, "Content-Type": "application/json"}))["job_id"]
     t_job = time.perf_counter()
     for _ in range(120):
-        r = json.loads(await _http(f"{DIARIZE}/jobs/{job}", headers=auth))
+        r = json.loads(await _http(f"{service}/jobs/{job}", headers=auth))
         if r["status"] == "COMPLETED":
             log.info("diarize %s: %.0f s audio, encode %.1f s, upload %.1f s, job %.1f s", model, len(x) / SR,
                      t_up - t_enc, t_job - t_up, time.perf_counter() - t_job)
@@ -2287,7 +2283,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8770")))
     args = ap.parse_args()
-    missing = [k for k in ("ASR_UPLOAD_BRIDGE_TOKEN", "ASR_SERVICE_BASIC_AUTH") if not os.environ.get(k)]
+    missing = []
     engines = {e for e in (ENGINE, DRAFT_ENGINE, ENGINE_FALLBACK) if e}
     if engines - PROVIDERS.keys() - {"qwen-stream"} or "qwen-stream" in (ENGINE, ENGINE_FALLBACK):
         raise SystemExit(f"ENGINE, DRAFT_ENGINE, ENGINE_FALLBACK must be one of {', '.join(PROVIDERS)} (DRAFT_ENGINE also qwen-stream), "
@@ -2298,6 +2294,9 @@ def main():
         missing.append("STEPFUN_API_KEY")
     if engines & {"qwen", "qwen-stream"} and not os.environ.get("DASHSCOPE_API_KEY"):
         missing.append("DASHSCOPE_API_KEY")
+    if file := engines & {"stepfun", "stepfun-file"}:  # diarize(): your own upload bridge and file-mode ASR service
+        missing += [f"{k} (for {', '.join(sorted(file))})" for k in
+                    ("ASR_UPLOAD_BRIDGE_URL", "ASR_UPLOAD_BRIDGE_TOKEN", "ASR_SERVICE_URL", "ASR_SERVICE_BASIC_AUTH") if not os.environ.get(k)]
     missing += [k for k in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL") if not os.environ.get(k)]
     if missing:
         raise SystemExit(f"not set: {', '.join(missing)} (see .env.example)")
