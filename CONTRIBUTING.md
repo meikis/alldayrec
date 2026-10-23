@@ -8,7 +8,7 @@ Development section.
 
 The phone app uploads Opus pieces; the server keeps them on disk as a queue and feeds them in time order, detects speech locally (FireRedVAD), and transcribes in two layers. The final layer always runs: pieces of up to 5 min, cut in pauses, go to the ASR engine once each; it decides locally who is the owner and keeps conversation-local speaker ids (ReDimNet2 voiceprints), closes a conversation after a silence and summarizes it. While a page shows today, the draft layer also sends each stretch at its pause, so text shows within seconds; drafts are kept (table `drafts`) and the page shows them only where final rows do not cover the time yet.
 
-Only speech detection and speaker identity run on this machine, both on onnxruntime (`server/infer.py`, no torch; the model files in `MODELS_DIR`, default `/opt/lr-models`, pinned by sha256: `uv run --group export python export_onnx.py` makes them); sentence splitting, diarization and transcription come from the cloud ASR engine `ENGINE` names (default `qwen`: one Alibaba Bailian / DashScope key).
+Only speech detection and speaker identity run on this machine, both on onnxruntime (`server/infer.py`, no torch; the server downloads its model files into `MODELS_DIR` at start and accepts only the ones with the sha256 pinned there; `export_onnx.py` is how the maintainer makes a new release file); sentence splitting, diarization and transcription come from the cloud ASR engine `ENGINE` names (default `qwen`: one Alibaba Bailian / DashScope key).
 
 Page: http://127.0.0.1:8770/ . Data, per tenant: `<data>/live.db` (SQLite: sentences, drafts, conversations, summaries, voices, the upload queue, the recorders' event logs and status reports — page `/device/<name>`; schema in `server/db.py`), `<date>.passes.jsonl` (raw engine output per pass).
 
@@ -81,7 +81,7 @@ CI runs on GitHub-hosted runners (`runs-on: ubuntu-24.04`). The workflows instal
 在持有原 keystore 的机器上，可以通过 stdin 设置文件 Secret，避免把内容打印或放进命令参数：
 
 ```bash
-base64 < ~/.android/live-record-debug.keystore | gh secret set ANDROID_KEYSTORE_BASE64 --repo suyiiyii/live-record
+base64 < ~/.android/live-record-debug.keystore | gh secret set ANDROID_KEYSTORE_BASE64 --repo suyiiyii/alldayrec
 ```
 
 密码、alias 和 relay key 使用 GitHub 的 Secret 输入框或 `gh secret set` 的交互输入，不写入 shell 历史。证书指纹应从原 keystore 或已安装正式 APK 的签名证书核实，不从新生成的测试包复制。
