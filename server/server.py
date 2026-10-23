@@ -22,6 +22,11 @@ import subprocess
 import time
 from pathlib import Path
 
+# numpy's and scipy's OpenBLAS start a thread per CPU when they load (31 on the test box): audio.health() on every upload
+# woke them to spin in sched_yield, 63 % of the server's CPU over 74.7 h; with 1 its 60 pieces took 0.15 s sys, not
+# ~150 s, and less wall time. Set before the first import that loads numpy (all below); .env still overrides it.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import anyio
 import anyio.to_thread
 import numpy as np

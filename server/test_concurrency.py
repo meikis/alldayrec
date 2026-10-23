@@ -2,6 +2,10 @@
 limiter (threads.py), tasks in TaskGroups, timeouts with fail_after / move_on_after, queues as memory object streams. No
 asyncio primitives, no threading.Thread, no concurrent.futures pools, except where ALLOWED says why."""
 import io
+import json
+import os
+import subprocess
+import sys
 import tokenize
 from pathlib import Path
 
@@ -48,3 +52,12 @@ def test_uses():
     src = ('import asyncio  # x\nx = "asyncio.run"  # asyncio in a comment\nthreading.Thread(target=f)\nthreading.Lock()\n'
            'loop.run_in_executor(None, f)\nwith cf.ThreadPoolExecutor(2) as ex:\n')
     assert [n for n, _ in uses(src)] == [1, 3, 5, 6]
+
+
+def test_one_blas_thread():
+    """numpy's and scipy's OpenBLAS pools in the server process: 1 thread each unless the env says otherwise (server.py)."""
+    env = {k: v for k, v in os.environ.items() if k != "OPENBLAS_NUM_THREADS"}
+    out = subprocess.run([sys.executable, "-c", "import server, scipy.linalg, threadpoolctl, json; print(json.dumps("
+                          "[i['num_threads'] for i in threadpoolctl.threadpool_info() if i['internal_api'] == 'openblas']))"],
+                         cwd=HERE, env=env, capture_output=True, text=True, check=True).stdout
+    assert json.loads(out) and set(json.loads(out)) == {1}
