@@ -110,7 +110,7 @@ def build():
             shutil.rmtree(output)
         output.mkdir(parents=True, exist_ok=True)
         kind = "original-signed" if formal else "TEST-ONLY"
-        stem = f"live-record-android-v{version}+{code}-{kind}-{commit[:12]}"
+        stem = f"alldayrec-android-v{version}+{code}-{kind}-{commit[:12]}"
         packaged = output / f"{stem}.apk"
         shutil.copyfile(apk, packaged)
         flutter = json.loads(capture(["flutter", "--version", "--machine"], env=env))
@@ -131,7 +131,7 @@ def build():
         metadata_path = output / f"{stem}.json"
         metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
         notes = output / "release-notes.txt"
-        notes.write_text(f"APK {version}+{code}\nSource commit: {commit}\nModel: android-universal\nSigning: {kind}\nCertificate SHA256: {cert_sha256}\n\nReview this draft before publication. No deployment was performed.\n")
+        notes.write_text(f"APK {version}+{code}\nSource commit: {commit}\nModel: android-universal\nSigning: {kind}\nCertificate SHA256: {cert_sha256}\n\nBuilt and signed by GitHub Actions run {os.environ.get('GITHUB_RUN_ID', '')}.\n")
         checksums = []
         for path in (packaged, metadata_path, notes):
             with path.open("rb") as stream:
