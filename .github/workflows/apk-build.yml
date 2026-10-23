@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}"]', vars.LR_RUNNER)) }}
+    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}","lr-build"]', vars.LR_RUNNER)) }}
     timeout-minutes: 90
     outputs:
       artifact_id: ${{ steps.artifact.outputs.artifact-id }}
@@ -86,7 +86,7 @@ jobs:
   prune:
     needs: build
     if: github.ref_type == 'branch'
-    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}"]', vars.LR_RUNNER)) }}
+    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}","lr-build"]', vars.LR_RUNNER)) }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -106,7 +106,7 @@ jobs:
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/apk-v')
     needs: build
-    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}"]', vars.LR_RUNNER)) }}
+    runs-on: ${{ vars.LR_RUNNER == '' && 'ubuntu-24.04' || fromJSON(format('["self-hosted","{0}","lr-build"]', vars.LR_RUNNER)) }}
     timeout-minutes: 10
     permissions:
       contents: write

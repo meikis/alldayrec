@@ -84,7 +84,7 @@ git push origin firmware-20261014
 
 ### Runner 与工具链
 
-沿用仓库变量 `LR_RUNNER`：`lr-54` 选择已有 `ci-runner`，空值选择 GitHub-hosted Ubuntu。自建 runner 离线时任务会排队，不会自动切换到云端；切换前确认目标机器有完整工具链。self-hosted 执行不消耗 GitHub-hosted 构建分钟，但上传 Artifacts 仍占 GitHub 的产物存储额度。
+沿用仓库变量 `LR_RUNNER`：`lr-54` 选择带该标签的自建 runner，空值选择 GitHub-hosted Ubuntu。PR 检查可以落在任何一台带 `lr-54` 标签的 runner 上；APK 和固件归档构建还要求 `lr-build` 标签（只有装了 Nordic 和 ESP-IDF 工具链、磁盘够大的那台有），小 runner 只跑 PR 检查。自建 runner 离线时任务会排队，不会自动切换到云端；切换前确认目标机器有完整工具链。self-hosted 执行不消耗 GitHub-hosted 构建分钟，但上传 Artifacts 仍占 GitHub 的产物存储额度。
 
 工具链固定为 Flutter 3.47.5（Dart 3.13.4）、Android API 37.0、Nordic NCS v2.7.0 和 ESP-IDF v5.5.5。工具及依赖缓存在 runner 用户可写目录，不需要给 CI 用户 sudo 或 Docker 权限。限制构建并发和 Gradle 内存；runner 当前 3 GiB 内存限制须以实际构建结果为准，不能沿用项目本地 Gradle 的 8 GiB 堆设置。
 
