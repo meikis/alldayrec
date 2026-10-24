@@ -9,7 +9,7 @@ WORKDIR /src/web
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY web/ ./
-RUN pnpm build  # -> /src/server/static/dist
+RUN pnpm build  # -> /src/server/alldayrec/static/dist
 
 FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
@@ -17,13 +17,15 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.24 /uv /bin/uv
 ENV UV_PYTHON_DOWNLOADS=never UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy PATH=/app/server/.venv/bin:$PATH
 WORKDIR /app/server
 COPY server/pyproject.toml server/uv.lock ./
-RUN uv sync --locked --no-cache  # the server's dependencies; export_onnx.py's torch only on demand (uv run --group export)
+# the server's dependencies with the [local] extra (ENGINE=local), not the project: it runs from here (python -m alldayrec);
+# export_onnx.py's torch only on demand (uv run --group export)
+RUN uv sync --locked --no-cache --no-install-project --extra local
 COPY server/ ./
-COPY --from=web /src/server/static/dist static/dist
+COPY --from=web /src/server/alldayrec/static/dist alldayrec/static/dist
 ARG COMMIT=docker
-# COMMIT: the version the pages show (no git here); tenants.json (tenant.FILE, beside server/) lives in the data volume
-RUN echo "$COMMIT" > COMMIT && ln -s /data/tenants.json /app/tenants.json
-ENV HOST=0.0.0.0 PORT=8770 MODELS_DIR=/data/models
+RUN echo "$COMMIT" > alldayrec/COMMIT  # the version the pages show (no git here)
+# DATA_DIR: tenants.json (a first start makes one), the model files, the first tenant's store, all in the data volume
+ENV HOST=0.0.0.0 PORT=8770 DATA_DIR=/data MODELS_DIR=/data/models
 EXPOSE 8770
 VOLUME /data
-CMD ["python", "server.py"]
+CMD ["python", "-m", "alldayrec"]
