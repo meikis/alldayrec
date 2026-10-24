@@ -182,7 +182,9 @@ async def pipeline(device: str):
                     rec["via_live"] = True  # its agent writes the final summary
                     attached = True
             if hi:
-                db.put_kv(f"finalized_to:{device}", iso(hi), t)
+                # to the µs, the sample it is (Segmenter.sample_at): to the ms, a restart took the last samples
+                # before it as not final yet (10-24: 11 samples alone to the engine, again and again)
+                db.put_kv(f"finalized_to:{device}", hi.isoformat(timespec="microseconds"), t)
             db.put_kv(f"open_conversation:{device}", grouper.open, t)
             if hi:
                 st.drafts = [r for r in st.drafts if r["start"] >= iso(hi)]  # covered by final rows now
@@ -315,9 +317,11 @@ async def pipeline(device: str):
                 return True
             return False
         x = seg.audio[a0 - seg.audio_base:b0 - seg.audio_base]
-        at = lambda s: seg.time_at(a0 + int(s * SR))  # the piece may span a session boundary, where the clock jumps
+        at = lambda s: seg.time_at(a0 + round(s * SR))  # the piece may span a session boundary, where the clock jumps
         hi = at(len(x) / SR)
-        if not any(rel(u[0]) < cut for u in known) and not seg.speaking():  # no speech: nothing to send, the clock still advances
+        # no speech: nothing to send, the clock still advances. Nor in less than a VAD frame (25 ms), whatever the VAD is
+        # in at the newest audio: a store finalized to the ms before this fix left the last samples of a recording here
+        if len(x) < SR // 40 or (not any(rel(u[0]) < cut for u in known) and not seg.speaking()):
             await commit(grouper.advance(hi), [], iso(base), hi)  # no rows: pages still drop their drafts of this time
             return True
         t_run = time.perf_counter()
