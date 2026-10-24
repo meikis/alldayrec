@@ -112,6 +112,12 @@ Parameters: `name?` is optional; the parentheses give where it goes (query, path
 |---|---|---|
 | `GET` | The ASR and LLM calls since `since`, by kind and engine (db.calls), and the StepFun balance (db.balance). | `since` (query, string) |
 
+### `/api/perf`
+
+| Method | Description | Parameters |
+|---|---|---|
+| `GET` | A day's (YYYY-MM-DD) performance rows in this tenant's store, oldest first (perf.day): {stalls, samples, requests, pieces}; the event loop's stalls and the process's minutes are in the first tenant's only. | `day` (query, string) |
+
 ### `/api/upgrades`
 
 | Method | Description | Parameters |
