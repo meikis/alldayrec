@@ -119,8 +119,16 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
   void _open(String title, Widget body) =>
       Navigator.push(context, MaterialPageRoute(builder: (_) => Scaffold(appBar: AppBar(title: Text(title)), body: body)));
 
-  /// A web page (实时字幕: /live) in a WebView of its own, there while open.
-  void _openWeb(String title, String path) => _open(title, WebViewWidget(controller: _web()..loadRequest(_url(path))));
+  /// A web page (实时字幕: /live, 设备状态与更多: /me) in a WebView of its own, there while open;
+  /// back (the key or the app bar's arrow) goes through its history first, as in the tabs' WebViews.
+  void _openWeb(String title, String path) {
+    final c = _web()..loadRequest(_url(path));
+    _open(title, PopScope(canPop: false, onPopInvokedWithResult: (didPop, _) async {
+      if (didPop) return;
+      if (await c.canGoBack()) return c.goBack();
+      if (mounted) Navigator.pop(context);
+    }, child: WebViewWidget(controller: c)));
+  }
 
   Future<void> _saved() async {
     await settings!.save();
@@ -226,6 +234,8 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
       const Divider(),
       entry(Icons.bluetooth_outlined, '录音设备', _openRecorder),
       entry(Icons.subtitles_outlined, '实时字幕', s.token.isEmpty ? _openSettings : () => _openWeb('实时字幕', '/live')),
+      entry(Icons.devices_outlined, '设备状态与更多', s.token.isEmpty ? _openSettings : () => _openWeb('设备状态与更多', '/me'),
+          '电量、存储卡、处理进度、接入 AI'),
       entry(Icons.cloud_upload_outlined, '上传', () => _open('上传', UploadPage(settings: s))),
       entry(Icons.settings_outlined, '设置', _openSettings),
       entry(Icons.info_outline, '关于', () => showAboutDialog(context: context, applicationName: 'alldayrec', applicationVersion: version),
