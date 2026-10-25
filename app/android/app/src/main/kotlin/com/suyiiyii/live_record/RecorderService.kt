@@ -37,18 +37,20 @@ class RecorderService : Service() {
         @Volatile var slicer: Slicer? = null
         @Volatile var uploader: Uploader? = null
         @Volatile var link: BleLink? = null  // the BLE recorder, when it is the source instead of the microphone
+        @Volatile var bean: BeanLink? = null  // or a Feishu recorder bean (Bean.kt)
         @Volatile var interruptedAt: Long = 0
         @Volatile var foregroundApp = true
         fun status(dir: File): Map<String, Any?> {
             val q = Uploader.queue(dir)
+            val l = link; val b = bean
             return mapOf(
                 "running" to (slicer != null), "uploading" to (uploader != null), "files" to slicer?.files, "slice" to slicer?.sliceS(),
                 "error" to slicer?.error, "sent" to uploader?.sent, "note" to uploader?.note,
                 "pending" to q.size, "pendingBytes" to q.sumOf { it.length() }, "oldest" to q.firstOrNull()?.let(Uploader::startMs),
-                "interruptedAt" to if (interruptedAt > 0) interruptedAt else null, "link" to link?.state,
-                "connected" to (link?.state?.get("code") == "connected"), "tag" to slicer?.tag, "hw" to link?.hw,
-                "dfu" to Dfu.state, "dfuBusy" to Dfu.busy, "source" to (if (slicer == null) null else if (link != null) "ble" else "mic"), "usbNote" to link?.usbNote, "lastSync" to link?.syncNote,
-                "syncDone" to link?.syncDoneKb, "syncTotal" to link?.syncTotalKb, "syncLive" to link?.syncLiveKb, "pausedUntil" to link?.pausedUntil,
+                "interruptedAt" to if (interruptedAt > 0) interruptedAt else null, "link" to (l?.state ?: b?.state),
+                "connected" to (l?.state?.get("code") == "connected" || b?.connected == true), "tag" to slicer?.tag, "hw" to (l?.hw ?: b?.hw),
+                "dfu" to Dfu.state, "dfuBusy" to Dfu.busy, "source" to (if (slicer == null) null else if (l != null || b != null) "ble" else "mic"), "usbNote" to l?.usbNote, "lastSync" to l?.syncNote,
+                "syncDone" to (l?.syncDoneKb ?: b?.syncDoneKb), "syncTotal" to (l?.syncTotalKb ?: b?.syncTotalKb), "syncLive" to l?.syncLiveKb, "pausedUntil" to l?.pausedUntil,
                 "listen" to link?.listening?.lines)
         }
 
@@ -102,6 +104,8 @@ class RecorderService : Service() {
                 "forgetOthers" -> s(R.string.link_forget_others)
                 "joining" -> s(R.string.link_joining)
                 "connected" -> s(R.string.link_connected)
+                "encrypting" -> s(R.string.link_encrypting)
+                "beanIdle" -> s(R.string.link_bean_idle)
                 "linkError" -> s(R.string.link_error, v["detail"])
                 "rejected" -> s(R.string.note_rejected)
                 "uploadFailed" -> s(R.string.note_upload_failed, v["detail"])
@@ -121,7 +125,9 @@ class RecorderService : Service() {
             val title = when {
                 s["source"] != "ble" -> t(R.string.notice_recording)
                 // LIVE goes on while the backlog is read; before that only the file being recorded is waited for
-                total > 0 -> if (s["connected"] == true)
+                total > 0 -> if ((s["link"] as Map<*, *>?)?.get("code") == "beanIdle")  // a bean's backlog: it is not recording
+                    t(R.string.notice_bean_catching_up, (s["syncDone"] as Long? ?: 0L) / 1024.0, total / 1024.0)
+                else if (s["connected"] == true)
                     t(R.string.notice_live_catching_up, (s["syncDone"] as Long? ?: 0L) / 1024.0, total / 1024.0)
                 else t(R.string.notice_fetching_current, (s["syncLive"] as Long? ?: 0L) / 1024.0)
                 else -> said(s["link"] as Map<*, *>?, str) ?: t(R.string.notice_starting)
@@ -171,7 +177,7 @@ class RecorderService : Service() {
             return START_STICKY
         }
         if (intent?.action == "upload") {  // from the UI: pieces left (and maybe an end) after a kill or a lost network
-            if (slicer == null) uploadOnly(prefs, dir, prefs.getLong("endAt", 0L).takeIf { it > 0 })
+            if (slicer == null) uploadOnly(prefs, dir)
             return START_STICKY
         }
         // a start from the UI carries a fresh nonce; after a kill the system restarts us with no intent or
@@ -192,7 +198,7 @@ class RecorderService : Service() {
                 putBoolean("archive", intent.getBooleanExtra("archive", true))
             }.apply()
         } else if (!prefs.getBoolean("active", false)) {  // restarted after a kill while only uploading, or nothing to do
-            uploadOnly(prefs, dir, prefs.getLong("endAt", 0L).takeIf { it > 0 })
+            uploadOnly(prefs, dir)
             return START_STICKY
         }
         prefs.edit().putBoolean("active", true).putInt("pid", Process.myPid()).apply()
@@ -206,9 +212,11 @@ class RecorderService : Service() {
                 it.screenOff = !(getSystemService(POWER_SERVICE) as PowerManager).isInteractive
                 it.start()
             }
-            if (ble) link = BleLink(this, prefs, dir, File(getExternalFilesDir(null), "undated"), { slicer?.sliceS() ?: 20 },
+            if (ble && Bean.isBean(prefs.getString("bleName", null))) bean = BeanLink(this, prefs, dir, { slicer?.sliceS() ?: 20 },
                 { n -> slicer?.let { it.files += n } }, { slicer?.tag = it }, { name, hw -> uploader?.report(name, hw) }).also { it.start() }
-            prefs.edit().remove("endAt").remove("endDevice").apply()  // a new recording carries on the conversation: no end for the old stop
+            else if (ble) link = BleLink(this, prefs, dir, File(getExternalFilesDir(null), "undated"), { slicer?.sliceS() ?: 20 },
+                { n -> slicer?.let { it.files += n } }, { slicer?.tag = it }, { name, hw -> uploader?.report(name, hw) }).also { it.start() }
+            prefs.edit().remove("end:${prefs.getString("endDevice", "")}").remove("endDevice").apply()  // a new recording carries on the conversation: no end for the old stop
             ensureUploader(prefs, dir)
             refresh()  // recording now, not the upload foreground() saw a moment ago
         }
@@ -222,28 +230,28 @@ class RecorderService : Service() {
             .also { uploader = it; it.start() }
     }
 
-    /** The microphone goes now; the queue keeps uploading, the end signal goes after its last piece. */
+    /** The microphone goes now; the queue keeps uploading, the end signal goes after its last piece (Uploader.ends). */
     private fun stopRecording(prefs: android.content.SharedPreferences, dir: File) {
-        val at = System.currentTimeMillis()
-        prefs.edit().putBoolean("active", false).putLong("endAt", at).putString("endDevice", slicer?.tag).apply()  // kept: a kill before the queue empties still ends it
+        val tag = slicer?.tag ?: ""  // the pieces' device: "" for the microphone's
+        prefs.edit().putBoolean("active", false).putLong("end:$tag", System.currentTimeMillis()).putString("endDevice", tag).apply()
         link?.stop(); link = null
+        bean?.stop(); bean = null
         slicer?.stop(); slicer = null
-        uploadOnly(prefs, dir, at)
+        uploadOnly(prefs, dir)
     }
 
-    /** Stays up while pieces are left and nothing records; then sends `endAt` (if any) and stops. */
-    private fun uploadOnly(prefs: android.content.SharedPreferences, dir: File, endAt: Long?) {
-        if (Uploader.queue(dir).isEmpty() && endAt == null) { background(); stopSelf(); return }
+    /** Stays up while pieces or an end (Uploader.ends) are left and nothing records; then stops. */
+    private fun uploadOnly(prefs: android.content.SharedPreferences, dir: File) {
+        val left = { Uploader.queue(dir).isNotEmpty() || prefs.all.keys.any { it.startsWith("end:") } }
+        if (!left()) { background(); stopSelf(); return }
         foreground(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         val u = ensureUploader(prefs, dir)
         if (draining) return
         draining = true
         Thread {
-            while (slicer == null && Uploader.queue(dir).isNotEmpty()) Thread.sleep(2000)
+            while (slicer == null && left()) Thread.sleep(2000)
             draining = false
             if (slicer != null) return@Thread  // recording again: the service carries on as before
-            endAt?.let { u.end(it, prefs.getString("endDevice", null)) }  // the server may close the conversation now
-            prefs.edit().remove("endAt").remove("endDevice").apply()
             u.running = false; uploader = null
             background(); stopSelf()
         }.start()
@@ -282,6 +290,7 @@ class RecorderService : Service() {
         background()
         unregisterReceiver(screen)
         link?.stop(); link = null
+        bean?.stop(); bean = null
         slicer?.stop(); slicer = null
         uploader?.running = false; uploader = null
         super.onDestroy()
@@ -333,18 +342,35 @@ class Uploader(private val prefs: android.content.SharedPreferences, private val
     /** Where the server's finalization waits for a recorder's backlog (BleLink.holdAhead), null: it does not. */
     private fun hold(device: String) = prefs.getLong("hold:$device", -1).takeIf { device.isNotEmpty() && it >= 0 }
 
+    /** Recorders whose last upload went with a hold: the server waits until an upload comes without it. At start, those
+     *  with one in the prefs (the app may have gone between the upload and the let go). */
+    private val holding = prefs.all?.keys.orEmpty().filter { it.startsWith("hold:") }.map { it.removePrefix("hold:") }.toMutableSet()
+
+    /** A hold let go with none of that recorder's pieces left to say so (a recorder that stopped, its backlog all up):
+     *  told on its own (10-25: the bean's hold stayed on the server until unbind), after the upload that carried it. */
+    private fun letGo(q: List<File>) {
+        for (d in holding.filter { d -> hold(d) == null && q.none { deviceOf(it) == d } }) try {
+            val code = post("$server/api/hold/release?device=${enc(d)}", ByteArray(0), null)
+            Log.i("live-record", "hold of $d let go: HTTP $code")
+            if (code == 200) holding -= d
+        } catch (e: Exception) { Log.w("live-record", "hold of $d not let go: ${e.message}"); sleep(5000) }
+    }
 
     override fun run() {
         while (running) {
             val q = files()
+            letGo(q)
+            ends(q)
             if (q.isEmpty()) { sleep(200); continue }
             val b = batch(q)
             try {
                 // the hold with every upload while there is one: the server lets go when an upload comes without it
+                val held = hold(deviceOf(b[0]))
                 val code = post("$server/api/chunks?device=${enc(deviceOf(b[0]).ifEmpty { device })}&start=${startMs(b[0])}" +
-                                (hold(deviceOf(b[0]))?.let { "&hold=$it" } ?: ""),
+                                (held?.let { "&hold=$it" } ?: ""),
                                 b.fold(ByteArray(0)) { acc, f -> acc + f.readBytes() }, "audio/ogg")
                 Log.i("live-record", "upload ${b.size} pieces of ${deviceOf(b[0]).ifEmpty { device }} from ${startMs(b[0])}: HTTP $code")
+                if (code == 200 || code == 400) { if (held != null) holding += deviceOf(b[0]) else holding -= deviceOf(b[0]) }  // the server took the hold either way
                 when {
                     code == 200 -> {
                         b.forEach(::keep); sent += b.size; note = null
@@ -361,6 +387,9 @@ class Uploader(private val prefs: android.content.SharedPreferences, private val
                         DeviceLog.app(deviceOf(b[0]).ifEmpty { device }, "upload_rejected", "服务端无法解码 ${b.size} 块" +
                             "（起于 ${SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(startMs(b[0])))}，${bytes / 1024} KB），已丢弃",
                             "error", mapOf("start" to startMs(b[0]), "pieces" to b.size, "bytes" to bytes))
+                        // a bean's file with these in it stays on the bean (BeanSync.confirmed): said before they leave the queue
+                        val k = "refused:${deviceOf(b[0])}"
+                        prefs.edit().putStringSet(k, prefs.getStringSet(k, null).orEmpty() + b.map { "${startMs(it)}" }).commit()
                         b.forEach { it.delete() }; note = say("rejected")
                     }
                     else -> throw Exception("HTTP $code")
@@ -391,9 +420,32 @@ class Uploader(private val prefs: android.content.SharedPreferences, private val
                      "upload_fails" to fails, "upload_ok_s" to okAt.takeIf { it > 0 }?.let { (now - it) / 1000 })
     }
 
-    fun end(atMs: Long, bleName: String? = null) {
-        try { post("$server/api/chunks/end?device=${enc(bleName ?: device)}&t=$atMs", ByteArray(0), null) } catch (e: Exception) { note = say("endFailed", "detail" to e.message) }
+    /** Tells the server device `d` stopped at `atMs`; true: it took it. */
+    private fun end(atMs: Long, d: String): Boolean {
+        val code = try { post("$server/api/chunks/end?device=${enc(d)}&t=$atMs", ByteArray(0), null) }
+                   catch (e: Exception) { Log.w("live-record", "end of $d not sent: ${e.message}"); note = say("endFailed", "detail" to e.message); return false }
+        Log.i("live-record", "end of $d at $atMs: HTTP $code")
+        if (code != 200) note = say("endFailed", "detail" to "HTTP $code")
+        return code == 200
     }
+
+    /** A recording's end (`end:<device of its pieces>`: a stop on the phone, or BeanLink's bean that stopped): told once
+     *  none of its pieces is left, again until the server takes it (10-25: a bean's end never reached the server; it had
+     *  one request, no retry, no log). */
+    private fun ends(q: List<File>) {
+        for (k in prefs.all?.keys.orEmpty().filter { it.startsWith("end:") }) {
+            val d = k.removePrefix("end:")
+            val at = prefs.getLong(k, 0)
+            val left = q.filter { deviceOf(it) == d }.map(::startMs)
+            when {
+                left.any { it >= at } -> { endDue -= k; prefs.edit().remove(k).apply() }  // recording again: it carries on the conversation, no end
+                left.isNotEmpty() || System.currentTimeMillis() < (endDue[k] ?: 0) -> {}
+                end(at, d.ifEmpty { device }) -> { endDue -= k; if (prefs.getLong(k, 0) == at) prefs.edit().remove(k).apply() }
+                else -> endDue[k] = System.currentTimeMillis() + 5000  // the pieces meanwhile go on
+            }
+        }
+    }
+    private val endDue = mutableMapOf<String, Long>()  // an end that failed: not tried again before (this thread only)
 
     private fun keep(f: File) {
         if (archive == null) { f.delete(); return }

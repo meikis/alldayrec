@@ -108,6 +108,10 @@ String durationText(AppLocalizations l, num s) {
             : (pausedMin > 0 ? l.statePausedAwaySince : l.stateAwaySince)(
                 TimeOfDay.fromDateTime(DateTime.fromMillisecondsSinceEpoch(lastSeen)).format(context)));
   }
+  if (link?['code'] == 'beanIdle') {  // a bean that is connected and not recording: its button starts it, not the app
+    return (icon: Icons.bluetooth_connected_rounded, color: cs.outline, battery: glyph(), number: pct, numberColor: low, spin: false,
+        line: l.linkBeanIdle);
+  }
   return (icon: Icons.mic_rounded, color: recordingRed, battery: glyph(), number: pct, numberColor: low, spin: false, line: l.recordingNow);
 }
 
@@ -201,6 +205,7 @@ String nativeText(BuildContext context, Object? v) {
     'forgetOthers' => l.linkForgetOthers,
     'joining' => l.linkJoining,
     'connected' => l.linkConnected,
+    'beanIdle' => l.linkBeanIdle,
     'linkError' => l.linkError(detail),
     'synced' => l.lastSynced(time('at'), v['kb']),
     'usbSwitchingOn' => l.usbSwitchingOn,

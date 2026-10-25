@@ -910,6 +910,35 @@ class AppLocalizationsZh extends AppLocalizations {
   String get linkConnected => '已连接 · 实时上传';
 
   @override
+  String get linkBeanIdle => '录音豆已连上 · 没在录音';
+
+  @override
+  String get beanFeishuBound => '已绑定飞书';
+
+  @override
+  String get beanFeishuNotBound => '未绑定飞书';
+
+  @override
+  String get beanRecorderHelp =>
+      '录音豆按下按键才录音，手机不能替它开始或停止。手机在附近时边录边传；不在时录音留在豆子里，回来后自动补传。服务端收全的录音会从豆子上删掉。';
+
+  @override
+  String get beanFetching => '正在取回录音豆里的录音';
+
+  @override
+  String get beanSyncHelp => '录音豆没在录音时，取回它录下而这台手机还没有的部分';
+
+  @override
+  String get beanUnbindSub => '这台手机不再连它，改用手机麦克风；录音豆本身什么也不改';
+
+  @override
+  String get beanUnbindAfterSync => '正在取回录音豆里的录音，取完再解除';
+
+  @override
+  String get beanUnbindBody =>
+      '只是这台手机忘掉这颗录音豆、改用手机麦克风。录音豆本身什么也不改：按键照样录音，飞书照常能连。还没取回的录音留在豆子里。';
+
+  @override
   String linkError(Object detail) {
     return '录音设备出错：$detail';
   }
