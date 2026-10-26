@@ -271,6 +271,10 @@ DECODE_IDLE_S = 300  # no PCM progress, not a limit on the recording's duration
 DECODE_ATTEMPTS = 3
 
 
+class DecoderTerminated(RuntimeError):
+    """The decoder subprocess exited because of a signal."""
+
+
 def decode_process(args, output):
     """Own the PCM writes so storage failures have a real OSError errno.
     Supervise progress instead of imposing a total runtime on long recordings.
@@ -296,7 +300,7 @@ def decode_process(args, output):
                     raise subprocess.TimeoutExpired(args, DECODE_IDLE_S) from None
                 raise
         if code < 0:
-            raise RuntimeError(f"audio decoder terminated by signal {-code}")
+            raise DecoderTerminated(f"audio decoder terminated by signal {-code}")
         return code
     # This API is synchronous (also used by offline readers); in the HTTP path
     # its caller already runs in the bounded media pool, away from the event loop.
@@ -739,7 +743,9 @@ async def stream(device: str, after: dt.datetime | None, edge_s: float | None = 
                     try:
                         blocks, skip = await anyio.to_thread.run_sync(
                             lambda: stack.enter_context(piece_blocks(p, max(end, ms, lo))), limiter=threads.MEDIA)
-                    except (subprocess.TimeoutExpired, StoredDecodeError) as exc:
+                    except (subprocess.TimeoutExpired, StoredDecodeError, DecoderTerminated) as exc:
+                        # Entry decodes to disk before handing out any PCM. Later
+                        # block/consumer failures must propagate outside this budget.
                         reason = "无进展" if isinstance(exc, subprocess.TimeoutExpired) else "失败"
                         decode_failures += 1
                         if decode_failures >= DECODE_ATTEMPTS:

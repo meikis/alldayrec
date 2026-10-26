@@ -2,6 +2,7 @@
 import contextlib
 import datetime as dt
 import subprocess
+import sys
 import threading
 
 import anyio
@@ -22,7 +23,7 @@ def stored(tmp_path, body=b'not decodable audio', start=START):
     return path
 
 
-@pytest.mark.parametrize('failure', ['invalid', 'empty', 'timeout'])
+@pytest.mark.parametrize('failure', ['invalid', 'empty', 'timeout', 'signal9', 'signal15', 'signal15_pcm'])
 def test_lasting_caps_decode_attempts_and_preserves_recording(tmp_path, monkeypatch, failure):
     t = db.open_db(tmp_path / 'live.db')
     path = stored(tmp_path)
@@ -32,12 +33,29 @@ def test_lasting_caps_decode_attempts_and_preserves_recording(tmp_path, monkeypa
     db.put_kv('finalized_to:fixture', resume)
     attempts, notes = [], []
     decode = audio.decode_process
+    open_process = anyio.open_process
     sleep = anyio.sleep
+
+    async def killed_ffmpeg(*args, **kwargs):
+        process = await open_process(*args, **kwargs)
+        process.kill()
+        return process
+
+    if failure == 'signal9':
+        monkeypatch.setattr(anyio, 'open_process', killed_ffmpeg)
 
     def failing(args, output):
         attempts.append(1)
         if failure == 'timeout':
             raise subprocess.TimeoutExpired('ffmpeg', 300)
+        if failure.startswith('signal15'):
+            # Real decoder subprocess termination, including PCM written to disk
+            # before termination but never handed to the processing pipeline.
+            script = 'import os,signal; '
+            if failure.endswith('_pcm'):
+                script += 'os.write(1, b"xx" * 16000); '
+            script += 'os.kill(os.getpid(), signal.SIGTERM)'
+            return decode([sys.executable, '-c', script], output)
         return 0 if failure == 'empty' else decode(args, output)
 
     async def no_wait(seconds):
@@ -122,6 +140,34 @@ def test_unrelated_errors_propagate(tmp_path, monkeypatch, failure, stage):
             await stream.aclose()
     anyio.run(run)
     assert closed == [True]
+    assert not notes
+
+
+def test_signal_error_after_pcm_is_not_retried(tmp_path, monkeypatch):
+    db.open_db(tmp_path / 'live.db')
+    stored(tmp_path, audio.wav(np.ones(audio.SR, np.int16)))
+    blocks = audio.pcm_blocks
+    notes = []
+
+    def interrupted(pcm, count):
+        yield next(blocks(pcm, count))
+        # Exercise the real subprocess classifier after stream has yielded PCM.
+        audio.decode_process([sys.executable, '-c',
+                              'import os,signal; os.kill(os.getpid(), signal.SIGTERM)'], pcm)
+
+    monkeypatch.setattr(audio, 'pcm_blocks', interrupted)
+    monkeypatch.setattr(audio.ws, 'note', lambda *args: notes.append(args))
+
+    async def run():
+        stream = audio.stream('fixture', None)
+        try:
+            _, x = await anext(stream)
+            assert len(x) == audio.SR
+            with pytest.raises(audio.DecoderTerminated, match='signal 15'):
+                await anext(stream)
+        finally:
+            await stream.aclose()
+    anyio.run(run)
     assert not notes
 
 
