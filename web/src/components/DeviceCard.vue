@@ -43,6 +43,9 @@ const seen = (iso: string | null) => {
           >{{ t("deviceCard.battery")
           }}{{ d.hw?.charge ? " · " + chargeText(d.hw.charge) : "" }}</span
         >
+        <span v-if="d.hw?.case_battery != null" class="k">{{
+          t("deviceCard.case", { n: d.hw.case_battery })
+        }}</span>
       </div>
       <div>
         <span class="v" :class="{ long: cardTile(d).length > 8, bad: d.hw?.store }">{{
