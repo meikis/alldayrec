@@ -194,6 +194,8 @@ async def recap_get(date: str = ""):
             if c and len(matches) == 1:
                 v = {**db.todo_view(c, s, *matches[0], closed, al), **x, "id": matches[0][0]}
             else:
+                if x.get("id") in closed:  # a marked action can have been reworded; its historical mark still filters the recap
+                    continue
                 v = {**x, "id": None} if x.get("id") else x
             if v.get("id") not in closed:
                 todos.append(v)

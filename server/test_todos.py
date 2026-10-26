@@ -216,3 +216,16 @@ def test_cached_recap_never_marks_reused_id(tmp_path):
     assert [(t["text"], t["id"]) for t in got] == [("发文档", ids[1]), ("约会议", None)]
     anyio.run(todo_mark, got[0]["id"], {"mark": "done"})
     assert db.todo(ids[0])["text"] == "买票" and ids[0] not in db.closed_todos()
+
+
+def test_cached_recap_keeps_historical_mark_filter(tmp_path):
+    at = "2026-10-01T10:01:00.000"
+    store(tmp_path, [mine("发文档", None, at=at, quote="我把文档发你")])
+    id = db.todo_ids(C1, db.summary(C1)["todos"])[0]
+    db.put_kv("recap:2026-10-01", {"date": "2026-10-01", "todos": [{"conv": C1, "id": id, "text": "发文档"}]})
+    db.mark_todos([id], "done")
+    new = [mine("把文档发给他", None, at=at, quote="我把文档发你")]
+    with db.tx() as c:
+        db.carry_marks(C1, db.summary(C1)["todos"], new, c)
+        db.put_summary({"conversation": C1, "status": "done", "todos": new}, c)
+    assert anyio.run(recap_get, "2026-10-01")["todos"] == [], "a completed reworded action stays out of the cached recap"
