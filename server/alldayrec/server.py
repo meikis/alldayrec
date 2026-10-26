@@ -26,6 +26,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 import anyio
 import anyio.to_thread
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 
 from alldayrec import addresses
 from alldayrec import asr
@@ -132,6 +133,12 @@ async def lasting(device: str):
         await anyio.sleep(RESTART_S)
 
 
+@app.exception_handler(Exception)
+async def server_error(request, exc):
+    # ServerErrorMiddleware is outside auth.Tenants, including its send wrapper.
+    return PlainTextResponse("Internal Server Error", status_code=500, headers={"Cache-Control": "no-store"})
+
+
 app.add_middleware(perf.Requests)  # inside Tenants (added after it): each request's tenant is known
 app.add_middleware(auth.Tenants)
 # the routers in this order: the routes match as they did when they were all in this file (test_routes_snapshot.py)
@@ -206,7 +213,8 @@ def main():
     import uvicorn
     # a page's WebSocket would hold a stop for good: 5 s, then the lifespan cancels every task (pipelines resume from
     # their finalized time on the next start)
-    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=args.port, log_level="warning", timeout_graceful_shutdown=5)
+    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=args.port, log_level="warning", access_log=False,
+                timeout_graceful_shutdown=5)
 
 
 if __name__ == "__main__":
