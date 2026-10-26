@@ -106,10 +106,32 @@ def load(path: Path = FILE) -> list[Tenant]:
         raise SystemExit(f"{path}: no tenants file (DATA_DIR; see tenant.py)")
     if path.stat().st_mode & 0o077:
         raise SystemExit(f"{path}: others can read it, and it holds every token: chmod 600")
+    expected = 'expected a JSON array of objects with string fields id, token, data, recordings and optional lang (zh or en)'
+
+    def invalid(reason):
+        # Never include configuration values or decoder excerpts: they may contain tokens.
+        raise SystemExit(f"{path}: {reason}; {expected}") from None
+
+    try:
+        config = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        invalid(f"invalid JSON at line {e.lineno}, column {e.colno}")
+    except UnicodeDecodeError:
+        invalid("invalid text encoding")
+    if not isinstance(config, list):
+        invalid("top level must be an array")
+    for i, x in enumerate(config, 1):
+        if not isinstance(x, dict):
+            invalid(f"entry {i} must be an object")
+        for key in ("id", "token", "data", "recordings"):
+            if key not in x or not isinstance(x[key], str):
+                invalid(f"entry {i}: {key} is required and must be a string")
+        if x.get("lang") is not None and not isinstance(x["lang"], str):
+            invalid(f"entry {i}: lang must be a string or null")
+        if (x.get("lang") or os.environ.get("UI_LANG") or "zh") not in LANGS:
+            invalid(f"entry {i}: lang (or UI_LANG) must be one of {', '.join(LANGS)}")
     ts = [Tenant(x["id"], x["token"], x["data"], x["recordings"], x.get("lang") or os.environ.get("UI_LANG") or "zh")
-          for x in json.loads(path.read_text())]
-    if bad := [t.id for t in ts if t.lang not in LANGS]:
-        raise SystemExit(f"{path}: lang (or UI_LANG) of {', '.join(bad)} is not one of {', '.join(LANGS)}")
+          for x in config]
     each = [[getattr(t, k) for t in ts] for k in ("id", "token", "data", "recordings")]  # two sharing a store would see each other's
     if not ts or any(len(set(x)) < len(x) for x in each) or (len(ts) > 1 and not all(each[1])):
         raise SystemExit(f"{path}: at least one tenant, ids, tokens and dirs one each, and every tenant a token when there are several")
