@@ -59,10 +59,14 @@ async def summarize_loop():
                 if delay:
                     await anyio.sleep(delay)
         old = db.summary(c["id"])
-        if res["status"] == "failed" and old and old["status"] == "done":  # a failed upgrade keeps the old summary
-            continue
         media = summary.media_labels(conversation_rows(c), res.get("media_spans") or [])
+        if res["status"] == "failed" and old and old["status"] == "done":
+            db.put_summary({**old, "error": f"[resummarize_failed] {res['error']}"[:300]})
+            ws.note(f"对话 {c['start'][11:19]} 的摘要重新生成失败，保留原来的：{res['error']}", "error")
+            continue
         with db.tx() as t:
+            if res["status"] == "done":
+                res["todos"] = db.preserve_todos(c["id"], (old or {}).get("todos") or [], res.get("todos") or [], t)
             db.put_summary(res, t)
             if media:  # a redone summary found media: its voices leave the voiceprint bank
                 t.executemany("DELETE FROM voices WHERE conv = ? AND label = ?", [(c["id"], m) for m in media])

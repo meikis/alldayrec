@@ -52,6 +52,8 @@ def digest(convs: list[dict]) -> str:
             continue
         lines = [f"## [{c['id']}] {c['start'][:16].replace('T', ' ')}–{c['end'][11:16]} {s['title']}"
                  f"（参与：{'、'.join(c['participants']) or '—'}）", s.get("summary") or ""]
+        if s.get("topics"):  # the summary is one sentence (prompt v11): what else was talked about
+            lines.append("- 议题：" + "；".join(str(x.get("title") or "") for x in s["topics"]))
         lines += [f"- {p['who']}：{'；'.join(p.get('points') or [])}" for p in s.get("people") or []]
         lines += [f"- 待办：{t.get('owner') or '未知'}{'→' + t['to'] if t.get('to') else ''} {t.get('text', '')}"
                   f"{'（' + t['due'] + '）' if t.get('due') else ''}" for t in s.get("todos") or []]
@@ -247,6 +249,7 @@ if __name__ == "__main__":
                                 dict(id="f3", start="2026-09-30T10:01:00.000", end="2026-09-30T10:01:04.000", speaker="我", text="按小时存的另一台", source="LR-X1-567E"),
                                 dict(id="f4", start="2026-08-01T09:05:00.000", end="2026-08-01T09:05:04.000", speaker="S1", text="去医院复查", source="phone")])
         db.put_summary({"conversation": "c20260930100000", "status": "done", "title": "存储方案", "summary": "定了按小时存。", "tags": ["存储"],
+                        "topics": [{"title": "存储格式", "points": ["按小时"]}, {"title": "闲聊", "points": ["猫"]}],
                         "people": [{"who": "老王", "points": ["建议按小时存"]}], "decisions": [{"text": "按小时存"}],
                         "todos": [{"owner": "我", "to": "老王", "text": "改存储", "due": "周五"}, {"owner": "未知", "text": "买菜"}]}, c)
         db.put_summary({"conversation": "c20260801090000", "status": "done", "title": "体检", "summary": "聊复查。", "todos": []}, c)
@@ -254,7 +257,7 @@ if __name__ == "__main__":
     sp = system(now)
     assert "最近 7 天的对话摘要（2026-09-26 起）" in sp and "星期五" in sp, sp[-300:]
     assert "## [c20260930100000] 2026-09-30 10:00–10:30 存储方案（参与：我、老王）" in sp
-    assert "- 待办：我→老王 改存储（周五）" in sp and "- 待办：未知 买菜" in sp and "- 标签：存储" in sp and "体检" not in sp
+    assert "定了按小时存。\n- 议题：存储格式；闲聊\n- 老王：建议按小时存" in sp and "- 待办：我→老王 改存储（周五）" in sp and "- 待办：未知 买菜" in sp and "- 标签：存储" in sp and "体检" not in sp
     assert sorted(x["id"] for x in t_search("按小时")) == ["c20260930100000", "c20260930100000-LR_X1_567E"], "summary words, the other device's transcript"
     assert [x["id"] for x in t_search("复查", before="2026-08-01")] == [] and t_search("复查", after="2026-08-01")[0]["id"] == "c20260801090000"
     d = t_day("2026-09-30")

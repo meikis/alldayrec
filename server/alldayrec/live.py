@@ -106,7 +106,7 @@ async def analyze(state: dict, rows: list[dict]) -> dict:
     res, raw = await complete(state["messages"] + [msg], timeout=120, kind="live")
     topics, next_id = apply(state, res.get("ops"), rows, fresh)
     reply = {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}
-    return {**state, "topics": topics, "next_id": next_id, "fed_to": fresh[-1]["start"],
+    return {**state, "participants": sorted({r["speaker"] for r in rows if r.get("speaker")}), "topics": topics, "next_id": next_id, "fed_to": fresh[-1]["start"],
             "drafted": state.get("drafted") or any(r.get("state") == "draft" for r in fresh),
             "messages": state["messages"] + [msg, reply], "model": raw.get("model"), "usage": raw.get("usage")}
 

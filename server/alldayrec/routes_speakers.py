@@ -81,6 +81,7 @@ def apply_rename(conv_id: str, frm: str, to: str) -> tuple[dict, list[dict], dic
         if h := db.name_hints(conv_id).get(conv_id):  # the names it was called go with it
             h["names"] = [{**x, **{k: to for k in ("who", "by") if x.get(k) == frm}} for x in h["names"]]
             db.put_name_hints(h, t)
+        before["todo_labels"] = db.rename_todos(conv_id, frm, to, t)
         if frm != "我" and not speakers.ANON.fullmatch(frm):  # what these sentences taught the people bank as frm
             before["enrolled"] = bank.forget(t, frm, before["rows"])
     if before.get("enrolled"):
@@ -203,6 +204,7 @@ async def speaker_undo(body: dict):
             t.executemany("INSERT INTO apart VALUES (?, ?)", b["apart"])
             if b["hints"]:
                 db.put_name_hints(b["hints"], t)
+            db.undo_todo_rename(b["conv"], b.get("todo_labels") or {}, b["to"], t)
             bank.forget(t, b["to"], b["rows"])  # learnt already (enroll); a later one skips sentences no longer to's
             bank.restore(t, b.get("enrolled") or [])
     T().speakers["at"] = 0.0

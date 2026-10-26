@@ -185,11 +185,25 @@ async def recap_get(date: str = ""):
         closed, al, todos = db.closed_todos(), db.aliases(), []
         for x in r["todos"]:
             c, s = db.conversation(x["conv"]), db.summary(x["conv"]) or {}
-            found = (x["id"], db.todo(x["id"])) if x.get("id") else db.todo_by_text(x["conv"], x["text"])  # recaps before 10-24 hold no id
-            v = {**db.todo_view(c, s, *found, closed, al), **x} if c and found and found[1] else x
+            ts = s.get("todos") or []
+            pairs = list(zip(db.todo_ids(x["conv"], ts), ts))
+            # A pinned ID survives rewording, time changes and renames. Legacy unpinned IDs still need a text match.
+            matches = [(i, t) for i, t in pairs if x.get("id") == i == t.get("id")]
+            if not matches:
+                matches = [(i, t) for i, t in pairs if t.get("owner") == "我" and t.get("text") == x["text"]
+                           and all(t.get(k) == x[k] for k in ("to", "due") if k in x)]
+            if c and len(matches) == 1:
+                if matches[0][1].get("owner") != "我":  # a resolved action owned by someone else is not an orphan of mine
+                    continue
+                v = {**x, **db.todo_view(c, s, *matches[0], closed, al)}
+            else:
+                v = {**x, "id": None} if x.get("id") else x
             if v.get("id") not in closed:
                 todos.append(v)
         r["todos"] = todos
+        for h in r.get("highlights") or []:
+            if h.get("conv") and (c := db.conversation(h["conv"])):
+                h["participants"] = c["participants"]
     return r
 
 
@@ -288,8 +302,10 @@ async def feedback():
 
 @router.post("/api/conversation/{conv_id}/summarize")
 async def resummarize(conv_id: str):
+    """Write a conversation's summary again with the current prompt (重新生成, the backfill script resummarize.py). The
+    old summary stays until the new one is written, and stays if every try fails; the old todos' marks carry over."""
     c = find_conversation(conv_id)
     if not c:
         raise HTTPException(404, "no such conversation")
-    queue_summary(c)
+    queue_summary(c, keep=True)
     return {"status": "pending"}

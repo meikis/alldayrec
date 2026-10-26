@@ -1,7 +1,14 @@
 // node --experimental-strip-types speakers.check.ts: speakerColor, initial, speakerList (src/lib/speakers.ts), both languages
 import assert from "node:assert/strict";
 import { i18n } from "./src/i18n.ts";
-import { initial, likeness, speakerColor, speakerLabel, speakerList } from "./src/lib/speakers.ts";
+import {
+  initial,
+  labelText,
+  likeness,
+  speakerColor,
+  speakerLabel,
+  speakerList,
+} from "./src/lib/speakers.ts";
 
 assert.equal(speakerColor("我"), "var(--accent)");
 for (const s of ["S2", "S?", "", null, undefined]) assert.equal(speakerColor(s), "var(--muted)");
@@ -32,6 +39,15 @@ assert.deepEqual(
   [[], ["S1"], ["S1", "我"], ["S1", "S2", "我"], ["S1", "S2", "S3"]].map(speakerList),
   ["", "说话人 1", "我、说话人 1", "我、说话人 1 等 3 人", "说话人 1、说话人 2 等 3 人"],
 );
+assert.equal(
+  labelText("我和 S1 聊了猫，S12说S?没听清；S3 存储和 Galaxy S24 不是人，S1x 也不是", [
+    "我",
+    "S1",
+    "S12",
+  ]),
+  "我和 说话人 1 聊了猫，说话人 12说未识别没听清；S3 存储和 Galaxy S24 不是人，S1x 也不是",
+);
+assert.equal(labelText("S2 提醒水开了"), "S2 提醒水开了", "no participant context: verbatim");
 i18n.global.locale.value = "en"; // 我 stays the key in the data, the page says Me
 assert.deepEqual(["S2", "S?", "我", "同事A"].map(speakerLabel), [
   "Speaker 2",
@@ -41,5 +57,9 @@ assert.deepEqual(["S2", "S?", "我", "同事A"].map(speakerLabel), [
 ]);
 assert.deepEqual(["我", "alice"].map(initial), ["M", "A"]);
 assert.equal(speakerList(["S1", "S2", "我"]), "Me, Speaker 1 and 1 more");
+assert.equal(
+  labelText("S1 and I agreed; Amazon S3 stays", ["S1"]),
+  "Speaker 1 and I agreed; Amazon S3 stays",
+);
 assert.equal(speakerColor("我"), "var(--accent)");
 console.log("speakers ok");
