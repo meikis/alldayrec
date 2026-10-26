@@ -26,12 +26,17 @@ ONE = {"id": "sample", "token": SECRET, "data": "data", "recordings": "recording
     json.dumps([{**ONE, "id": SECRET, "lang": "fr"}]),
 ])
 def test_invalid_config_exits_cleanly(tmp_path, content):
+    check_invalid_config(tmp_path, content)
+
+
+def check_invalid_config(tmp_path, content, setup=""):
     path = tmp_path / "tenants.json"
     original = content if isinstance(content, bytes) else content.encode()
     path.write_bytes(original)
     path.chmod(0o600)
     result = subprocess.run(
-        [sys.executable, "-c", "from pathlib import Path; from alldayrec.tenant import load; load(Path(__import__('sys').argv[1]))", str(path)],
+        [sys.executable, "-c", "from pathlib import Path; from alldayrec.tenant import load; "
+         "import json, sys\n" + setup + "\nload(Path(sys.argv[1]))", str(path)],
         capture_output=True, text=True, timeout=10,
         env={**os.environ, "PYTHONPATH": str(Path(tenant.__file__).parent.parent)},
     )
@@ -41,8 +46,46 @@ def test_invalid_config_exits_cleanly(tmp_path, content):
     assert "expected a JSON array of objects" in result.stderr
     assert all(field in result.stderr for field in ONE)
     assert "Traceback" not in output and SECRET not in output
+    if setup:
+        assert result.stderr == (f"{path}: JSON exceeds parser limits; expected a JSON array of objects "
+                                 "with string fields id, token, data, recordings and optional lang (zh or en)\n")
     assert result.stdout == ""
     assert path.read_bytes() == original and path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("content, limit, error", [
+    ('[' * 1100 + '"' + SECRET + '"' + ']' * 1100,
+     "sys.setrecursionlimit(300)", "RecursionError"),
+    ('[{"token":"' + SECRET + '","id":' + '1' * 5000 + '}]',
+     "sys.set_int_max_str_digits(640)", "ValueError"),
+], ids=["nesting-limit", "integer-digit-limit"])
+def test_json_parser_limits_exit_cleanly(tmp_path, content, limit, error):
+    # Limits vary by Python version/settings. Set them only in the child, and
+    # prove the real decoder hits the intended limit before exercising load().
+    setup = f"""
+{limit}
+try:
+    json.loads(Path(sys.argv[1]).read_text())
+except {error}:
+    pass
+else:
+    raise AssertionError("JSON parser limit was not reached")
+"""
+    check_invalid_config(tmp_path, content, setup)
+
+
+@pytest.mark.parametrize("error", [ValueError, RecursionError])
+def test_tenant_construction_errors_propagate(tmp_path, monkeypatch, error):
+    path = tmp_path / "tenants.json"
+    path.write_text(json.dumps([ONE]))
+    path.chmod(0o600)
+
+    def broken_tenant(*args):
+        raise error("construction error")
+
+    monkeypatch.setattr(tenant, "Tenant", broken_tenant)
+    with pytest.raises(error, match="construction error"):
+        tenant.load(path)
 
 
 @pytest.mark.parametrize("lang", [None, "", "zh", "en"])

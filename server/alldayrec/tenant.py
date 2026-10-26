@@ -113,11 +113,15 @@ def load(path: Path = FILE) -> list[Tenant]:
         raise SystemExit(f"{path}: {reason}; {expected}") from None
 
     try:
-        config = json.loads(path.read_text())
-    except json.JSONDecodeError as e:
-        invalid(f"invalid JSON at line {e.lineno}, column {e.colno}")
+        text = path.read_text()
     except UnicodeDecodeError:
         invalid("invalid text encoding")
+    try:
+        config = json.loads(text)
+    except json.JSONDecodeError as e:
+        invalid(f"invalid JSON at line {e.lineno}, column {e.colno}")
+    except (RecursionError, ValueError):
+        invalid("JSON exceeds parser limits")
     if not isinstance(config, list):
         invalid("top level must be an array")
     for i, x in enumerate(config, 1):
