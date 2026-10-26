@@ -1,6 +1,6 @@
 ---
 type: explanation
-description: "AllDayRec: an open-source Plaud for your whole day, so your agent knows you. Record with your own devices to build a personal memory on your own server that your agent can query."
+description: "AllDayRec: an open-source Plaud for your whole day, so your agent knows you. Screenshots, features, how it compares."
 ---
 
 # What AllDayRec is
@@ -19,7 +19,7 @@ The Live page: captions come up as people speak, and the AI live summary keeps u
 
 ## Why
 
-- **Use the devices you already have**: the Feishu recorder bean (Android only) and the open-source recorder connect to the app and sync live; recordings from other devices can be imported; with no device at all, the Android app, the iPhone app and a browser record directly.
+- **Use the devices you already have.** The [Feishu recorder bean](../how-to/bind-recorder.md#feishu-recorder-bean) (Android only) and the [open-source recorder](../reference/hardware.md) connect to the app and sync live; recordings from other devices can be [imported](../how-to/import-recordings.md); with no device at all, the Android app, the iPhone app and a browser record directly.
 - **The original audio stays.** Every line plays back, and old days can be transcribed again when a better model comes along.
 - **Your data lives on your server.** Audio goes only to the ASR service you pick and transcripts only to the LLM you pick.
 - **Free software, pay by use.** You pay the services you pick for ASR and the LLM by use; the default Qwen transcription costs about ¥0.05 per hour of audio.
@@ -27,7 +27,7 @@ The Live page: captions come up as people speak, and the AI live summary keeps u
 
 ## What it does
 
-- **Use the devices you already have**: the Feishu recorder bean (Android only) and the open-source recorder connect to the app and sync live; recordings from other devices can be imported; with no device at all, the Android app, the iPhone app and a browser record directly.
+- **Use the devices you already have.** The [Feishu recorder bean](../how-to/bind-recorder.md#feishu-recorder-bean) (Android only) and the [open-source recorder](../reference/hardware.md) connect to the app and sync live; recordings from other devices can be [imported](../how-to/import-recordings.md); with no device at all, the Android app, the iPhone app and a browser record directly.
 - **Transcribes in two layers.** The final transcript comes from a cloud ASR engine (default: Alibaba Cloud Bailian Qwen, about ¥0.05 per hour of audio), and drafts show within seconds while a page is open; `ENGINE=local` transcribes on your machine instead.
 - **Knows who spoke.** It learns your own voice and remembers the names you give others.
 - **Remembers.** Conversation summaries, to-dos with due dates, a daily recap, and full-text search.
