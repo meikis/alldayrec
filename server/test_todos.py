@@ -304,3 +304,137 @@ def test_recap_supplies_linked_participants(tmp_path):
     db.put_kv("recap:2026-10-01", {"todos": [], "highlights": [{"conv": C1, "text": "S1 uses S3"}, {"conv": None, "text": "Galaxy S24"}]})
     h = anyio.run(recap_get, "2026-10-01")["highlights"]
     assert h[0]["participants"] == ["我", "S1", "王哥"] and "participants" not in h[1]
+
+
+@pytest.mark.parametrize("mark", [None, "done", "wrong"])
+@pytest.mark.parametrize("cached_id", [False, True])
+def test_legacy_recap_scopes_match_to_my_todos(tmp_path, mark, cached_id):
+    old = [mine("发文档", "2026-10-01", at="2026-10-01T10:01:00.000", to="S2"),
+           mine("发文档", "2026-10-01", owner="S1", at="2026-10-01T10:02:00.000", to="S2")]
+    store(tmp_path, old)
+    id = db.todo_ids(C1, old)[0]
+    entry = {"conv": C1, "text": "发文档", "to": "S2", "due": "某天", **({"id": id} if cached_id else {})}
+    db.put_kv("recap:2026-10-01", {"todos": [entry]})
+    db.mark_todos([id], mark)
+    before = db.summary(C1), db.closed_todos()
+    got = anyio.run(recap_get, "2026-10-01")["todos"]
+    if mark:
+        assert got == [], "completed/wrong legacy actions must stay hidden despite another owner's identical text"
+    else:
+        assert [(t["id"], t["mark"]) for t in got] == [(id, None)], "the unique own action keeps its buttons"
+    assert (db.summary(C1), db.closed_todos()) == before, "reading legacy data does not rewrite it"
+
+
+@pytest.mark.parametrize("mark", ["done", "wrong"])
+def test_undo_this_is_me_omits_carried_other_person_action(tmp_path, monkeypatch, mark):
+    from alldayrec.routes_speakers import apply_rename, keep_undo, speaker_undo
+    old = [mine("发送资料", "2026-10-01", owner="S1", at="2026-10-01T10:01:00.000", quote="我发送资料")]
+    store(tmp_path, old)
+    id = db.todo_ids(C1, old)[0]
+    with db.tx() as c:
+        db.insert_sentences(c, [dict(id="r", start=old[0]["at"], end="2026-10-01T10:01:05.000", speaker="S1", text="我发送资料")])
+    rounds = 0
+    async def model(c, tags):
+        nonlocal rounds
+        rounds += 1
+        return {**db.summary(C1), "summary": f"round{rounds}", "prompt_version": 11, "todos": []}
+    async def run():
+        _, _, before = apply_rename(C1, "S1", "我")
+        db.put_kv("recap:2026-10-01", {"todos": [{"conv": C1, "id": id, "text": "发送资料"}]})
+        db.mark_todos([id], mark)
+        assert (await recap_get("2026-10-01"))["todos"] == []
+        await speaker_undo({"undo": keep_undo([before])})
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(summaries.summarize_loop)
+            with anyio.fail_after(2):
+                while db.summary(C1).get("summary") != "round2":
+                    await anyio.sleep(.01)
+            tg.cancel_scope.cancel()
+        assert db.todo(id)["id"] == id and db.todo(id)["owner"] == "S1"
+        assert db.closed_todos() == {id: mark}
+        assert (await recap_get("2026-10-01"))["todos"] == []
+    monkeypatch.setattr(summaries, "summarize", model)
+    anyio.run(run)
+
+
+@pytest.mark.parametrize("mark", [None, "done", "wrong"])
+def test_pinned_recap_does_not_fall_back_to_same_name_owned_by_me(tmp_path, mark):
+    old = [mine("发文档", None, owner="S1", at="2026-10-01T10:01:00.000"),
+           mine("发文档", None, at="2026-10-01T10:02:00.000")]
+    store(tmp_path, old)
+    ids = db.todo_ids(C1, old)
+    with db.tx() as c:
+        ts = db.preserve_todos(C1, old, old, c)
+        db.put_summary({**db.summary(C1), "todos": ts}, c)
+    db.put_kv("recap:2026-10-01", {"todos": [{"conv": C1, "id": ids[0], "text": "发文档"}]})
+    db.mark_todos([ids[0]], mark)
+    assert anyio.run(recap_get, "2026-10-01")["todos"] == [], "a resolved other-owner action never borrows my same-name action"
+
+
+@pytest.mark.parametrize("case", ["two_new_matches", "text_quote_competition", "timestamp_reuse"])
+def test_preserve_todo_identity_edge_cases(tmp_path, case):
+    at, later = "2026-10-01T10:01:00.000", "2026-10-01T10:02:00.000"
+    old, new = {
+        "two_new_matches": ([mine("A", None, quote="Q", at=at)],
+                            [mine("A", None, quote="Q", at=at), mine("A", None, quote="Q", at=at)]),
+        "text_quote_competition": ([mine("A", None, quote="Q1", at=at), mine("B", None, quote="Q2", at=at)],
+                                   [mine("A", None, quote="Q2", at=at)]),
+        "timestamp_reuse": ([mine("A", None, at=at)], [mine("fresh", None, at=at), mine("A", None, at=later)]),
+    }[case]
+    store(tmp_path, old)
+    ids = db.todo_ids(C1, old)
+    db.mark_todos(ids, "done")
+    mark_rows = [tuple(r) for r in db.conn().execute("SELECT * FROM todo_marks ORDER BY id")]
+    # Incoming model IDs are not authoritative, even when they collide with an old marked action.
+    new = [{**t, "id": ids[0]} for t in new]
+    with db.tx() as c:
+        ts = db.preserve_todos(C1, old, new, c)
+        db.put_summary({**db.summary(C1), "todos": ts}, c)
+    actual = db.todo_ids(C1, ts)
+    assert len(actual) == len(set(actual)) and set(ids) <= set(actual)
+    assert [tuple(r) for r in db.conn().execute("SELECT * FROM todo_marks ORDER BY id")] == mark_rows
+    assert [db.todo(id)["text"] for id in ids] == [t["text"] for t in old]
+    if case == "two_new_matches":
+        assert actual[-1] == ids[0] and ids[0] not in actual[:2], "ambiguous marked action is appended with its original ID"
+    elif case == "text_quote_competition":
+        assert actual == ids, "the used candidate is not reassigned; the competing marked action is appended"
+    else:
+        assert actual[1] == ids[0] and actual[0] != ids[0], "a fresh action at the old timestamp cannot reuse the old ID"
+
+
+@pytest.mark.parametrize("mark", ["done", "wrong"])
+def test_unmark_carried_todo_reopens_then_next_regeneration_omits_it(tmp_path, mark):
+    from alldayrec import mcp_server, resummarize as backfill
+    old = [mine("carried A", "2026-10-01", at="2026-10-01T10:01:00.000", quote="quote A"),
+           mine("carried B", "2026-10-01", at="2026-10-01T10:02:00.000", quote="quote B")]
+    store(tmp_path, old)
+    ids = db.todo_ids(C1, old)
+    db.mark_todos(ids, mark)
+    db.put_kv("recap:2026-10-01", {"todos": [{"conv": C1, "id": id, "text": t["text"]} for id, t in zip(ids, old)]})
+    marks_before = [tuple(r) for r in db.conn().execute("SELECT * FROM todo_marks ORDER BY id")]
+    def replace():
+        with db.tx() as c:
+            ts = db.preserve_todos(C1, db.summary(C1)["todos"], [mine("fresh", "2026-10-01")], c)
+            db.put_summary({**db.summary(C1), "todos": ts, "prompt_version": 11}, c)
+        return ts
+    for _ in range(3):
+        ts = replace()
+        assert [t["text"] for t in ts] == ["fresh", "carried A", "carried B"]
+        assert db.todo_ids(C1, ts)[1:] == ids
+        assert [tuple(r) for r in db.conn().execute("SELECT * FROM todo_marks ORDER BY id")] == marks_before
+        assert [t["text"] for t in db.due_todos("2026-10-26")] == ["fresh"]
+        assert anyio.run(recap_get, "2026-10-01")["todos"] == []
+        assert backfill.todos(anyio.run(conversation, C1)["summary"]) == (3, 2)
+    anyio.run(todo_unmark, ids[0])
+    assert {t["text"] for t in db.due_todos("2026-10-26")} == {"fresh", "carried A"}
+    reopened = anyio.run(recap_get, "2026-10-01")["todos"]
+    assert [(t["id"], t["mark"]) for t in reopened] == [(ids[0], None)]
+    assert "carried A" in mcp_server.todos("2026-10-01", "2026-10-02", "我")
+    for _ in range(2):
+        ts = replace()
+        assert [t["text"] for t in ts] == ["fresh", "carried B"] and db.todo(ids[0]) is None
+        assert [t["text"] for t in db.due_todos("2026-10-26")] == ["fresh"]
+        assert "carried A" not in mcp_server.todos("2026-10-01", "2026-10-02", "我")
+        assert backfill.todos(anyio.run(conversation, C1)["summary"]) == (2, 1)
+    orphan = anyio.run(recap_get, "2026-10-01")["todos"]
+    assert [(t.get("id"), t["text"]) for t in orphan] == [(None, "carried A")], "genuinely removed cached text stays read-only until recap refresh"

@@ -190,9 +190,11 @@ async def recap_get(date: str = ""):
             # A pinned ID survives rewording, time changes and renames. Legacy unpinned IDs still need a text match.
             matches = [(i, t) for i, t in pairs if x.get("id") == i == t.get("id")]
             if not matches:
-                matches = [(i, t) for i, t in pairs if t.get("text") == x["text"]
+                matches = [(i, t) for i, t in pairs if t.get("owner") == "我" and t.get("text") == x["text"]
                            and all(t.get(k) == x[k] for k in ("to", "due") if k in x)]
-            if c and len(matches) == 1 and matches[0][1].get("owner") == "我":
+            if c and len(matches) == 1:
+                if matches[0][1].get("owner") != "我":  # a resolved action owned by someone else is not an orphan of mine
+                    continue
                 v = {**x, **db.todo_view(c, s, *matches[0], closed, al)}
             else:
                 v = {**x, "id": None} if x.get("id") else x
