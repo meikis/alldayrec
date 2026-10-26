@@ -435,26 +435,34 @@ async def pipeline(device: str):
         """One draft pass; True when more remains. Timer (end None): [draft_to - margin, + window], rows near its end
         left open; VAD: from 1 s before the first undrafted utterance to `end`, a point in the pause after one."""
         dto = st.draft_to
+        window_s = REFINE_WINDOW_S
+        if asr.DRAFT_ENGINE == "local":
+            # Drafts are disposable: spend the small CPU box's budget on what is being said now, not on catching up
+            # old draft windows. Finals still cover every sample. Recheck on every pass, including the catch-up loop.
+            window_s = min(window_s, 30)
+            dto = st.draft_to = max(dto, dseg.time_at(max(dseg.audio_base, dseg.samples - int(window_s * SR))))
+            if end is not None and end <= dto:
+                return False
         t_run = time.perf_counter()
         if end is None:
-            t0, x = dseg.window(REFINE_WINDOW_S, dto - dt.timedelta(seconds=REFINE_MARGIN_S))
+            t0, x = dseg.window(window_s, dto - dt.timedelta(seconds=REFINE_MARGIN_S))
         else:
             us = st.draft_utts = [u for u in st.draft_utts if u[1] > dto]
             if not us:
                 return False
             start = max(us[0][0] - dt.timedelta(seconds=1), dto - dt.timedelta(seconds=REFINE_MARGIN_S))
-            t0, x = dseg.window(min(REFINE_WINDOW_S, (dseg.sample_at(end) - dseg.sample_at(start)) / SR), start)
+            t0, x = dseg.window(min(window_s, (dseg.sample_at(end) - dseg.sample_at(start)) / SR), start)
         a0 = dseg.sample_at(t0)
         at = lambda s: dseg.time_at(a0 + int(s * SR))
         since = max(0.0, (dseg.sample_at(dto) - a0) / SR)
-        edge = 0.0 if end is not None and len(x) / SR < REFINE_WINDOW_S else EDGE_S  # a window cut short of its pause may end mid-sentence
+        edge = 0.0 if end is not None and len(x) / SR < window_s else EDGE_S  # a window cut short of its pause may end mid-sentence
         if len(x) / SR - since < (0.3 if end is not None else EDGE_S + 10):
             return False
         hi = at(len(x) / SR - EDGE_S)
         if end is None and not dseg.speaking() and (st.last_speech is None or st.last_speech <= dto):
             st.draft_to = hi  # silence: nothing to send
             db.put_kv(f"draft_to:{device}", iso(hi))
-            return (dseg.time_at(dseg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
+            return (dseg.time_at(dseg.samples) - hi).total_seconds() > window_s - REFINE_MARGIN_S
         sent, n_rows = since, 0  # seconds into the window up to which rows went out while the call ran
 
         async def publish(rows: list[dict], upto: dt.datetime, engine: str):
@@ -516,8 +524,8 @@ async def pipeline(device: str):
                        "engine": engine, "changed": n_rows, "early_s": round(sent - since), "to": iso(hi)}
         log.info("draft %s: %s", device, st.draft)
         if end is not None:  # pauses that came during the pass have set wake again
-            return len(x) / SR >= REFINE_WINDOW_S
-        return (dseg.time_at(dseg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
+            return len(x) / SR >= window_s
+        return (dseg.time_at(dseg.samples) - hi).total_seconds() > window_s - REFINE_MARGIN_S
 
     async def draft_loop():
         while True:

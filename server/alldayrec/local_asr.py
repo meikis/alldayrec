@@ -147,13 +147,22 @@ def sentences(toks: list[tuple[str, int, int]]) -> list[dict]:
     return [{"start_ms": g["start_ms"], "end_ms": g["end_ms"], "text": t} for g in segs if (t := text(g["toks"]))]
 
 
+def _tokens(x: np.ndarray) -> list[tuple[str, int, int]]:
+    return tokens(recognizer(), x)
+
+
 def _transcribe(x: np.ndarray) -> list[dict]:
-    return sentences(tokens(recognizer(), x))
+    return sentences(_tokens(x))
 
 
 async def transcribe(x: np.ndarray, partial=None) -> list[dict]:
-    """x: 16 kHz int16 PCM -> [{start_ms, end_ms, text}] (no speaker), in a thread under threads.ASR; no partial answers."""
-    return await anyio.to_thread.run_sync(_transcribe, x, limiter=threads.ASR)
+    """Decode under the same ASR cap, yielding between the existing <=20 s acoustic pieces. A long final or draft
+    must not hold the slot for its whole window. Join tokens before sentences, retaining cross-piece boundaries."""
+    out = []
+    for a, b in pieces(x):
+        ts = await anyio.to_thread.run_sync(_tokens, x[a:b], limiter=threads.ASR)
+        out.extend((t, round(a / 16 + s), round(a / 16 + e)) for t, s, e in ts)
+    return sentences(out)
 
 
 if __name__ == "__main__":
