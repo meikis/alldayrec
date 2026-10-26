@@ -5,7 +5,7 @@ description: "What stays on your server (audio, database, voiceprints), what goe
 
 # Privacy: where your data goes
 
-alldayrec starts from one idea: a whole day of audio is very private data and belongs on your own machine. But alldayrec is not fully offline: audio and text go to the services you choose. This page sets out what stays local and what goes to whom.
+AllDayRec starts from one idea: a whole day of audio is very private data and belongs on your own machine. But AllDayRec is not fully offline: audio and text go to the services you choose. This page sets out what stays local and what goes to whom.
 
 ## What stays on your server
 
@@ -30,7 +30,7 @@ Every ASR and LLM call is logged in the `calls` table with only its duration, re
 
 ## Why keep the original audio
 
-Some similar products delete the audio once it is transcribed. alldayrec does the opposite: every line plays back, so a wrong transcript has the original to be checked against, and old days can be transcribed again when a better model comes along. The cost is disk space, and you have to keep these recordings safe yourself.
+Some similar products delete the audio once it is transcribed. AllDayRec does the opposite: every line plays back, so a wrong transcript has the original to be checked against, and old days can be transcribed again when a better model comes along. The cost is disk space, and you have to keep these recordings safe yourself.
 
 ## Recording other people
 

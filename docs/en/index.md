@@ -2,11 +2,11 @@
 layout: home
 # the README's tagline, written once here (also EN_TAGLINE in .vitepress/config.ts): the page title reuses it
 title: &tagline "An open-source Plaud for your whole day: a private second brain"
-titleTemplate: "alldayrec — :title"
+titleTemplate: "AllDayRec — :title"
 hero:
-  name: alldayrec（全天录）
+  name: AllDayRec（全天录）
   text: *tagline
-  tagline: "Works on every platform, no hardware to buy: your phone is the recorder."
+  tagline: 'Works on every platform, no hardware to buy: your phone is the recorder.<br>Pronounced "all day rec".'
   image:
     src: https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/live-captions-20261026b.gif
     alt: "The Live page: captions as people speak, with the AI live summary keeping up (made-up data)"
@@ -50,6 +50,6 @@ features:
 - [Reference](./reference/configuration.md): configuration, HTTP API, MCP tools, the CLI, data layout, model files and hardware.
 - [Explanation](./explanation/intro.md): what it is, how it compares, architecture and data flow, privacy, the ASR benchmark, limitations and roadmap.
 
-For AI agents: <a href="../llms.txt" target="_self">llms.txt</a> (an index of all pages), <a href="../llms-full.txt" target="_self">llms-full.txt</a> (all the content in one file), <a href="../SKILL.md" target="_self">SKILL.md</a> (an agent skill file to deploy and connect alldayrec). To get any page's Markdown source, replace `.html` in its address with `.md`.
+For AI agents: <a href="../llms.txt" target="_self">llms.txt</a> (an index of all pages), <a href="../llms-full.txt" target="_self">llms-full.txt</a> (all the content in one file), <a href="../SKILL.md" target="_self">SKILL.md</a> (an agent skill file to deploy and connect AllDayRec). To get any page's Markdown source, replace `.html` in its address with `.md`.
 
 </div>

@@ -75,7 +75,7 @@ export const router = createRouter({
 // meta.title: the page's title in locales/*.json, again when the language changes
 const title = () => {
   const k = router.currentRoute.value.meta.title as string | undefined;
-  document.title = k ? t(k) : "alldayrec";
+  document.title = k ? t(k) : "AllDayRec";
 };
 router.afterEach(title);
 // the online demo has no recorder, microphone, phone or AI service to reach (src/demo.ts): those pages say so; opened

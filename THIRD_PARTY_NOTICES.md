@@ -1,6 +1,6 @@
 # Third-party notices
 
-alldayrec is MIT-licensed ([LICENSE](LICENSE)). The parts below come from others and keep their own licenses.
+AllDayRec is MIT-licensed ([LICENSE](LICENSE)). The parts below come from others and keep their own licenses.
 
 ## Code in this repository
 

@@ -1,6 +1,6 @@
 ---
 type: how-to
-description: "在网页的「导入录音」页把已有的录音文件（MP3、WAV、m4a、Plaud 导出的文件）导入 alldayrec。"
+description: "在网页的「导入录音」页把已有的录音文件（MP3、WAV、m4a、Plaud 导出的文件）导入 AllDayRec。"
 ---
 
 # 如何导入已有录音

@@ -30,7 +30,7 @@
     "people": "人物",
     "person": "人物",
     "device": "设备日志",
-    "record": "alldayrec 录音",
+    "record": "AllDayRec 录音",
     "import": "导入录音",
     "connect": "连接手机"
   },
@@ -844,7 +844,7 @@
   "timeline": {
     "start": "三步开始",
     "install": "装 App",
-    "installSub": "在手机上装好 alldayrec App",
+    "installSub": "在手机上装好 AllDayRec App",
     "scan": "扫码",
     "scanSub": "在 App 的「设置 › 扫码登录」里扫连接页上的二维码",
     "wear": "戴上设备",

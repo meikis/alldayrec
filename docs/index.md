@@ -2,11 +2,11 @@
 layout: home
 # the README's tagline, written once: the page title reuses it
 title: &tagline 开源心力球，私有第二大脑
-titleTemplate: "alldayrec（全天录）：:title"
+titleTemplate: "AllDayRec（全天录）：:title"
 hero:
-  name: alldayrec（全天录）
+  name: AllDayRec（全天录）
   text: *tagline
-  tagline: 全平台可用，不用买硬件，手机就能录。
+  tagline: 全平台可用，不用买硬件，手机就能录。<br>读作 all day rec。
   image:
     src: https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/live-captions-20261026b.gif
     alt: 实时页：边说边出字幕，AI 实时摘要跟着更新（示例数据）
@@ -50,6 +50,6 @@ features:
 - [参考](./reference/configuration.md)：配置项、HTTP API、MCP 工具、命令行、数据目录、模型文件和硬件。
 - [说明](./explanation/intro.md)：它是什么、和市面产品比、架构与数据流、隐私、语音识别评测、局限与路线图。
 
-给 AI Agent 的入口：<a href="./llms.txt" target="_self">llms.txt</a>（全部页面的目录）、<a href="./llms-full.txt" target="_self">llms-full.txt</a>（全部内容合成一个文件）、<a href="./SKILL.md" target="_self">SKILL.md</a>（部署并连接 alldayrec 的 Agent 技能文件）。每一页把地址里的 `.html` 换成 `.md` 就是它的 Markdown 原文。
+给 AI Agent 的入口：<a href="./llms.txt" target="_self">llms.txt</a>（全部页面的目录）、<a href="./llms-full.txt" target="_self">llms-full.txt</a>（全部内容合成一个文件）、<a href="./SKILL.md" target="_self">SKILL.md</a>（部署并连接 AllDayRec 的 Agent 技能文件）。每一页把地址里的 `.html` 换成 `.md` 就是它的 Markdown 原文。
 
 </div>

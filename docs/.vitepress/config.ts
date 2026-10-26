@@ -10,7 +10,7 @@ const base = process.env.DOCS_BASE || "/alldayrec/";
 const host = (process.env.DOCS_HOST || "https://suyiiyii.github.io").replace(/\/$/, "");
 const REPO = "https://github.com/suyiiyii/alldayrec";
 // social card for every page, also the repo's social preview; binaries live on the assets branch, not main
-const OG_IMAGE = "https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/og-card-20261026c.png";
+const OG_IMAGE = "https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/og-card-name-20261026.png";
 // the English README tagline; en/index.md repeats it in its title and hero
 const EN_TAGLINE = "An open-source Plaud for your whole day: a private second brain";
 
@@ -62,7 +62,7 @@ const SECTIONS: [zh: string, en: string, pages: [string, string, string][]][] = 
     "说明",
     "Explanation",
     [
-      ["简介与定位", "What alldayrec is", "explanation/intro"],
+      ["简介与定位", "What AllDayRec is", "explanation/intro"],
       ["和心力球、录音豆对比", "vs 心力球 and the Feishu bean", "explanation/vs-xinliqiu"],
       ["架构与数据流", "Architecture and data flow", "explanation/architecture"],
       ["隐私与数据去向", "Privacy: where your data goes", "explanation/privacy"],
@@ -83,7 +83,7 @@ const nav = (en: boolean): DefaultTheme.NavItem[] =>
   SECTIONS.map(([zh, e, pages]) => ({ text: en ? e : zh, link: `${en ? "/en/" : "/"}${pages[0][2]}` }));
 
 const KEYWORDS =
-  "alldayrec, 全天录, self-hosted all-day recorder, lifelog, speech-to-text, speaker diarization, MCP, open-source Plaud alternative, Limitless alternative, 录音豆, 心力球, 开源心力球";
+  "AllDayRec, 全天录, self-hosted all-day recorder, lifelog, speech-to-text, speaker diarization, MCP, open-source Plaud alternative, Limitless alternative, 录音豆, 心力球, 开源心力球";
 
 export default defineConfig({
   base,
@@ -120,10 +120,10 @@ export default defineConfig({
         domain: host,
         ignoreFiles: ["index.md", "en/index.md", "parts/**"],
         customTemplateVariables: {
-          title: "alldayrec docs / alldayrec 文档",
+          title: "AllDayRec docs / AllDayRec 文档",
           description:
-            "alldayrec (全天录) is a self-hosted all-day recorder and personal memory layer. Pages exist in Chinese (default, at the root) and English (under /en/).",
-          details: `To deploy and connect alldayrec step by step, read the agent skill file first: ${host}${base}SKILL.md. Every page below is also served as Markdown at the same path with .md; the whole site as one file: ${host}${base}llms-full.txt.`,
+            "AllDayRec (全天录) is a self-hosted all-day recorder and personal memory layer. Pages exist in Chinese (default, at the root) and English (under /en/).",
+          details: `To deploy and connect AllDayRec step by step, read the agent skill file first: ${host}${base}SKILL.md. Every page below is also served as Markdown at the same path with .md; the whole site as one file: ${host}${base}llms-full.txt.`,
         },
       }),
     ],
@@ -155,10 +155,10 @@ export default defineConfig({
     root: {
       label: "简体中文",
       lang: "zh-CN",
-      title: "alldayrec 文档",
-      titleTemplate: "alldayrec（全天录）：自己部署的全天录音", // the bare name is ambiguous in search: say what it is
+      title: "AllDayRec 文档",
+      titleTemplate: "AllDayRec（全天录）：自己部署的全天录音", // the bare name is ambiguous in search: say what it is
       description:
-        "alldayrec（全天录）：开源心力球，私有第二大脑。全平台可用，不用买硬件，手机就能录。",
+        "AllDayRec（全天录）：开源心力球，私有第二大脑。全平台可用，不用买硬件，手机就能录。",
       themeConfig: {
         nav: nav(false),
         sidebar: sidebar(false),
@@ -176,9 +176,9 @@ export default defineConfig({
       label: "English",
       lang: "en-US",
       link: "/en/",
-      title: "alldayrec docs",
-      titleTemplate: "alldayrec — self-hosted all-day recorder",
-      description: `alldayrec (全天录): ${EN_TAGLINE}. Works on every platform, no hardware to buy: your phone is the recorder.`,
+      title: "AllDayRec docs",
+      titleTemplate: "AllDayRec — self-hosted all-day recorder",
+      description: `AllDayRec (全天录): ${EN_TAGLINE}. Works on every platform, no hardware to buy: your phone is the recorder.`,
       themeConfig: {
         nav: nav(true),
         sidebar: sidebar(true),

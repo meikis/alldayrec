@@ -4,18 +4,18 @@ type: explanation
 
 # Architecture and data flow
 
-alldayrec is a Python server plus a few clients. Audio comes in from a recorder or a phone. The server runs speech detection and voiceprints locally, transcribes with a cloud or local ASR engine, summarizes with the LLM you configure, stores the results in SQLite, and keeps the original audio on disk.
+AllDayRec is a Python server plus a few clients. Audio comes in from a recorder or a phone. The server runs speech detection and voiceprints locally, transcribes with a cloud or local ASR engine, summarizes with the LLM you configure, stores the results in SQLite, and keeps the original audio on disk.
 
-<a class="only-light" href="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-light-20261026.png">
+<a class="only-light" href="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-light-name-20261026.png">
 <picture>
-  <source media="(max-width: 600px)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-narrow-en-light-20261026.png">
-  <img alt="Architecture: the open recorder, the Feishu bean and the phone mic upload through the phone app, the browser's /record page uploads directly; the self-hosted server stores the audio, then runs VAD, ASR and speakers, and an LLM writes summaries; the web UI, MCP and CLI read the results" src="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-light-20261026.png">
+  <source media="(max-width: 600px)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-narrow-en-light-name-20261026.png">
+  <img alt="Architecture: the open recorder, the Feishu bean and the phone mic upload through the phone app, the browser's /record page uploads directly; the self-hosted server stores the audio, then runs VAD, ASR and speakers, and an LLM writes summaries; the web UI, MCP and CLI read the results" src="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-light-name-20261026.png">
 </picture>
 </a>
-<a class="only-dark" href="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-dark-20261026.png">
+<a class="only-dark" href="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-dark-name-20261026.png">
 <picture>
-  <source media="(max-width: 600px)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-narrow-en-dark-20261026.png">
-  <img alt="Architecture: the open recorder, the Feishu bean and the phone mic upload through the phone app, the browser's /record page uploads directly; the self-hosted server stores the audio, then runs VAD, ASR and speakers, and an LLM writes summaries; the web UI, MCP and CLI read the results" src="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-dark-20261026.png">
+  <source media="(max-width: 600px)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-narrow-en-dark-name-20261026.png">
+  <img alt="Architecture: the open recorder, the Feishu bean and the phone mic upload through the phone app, the browser's /record page uploads directly; the self-hosted server stores the audio, then runs VAD, ASR and speakers, and an LLM writes summaries; the web UI, MCP and CLI read the results" src="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-dark-name-20261026.png">
 </picture>
 </a>
 
