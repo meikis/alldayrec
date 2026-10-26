@@ -3,6 +3,7 @@ import datetime as dt
 
 import anyio
 import numpy as np
+import pytest
 
 from alldayrec import asr, audio, device_pipeline
 from test_backlog import flac, heard, rig, tone
@@ -10,7 +11,8 @@ from test_backlog import flac, heard, rig, tone
 SR, DEV = 16000, "test-cadence"
 
 
-def test_sixty_second_pieces_get_whole_drafts(tmp_path, monkeypatch):
+@pytest.mark.parametrize("first_s", [55, 60])
+def test_sixty_second_pieces_get_whole_drafts(tmp_path, monkeypatch, first_s):
     async def final_engine(x, partial=None):
         await anyio.sleep_forever()
     rig(tmp_path, monkeypatch, final_engine)
@@ -23,11 +25,11 @@ def test_sixty_second_pieces_get_whole_drafts(tmp_path, monkeypatch):
         return h
     monkeypatch.setitem(asr.PROVIDERS, "local", draft_engine)
     z = lambda s: np.zeros(int(s * SR), np.int16)
-    p1 = np.concatenate([tone(1, 22), z(5), tone(2, 23), z(5)])   # 55 s
+    p1 = np.concatenate([tone(1, first_s - 33), z(5), tone(2, 23), z(5)])
     p2 = np.concatenate([tone(3, 25), z(5), tone(4, 25), z(5)])   # 60 s, starts where p1 ends
     now = dt.datetime.now()
-    t1 = now - dt.timedelta(seconds=115)
-    t2 = t1 + dt.timedelta(seconds=55)
+    t1 = now - dt.timedelta(seconds=first_s + 60)
+    t2 = t1 + dt.timedelta(seconds=first_s)
     texts = lambda: {t for _, ts in windows for t in ts}
 
     async def scenario():
@@ -45,7 +47,7 @@ def test_sixty_second_pieces_get_whole_drafts(tmp_path, monkeypatch):
             await anyio.sleep(2)
             tg.cancel_scope.cancel()
     anyio.run(scenario)
-    assert "3" in texts(), f"tone 3 (first half of the new 60 s piece) never drafted: {windows}"
+    assert texts() == {"1", "2", "3", "4"}, f"a piece was not fully drafted: {windows}"
 
 
 def test_open_page_drafts_all_120_seconds_unfinal(tmp_path, monkeypatch):
