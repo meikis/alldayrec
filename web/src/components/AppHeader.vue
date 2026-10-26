@@ -34,7 +34,7 @@ const DEMO = import.meta.env.MODE === "demo";
 <template>
   <header :class="{ bare: !inApp }">
     <div class="bar">
-      <h1>alldayrec</h1>
+      <h1><img src="../brand/mark.svg" alt="" width="24" height="24" />alldayrec</h1>
       <a v-if="DEMO" class="demo-tag" :href="lang() === 'en' ? '../en/' : '../'">{{
         t("common.demo")
       }}</a>
@@ -118,6 +118,9 @@ header {
   column-gap: var(--space-4);
 }
 h1 {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   font-size: var(--fs-lg);
   margin: 0;
   color: var(--accent);
@@ -161,6 +164,12 @@ nav a.on {
 }
 .demo-tag.phone {
   display: none;
+}
+/* the logo costs the bar 32 px: below this width (the online demo's tag included) it would push 我的 to a 2nd row */
+@media (max-width: 680px) {
+  h1 img {
+    display: none;
+  }
 }
 /* a phone: no name bar (a page with nothing in the header has none), the tabs at the bottom over the safe area */
 @media (max-width: 600px) {
