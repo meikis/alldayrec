@@ -40,6 +40,13 @@ export const speakerLabel = (name?: string | null) =>
           ? t("speaker.n", { n: name.slice(1) })
           : name;
 
+// what the model wrote (a summary, a point) with its speaker labels as the page says them: 「S2 说……」 is 「说话人 2 说……」.
+// Given the conversation's labels (participants: S? is never one), only those: an S3 bucket or a Galaxy S24 stays
+export const labelText = (text: string, labels?: string[]) =>
+  text.replace(/\bS(\d+|\?)(?!\w)/g, (m) =>
+    !labels || m === "S?" || labels.includes(m) ? speakerLabel(m) : m,
+  );
+
 // a list of people in one short line: 我 first (whether I was there matters most), two names, then 「等 N 人」
 export const speakerList = (names: string[]) => {
   const two = [...names.filter((n) => n === "我"), ...names.filter((n) => n !== "我")]

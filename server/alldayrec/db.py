@@ -399,6 +399,20 @@ def mark_todos(ids: list[str], mark: str | None):
             c.executemany("INSERT OR REPLACE INTO todo_marks VALUES (?, ?, ?, ?)", [(i, i.split(":", 1)[0], mark, now) for i in ids])
 
 
+def carry_marks(conv: str, old: list[dict], new: list[dict], c: sqlite3.Connection):
+    """A redone summary (new: its todos) keeps the marks of the old todos it repeats: a todo cited from the same sentence
+    has the same id; one cited from another sentence (or none) gets the mark of the old one with the same quote, else
+    the same text. The old id keeps its mark too: a recap names a todo by it."""
+    marks = {r[0]: (r[1], r[2]) for r in c.execute("SELECT id, mark, at FROM todo_marks WHERE conv = ?", (conv,))}
+    new = list(zip(todo_ids(conv, new), new))
+    for i, t in zip(todo_ids(conv, old), old):
+        if i in marks and i not in dict(new):
+            j = next((j for k in ("quote", "text") for j, n in new if j not in marks and t.get(k) and n.get(k) == t[k]), None)
+            if j:
+                marks[j] = marks[i]
+                c.execute("INSERT INTO todo_marks VALUES (?, ?, ?, ?)", (j, conv, *marks[i]))
+
+
 def todo_view(conv: dict, s: dict, i: str, t: dict, closed: dict, al: dict) -> dict:
     """A todo as the pages show it: with its id and mark, the sentence it came from, whom it is to (an alias as its
     person; none given: the others in the conversation), the conversation's title and start."""

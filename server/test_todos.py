@@ -1,6 +1,6 @@
 """Todos: the due list holds my dated todos of today and before, each with its id, context and how stale it is; 完成 /
 不对 by id (one, many, undone) take a todo off the due list and the recap card; the marks kept as feedback lines before
-todo_marks are carried over once."""
+todo_marks are carried over once, and onto a redone summary's todos."""
 import datetime as dt
 
 import anyio
@@ -8,7 +8,8 @@ import pytest
 from fastapi import HTTPException
 
 from alldayrec import db
-from alldayrec.routes_api import conversation, recap_get, todo_mark, todo_marks, todo_unmark, todos_due
+from alldayrec import summaries
+from alldayrec.routes_api import conversation, recap_get, resummarize, todo_mark, todo_marks, todo_unmark, todos_due
 
 C1, C2 = "c20261001100000", "c20261001110000"
 
@@ -122,3 +123,35 @@ def test_ids_unique_per_summary(tmp_path):
     db.conn().execute("DROP TABLE todo_marks")
     db.init()
     assert db.closed_todos() == {ids[1]: "wrong"}, "the migration names todos the same way"
+
+
+def test_redo_keeps_summary_and_marks(tmp_path, monkeypatch):
+    """重新生成 (and resummarize.py) keeps the old summary until the new one is written; the new todos keep the old ones'
+    marks: the same sentence is the same id, another sentence finds it by its quote or its text. The old ids stay
+    marked: a recap names its todos by them."""
+    today = dt.date.today().isoformat()
+    a = "2026-10-01T10:01:00.000"
+    store(tmp_path, [mine("发文档", today, at=a, quote="我把文档发你"), mine("约会议", today, at="2026-10-01T10:02:00.000", quote="周五开会"),
+                     mine("买票", today), mine("没标的", today, at="2026-10-01T10:09:00.000")])
+    old = db.todo_ids(C1, db.summary(C1)["todos"])
+    anyio.run(todo_marks, {"ids": old[:3], "mark": "done"})
+    new = [mine("把文档发给他", today, at=a, quote="我把文档发你"), mine("约个会", today, at="2026-10-01T10:03:00.000", quote="周五开会"),
+           mine("买票", today, at="2026-10-01T10:04:00.000"), mine("新的", today, at="2026-10-01T10:05:00.000")]
+
+    async def fake(c, tags):
+        return {"conversation": c["id"], "status": "done", "prompt_version": 11, "model": None, "title": "周会", "summary": "s", "todos": new}
+
+    async def redo():
+        await resummarize(C1)
+        assert db.summary(C1)["prompt_version"] == 8, "the old summary stays meanwhile"
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(summaries.summarize_loop)
+            while db.summary(C1)["prompt_version"] != 11:
+                await anyio.sleep(0.01)
+            tg.cancel_scope.cancel()
+
+    monkeypatch.setattr(summaries, "summarize", fake)
+    anyio.run(redo)
+    assert [(t["text"], t["mark"]) for t in anyio.run(conversation, C1)["summary"]["todos"]] == [
+        ("把文档发给他", "done"), ("约个会", "done"), ("买票", "done"), ("新的", None)]
+    assert set(old[:3]) < set(db.closed_todos()) and old[3] not in db.closed_todos()

@@ -288,8 +288,10 @@ async def feedback():
 
 @router.post("/api/conversation/{conv_id}/summarize")
 async def resummarize(conv_id: str):
+    """Write a conversation's summary again with the current prompt (重新生成, the backfill script resummarize.py). The
+    old summary stays until the new one is written, and stays if every try fails; the old todos' marks carry over."""
     c = find_conversation(conv_id)
     if not c:
         raise HTTPException(404, "no such conversation")
-    queue_summary(c)
+    queue_summary(c, keep=True)
     return {"status": "pending"}

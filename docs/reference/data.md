@@ -72,3 +72,5 @@ type: reference
 `perf_` 开头的表只记耗时和资源用量，不记内容，保留 90 天。`GET /api/perf?day=YYYY-MM-DD` 读一天的；从数据库副本导出用 `python -m alldayrec.perf export <live.db> <YYYY-MM-DD>`。
 
 `enrolled` 出现之前学到的声纹，每人只有一行汇总，不对应具体的句子。那时学进了别人声音的，可以用 `python -m alldayrec.bank relearn <live.db>` 从这个人现在名下的声音（实时录音里的）重新算出这一行：只打印每人前后的句数、用上和丢掉的声音数、新旧声纹的余弦，不写库；加 `--apply` 才写，写完重启服务端（声纹在启动时载入）。之后逐句学到的不受影响。
+
+摘要的提示词更新后，已有的摘要不会自动重写（`summaries.prompt_version` 记着每条用的版本）。要把最近几天的按新提示词重写，在服务端所在的机器上运行 `python -m alldayrec.resummarize`：它通过运行中的服务端逐段调用 `POST /api/conversation/{id}/summarize`（和对话页的「重新生成」一样），默认最近 30 天、每段之间等 5 秒，模型返回 429 时加倍等待；已经是新版本的、说话不到 60 秒的跳过，所以中断后再运行会接着做。`--dry-run` 只列出要重写的，`--limit N` 只做最早的 N 段。服务端地址取 `LIVE_RECORD_URL`，token 取 `LIVE_RECORD_TOKEN` 或标准输入的第一行。重写时旧摘要一直保留到新的写好，全部失败也保留；待办的「完成」「不对」标记会跟到新摘要里引用同一句话的待办上，没有的话跟到原句或内容相同的那条。最后打印重写和失败的段数、前后的待办数和已标记数，以及期间的模型调用次数。

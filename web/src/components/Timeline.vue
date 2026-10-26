@@ -1,11 +1,18 @@
 <script setup lang="ts">
 import { hhmmss, type LiveTopic } from "../lib/api";
-import { speakerLabel } from "../lib/speakers";
+import { labelText, speakerLabel } from "../lib/speakers";
 import Icon from "./Icon.vue";
 
 // open: the last topic is still being discussed. shown: whether a topic's points, decisions, todos and questions are
-// open; with it each title is a button that asks to flip them (flip), without it they all show
-defineProps<{ topics: LiveTopic[]; open?: boolean; shown?: (i: number) => boolean }>();
+// open; with it each title is a button that asks to flip them (flip), without it they all show. labels: the
+// conversation's, for its S<n> in the text (labelText; none given: every S<n>)
+const { labels } = defineProps<{
+  topics: LiveTopic[];
+  open?: boolean;
+  shown?: (i: number) => boolean;
+  labels?: string[];
+}>();
+const said = (x: string) => labelText(x, labels);
 defineEmits<{ jump: [start: string]; flip: [i: number] }>();
 </script>
 
@@ -21,25 +28,27 @@ defineEmits<{ jump: [start: string]; flip: [i: number] }>();
         hhmmss(t.start)
       }}</a>
       <button v-if="shown" class="fold" :aria-expanded="shown(i)" @click="$emit('flip', i)">
-        <Icon :name="shown(i) ? 'chevron-down' : 'chevron-right'" :size="16" /><b>{{ t.title }}</b>
+        <Icon :name="shown(i) ? 'chevron-down' : 'chevron-right'" :size="16" /><b>{{
+          said(t.title)
+        }}</b>
       </button>
-      <b v-else>{{ t.title }}</b>
+      <b v-else>{{ said(t.title) }}</b>
       <span v-if="open && i === topics.length - 1" class="badge">{{
         $t("topicTimeline.now")
       }}</span>
     </div>
     <ul v-if="!shown || shown(i)">
-      <li v-for="p in t.points" :key="p">{{ p }}</li>
+      <li v-for="p in t.points" :key="p">{{ said(p) }}</li>
       <li v-for="d in t.decisions" :key="'d' + d" class="dec">
-        {{ $t("topicTimeline.decided", { d }) }}
+        {{ $t("topicTimeline.decided", { d: said(d) }) }}
       </li>
       <li v-for="(x, j) in t.todos" :key="'t' + j" class="todo">
         {{ $t("topicTimeline.todo")
         }}<span class="who">{{ x.who ? speakerLabel(x.who) : $t("common.unknown") }}</span>
-        {{ x.what }}
+        {{ said(x.what) }}
       </li>
       <li v-for="q in t.open_questions" :key="'q' + q" class="q">
-        {{ $t("topicTimeline.open", { q }) }}
+        {{ $t("topicTimeline.open", { q: said(q) }) }}
       </li>
     </ul>
   </div>

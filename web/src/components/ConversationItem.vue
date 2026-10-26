@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { hhmm, MOSTLY_MEDIA, type Conversation } from "../lib/api";
 import { t } from "../i18n";
-import { speakerList } from "../lib/speakers";
+import { labelText, speakerList } from "../lib/speakers";
 
 // one conversation in a list: a card on a time line down the left (a grey dot: person colours are for avatars). Slim:
 // its start and its people, the title, the gist; the end, minutes, todos and tags are on the conversation page
@@ -33,7 +33,9 @@ const media = computed(() => (c.summary?.media_share ?? 0) >= MOSTLY_MEDIA);
               : t("api.summaryPending")
         }}
       </div>
-      <div v-if="!media && c.summary?.summary" class="gist">{{ c.summary.summary }}</div>
+      <div v-if="!media && c.summary?.summary" class="gist">
+        {{ labelText(c.summary.summary, c.participants) }}
+      </div>
     </RouterLink>
   </div>
 </template>

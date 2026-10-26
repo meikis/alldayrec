@@ -278,7 +278,7 @@ Parameters: `name?` is optional; the parentheses give where it goes (query, path
 
 | Method | Description | Parameters |
 |---|---|---|
-| `POST` | (no docstring) | `conv_id` (path, string) |
+| `POST` | Write a conversation's summary again with the current prompt (重新生成, the backfill script resummarize.py). | `conv_id` (path, string) |
 
 ### `/api/names`
 

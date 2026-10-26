@@ -6,6 +6,7 @@ import TodoItem from "./TodoItem.vue";
 import { type Recap } from "../lib/api";
 import { shiftDay, today } from "../lib/calendar";
 import { open as unmarked } from "../lib/todos";
+import { labelText } from "../lib/speakers";
 
 // the newest daily recap, folded to its headline unless open; a todo marked 完成 or 不对 leaves it at once
 const props = defineProps<{ recap: Recap; open?: boolean }>();
@@ -33,13 +34,13 @@ const when = computed(() =>
         {{ t("calendar.convs", recap.conversations)
         }}<template v-if="todos.length"> · {{ t("convItem.todos", todos.length) }}</template></span
       >
-      <div class="title">{{ recap.headline }}</div>
+      <div class="title">{{ labelText(recap.headline) }}</div>
     </summary>
     <ul>
       <li v-for="(h, i) in recap.highlights" :key="i">
         <RouterLink v-if="h.conv" :to="'/c/' + h.conv"
-          >{{ h.text }}<Icon class="go" name="chevron-right" :size="16" /></RouterLink
-        ><template v-else>{{ h.text }}</template>
+          >{{ labelText(h.text) }}<Icon class="go" name="chevron-right" :size="16" /></RouterLink
+        ><template v-else>{{ labelText(h.text) }}</template>
       </li>
     </ul>
     <template v-if="todos.length">

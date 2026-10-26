@@ -278,7 +278,7 @@ type: reference
 
 | 方法 | 说明 | 参数 |
 |---|---|---|
-| `POST` | （无说明） | `conv_id` (path, string) |
+| `POST` | Write a conversation's summary again with the current prompt (重新生成, the backfill script resummarize.py). | `conv_id` (path, string) |
 
 ### `/api/names`
 
