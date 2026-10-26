@@ -81,7 +81,8 @@ async def summarize_loop():
             if db.resolve_conversation(c["id"]) != c["id"] or db.kv(f"conversation_revision:{c['id']}") != revision:
                 continue
             old = db.summary(c["id"])
-            media = summary.media_labels(conversation_rows(c), res.get("media_spans") or [])
+            rows = conversation_rows(c)
+            media = summary.media_labels(rows, res.get("media_spans") or [])
             if res["status"] == "failed" and old and (old["status"] == "done" or old.get("title") or old.get("todos")):
                 with db.tx() as t:
                     db.put_summary({**old, "status": "done", "error": f"[resummarize_failed] {res['error']}"[:300]}, t)
@@ -93,10 +94,8 @@ async def summarize_loop():
                     res["todos"] = db.preserve_todos(c["id"], (old or {}).get("todos") or [], res.get("todos") or [], t)
                 db.put_summary(res, t)
                 late_store.summary_done(c["id"], t)
-                if media:  # a redone summary found media: its voices leave the voiceprint bank
-                    t.executemany("DELETE FROM voices WHERE conv = ? AND label = ?", [(c["id"], m) for m in media])
-            if media:
-                T().speakers["at"] = 0.0
+            if media != summary.media_labels(rows, (old or {}).get("media_spans") or []):
+                T().speakers["at"] = 0.0  # media eligibility changed; voiceprints and the pending self card stay intact
             ws.note(f"对话 {c['start'][11:19]} 的摘要" + (f"：{res['title']}" if res["status"] == "done" else f"生成失败：{res['error']}"),
                  "state" if res["status"] == "done" else "error")
             await ws.broadcast({"type": "summary", **res})
