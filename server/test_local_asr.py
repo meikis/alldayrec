@@ -3,6 +3,9 @@ into, token times into sentence times, sentences cut at punctuation and pauses, 
 silence, and fetch(): nothing when the pinned files are there, the files out of the pinned tarball otherwise."""
 import hashlib
 import io
+import os
+import subprocess
+import sys
 import tarfile
 
 import numpy as np
@@ -11,6 +14,28 @@ import pytest
 from alldayrec import infer
 from alldayrec import local_asr
 from alldayrec.local_asr import SR
+
+
+@pytest.mark.parametrize("configured,expected", [(None, 1), ("2", 2)])
+def test_asr_thread_budget_is_independent_of_voiceprints(configured, expected):
+    env = {**os.environ, "INFER_THREADS": "7"}
+    env.pop("LOCAL_ASR_THREADS", None)
+    if configured is not None:
+        env["LOCAL_ASR_THREADS"] = configured
+    code = '''
+import sys, types
+from alldayrec import local_asr
+local_asr.fetch = lambda path: None
+def build(*args, **kwargs):
+    print(kwargs["num_threads"])
+    return object()
+sys.modules["sherpa_onnx"] = types.SimpleNamespace(
+    OfflineRecognizer=types.SimpleNamespace(from_transducer=build))
+first = local_asr.recognizer()
+assert local_asr.recognizer() is first
+'''
+    got = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True)
+    assert got.stdout.strip() == str(expected), got.stderr
 
 
 class Rec:

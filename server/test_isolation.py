@@ -351,7 +351,7 @@ def test_nothing_per_person_in_a_module():
     allowed = {"core": {"TENANTS", "state", "NO_CACHE"}, "asr": {"PROVIDERS"}, "monitor": {"CHARGE"}, "db": {"_local"}, "ask": {"TOOLS", "SPECS"},
                "conversations": {"IGNORE"}, "hints": {"NOT_NAMES"}, "mcp_server": {"SERVER", "S", "CURSOR", "DATE", "READ", "TOOLS"},
                "infer": {"MODELS", "SOURCES", "@cache _vad"},  # the model files' hashes and URLs; the VAD model, loaded once for everyone
-               "local_asr": {"FILES", "_backlogged"},  # model hashes; opaque active scheduler handles, no tenant data
+               "local_asr": {"FILES"},  # the model files' hashes (its recognizer is one for everyone too, like the VAD)
                "perf": {"POOLS", "_minute", "_last"},  # the thread pools; the process's minute (its CPU, the loop's lag), no tenant's
                "music": {"@cache _yamnet"}}  # the music model, loaded once for everyone like the VAD
     here = Path(server.__file__).parent

@@ -4,7 +4,7 @@ labels the sentences, as for stepfun-sse. The 10-23 bench on 5 far-field recordi
 qwen-audio-3.1 13.5, StepFun SSE 18.2), RTF 0.024 at 4 threads on a 16-core desktop (0.045 at 1), 330 MB after load; its
 rows span two speakers 11 % of the time cut at 。？！ alone, 4 % cut also at ， and pauses, so sentences() cuts at both.
 A window is decoded in pieces of at most PIECE_S cut where it is quietest (what the bench measured). One recognizer
-for the process, built at the first call with INFER_THREADS threads; its files live in MODELS_DIR/NAME, taken then
+for the process, built at the first call with LOCAL_ASR_THREADS threads; its files live in MODELS_DIR/NAME, taken then
 out of the release tarball (LOCAL_ASR_URL: GitHub's, or a mirror's copy of the same tarball; sha256-checked) when
 missing or not the pinned ones (FILES).
 
@@ -24,6 +24,7 @@ import numpy as np
 from alldayrec import infer
 from alldayrec import threads
 
+THREADS = int(os.environ.get("LOCAL_ASR_THREADS", "1"))  # per ONNX session; independent of voiceprint threads
 SR = 16000
 TAR = "sherpa-onnx-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03"  # the release tarball and its top directory
 NAME = TAR.removeprefix("sherpa-onnx-")  # MODELS_DIR/NAME
@@ -48,15 +49,6 @@ log = logging.getLogger("live")
 
 _lock = threading.Lock()
 _rec = None
-_backlogged: set[object] = set()  # opaque live-pipeline handles needing cooperation on the process-wide ASR slot
-
-
-def draft_backlog(handle: object, active: bool):
-    """Only scheduling state, no tenant data. A pipeline removes its handle when caught up, unwatched or stopped."""
-    if active:
-        _backlogged.add(handle)
-    else:
-        _backlogged.discard(handle)
 
 
 def fetch(d: Path):
@@ -91,7 +83,7 @@ def recognizer():
             f = lambda n: str(d / n)
             _rec = sherpa_onnx.OfflineRecognizer.from_transducer(
                 f("encoder-epoch-99-avg-1.int8.onnx"), f("decoder-epoch-99-avg-1.onnx"), f("joiner-epoch-99-avg-1.int8.onnx"),
-                f("tokens.txt"), modeling_unit="cjkchar+bpe", bpe_vocab=f("bpe.model"), num_threads=infer.THREADS)
+                f("tokens.txt"), modeling_unit="cjkchar+bpe", bpe_vocab=f("bpe.model"), num_threads=THREADS)
         return _rec
 
 
@@ -156,24 +148,13 @@ def sentences(toks: list[tuple[str, int, int]]) -> list[dict]:
     return [{"start_ms": g["start_ms"], "end_ms": g["end_ms"], "text": t} for g in segs if (t := text(g["toks"]))]
 
 
-def _tokens(x: np.ndarray) -> list[tuple[str, int, int]]:
-    return tokens(recognizer(), x)
-
-
 def _transcribe(x: np.ndarray) -> list[dict]:
-    return sentences(_tokens(x))
+    return sentences(tokens(recognizer(), x))
 
 
 async def transcribe(x: np.ndarray, partial=None) -> list[dict]:
-    """Keep the original whole-window call unless a live draft is behind. Only then yield the same ASR cap between
-    existing <=20 s acoustic pieces. Join tokens before sentences, retaining cross-piece boundaries."""
-    if not _backlogged:
-        return await anyio.to_thread.run_sync(_transcribe, x, limiter=threads.ASR)
-    out = []
-    for a, b in pieces(x):
-        ts = await anyio.to_thread.run_sync(_tokens, x[a:b], limiter=threads.ASR)
-        out.extend((t, round(a / 16 + s), round(a / 16 + e)) for t, s, e in ts)
-    return sentences(out)
+    """x: 16 kHz int16 PCM -> [{start_ms, end_ms, text}] (no speaker), in a thread under threads.ASR; no partial answers."""
+    return await anyio.to_thread.run_sync(_transcribe, x, limiter=threads.ASR)
 
 
 if __name__ == "__main__":

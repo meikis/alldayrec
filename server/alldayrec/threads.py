@@ -12,7 +12,7 @@ import os
 import anyio
 
 INFER = anyio.CapacityLimiter(int(os.environ.get("INFER_CALLS", "2")))  # ReDimNet2 voiceprints (infer.py), the diarist's clustering
-ASR = anyio.CapacityLimiter(int(os.environ.get("ASR_CALLS", "1")))  # local_asr decodes (INFER_THREADS threads each): a 5 min piece ~7 s on 4 cores
+ASR = anyio.CapacityLimiter(int(os.environ.get("ASR_CALLS", "1")))  # local_asr decodes (LOCAL_ASR_THREADS per ONNX session)
 MEDIA = anyio.CapacityLimiter(int(os.environ.get("MEDIA_CALLS", "16")))  # decoding pieces, encoding windows (ffmpeg, base64)
 DB = anyio.CapacityLimiter(int(os.environ.get("DB_CALLS", "8")))  # reads over the whole store: speaker groups, MCP, ask's tools
 VAD = anyio.CapacityLimiter(2)  # the segmenters' VAD (Segmenter.apush), one call per segmenter at a time: ~1.6 ms of a core per s of audio

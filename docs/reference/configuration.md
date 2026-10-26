@@ -106,7 +106,7 @@ type: reference
 |---|---|---|---|
 | `SLICE_FOREGROUND_S`、`SLICE_BACKGROUND_S`、`SLICE_SCREEN_OFF_S` | `1`、`20`、`60` | App 在前台、后台、熄屏（安卓）时每块音频的秒数，App 通过 `/api/client-config` 和每次上传的回答读取 | `routes_upload.py` |
 | `SLICE_WATCHED_S` | `2` | 实时页 `/live` 开着时，后台和熄屏的每块音频最多这么多秒，手机在口袋里字幕也几秒内出来；「时间线」页上进行中对话的小窗不算。页面关掉后一分钟内恢复 | `routes_upload.py` |
-| `REFINE_WINDOW_S` | `240` | 初稿层一次最多处理的音频秒数；本地初稿游标落后最新音频超过 60 秒时，缩到最新 30 秒并跳过旧初稿，由定稿完整覆盖；追上后恢复原窗口与整窗 ASR 调度 | `device_pipeline.py` |
+| `REFINE_WINDOW_S` | `240` | 初稿层一次最多处理的音频秒数 | `device_pipeline.py` |
 | `LIVE_EVERY_S` | `120` | 进行中的对话新增这么多秒语音后，重做实时分析 | `device_pipeline.py` |
 | `SQUEEZE_KEEP_S` | `3` | 送给引擎前，长于这个秒数的静音剪到这么长；0 表示整段送 | `asr.py` |
 | `SQUEEZE_VAD` | `0.3` | 判断上面那些静音用的 VAD 阈值 | `segmenter.py` |
@@ -114,6 +114,7 @@ type: reference
 | `QWEN_ASR_MODEL` | `qwen-audio-3.1-asr-flash-filetrans` | `qwen` 引擎用的百炼模型 | `qwen_asr.py` |
 | `ASR_CALLS`、`INFER_CALLS`、`DB_CALLS`、`MEDIA_CALLS` | `1`、`2`、`8`、`16` | 同时进行的本地语音识别、声纹计算、全库查询、音频编解码的数量 | `threads.py` |
 | `INFER_THREADS` | `4` | 每次声纹计算用的 onnxruntime 线程数 | `infer.py` |
+| `LOCAL_ASR_THREADS` | `1` | 本地识别器每个 ONNX 会话的线程数（共三个会话），独立于 `INFER_THREADS`。有 CPU 配额时建议从 1 开始：即使 `ASR_CALLS=1`，自旋线程池仍可能与声纹争用 CPU；不影响云引擎 | `local_asr.py` |
 | `MUSIC_DETECT` | `1` | 定稿时听出是音乐（外放的歌、伴奏和人声差不多一样响）的句子不取声纹，说话人记为 `S?`，不会进人物页；仍然转写，转写行上有音符图标。把这句的说话人纠正成某个人，它就算人声：音符去掉，照常学声纹。0 关闭 | `music.py` |
 | `VAD_GAIN_MAX_DB` | `16` | 给 VAD 的特征最多提升多少 dB（只影响语音检测，不影响送给引擎和回放的音频）；0 关闭 | `infer.py` |
 | `ASR_GAIN_MAX_DB` | `16` | 送给引擎的音频最多提升多少 dB；0 原样送 | `squeeze.py` |
