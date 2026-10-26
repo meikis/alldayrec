@@ -441,13 +441,17 @@ def piece_file(p):
         yield source
 
 
+class StoredDecodeError(ValueError):
+    """The decoder returned no usable audio for an indexed piece."""
+
+
 @contextlib.contextmanager
 def piece_blocks(p, end):
     """Long stored files decoded on disk, then read at the consumer's pace (including its backpressure)."""
     with piece_file(p) as source:
         with decoded_file(source, p["path"].endswith(".aac"), p["n"]) as decoded:
             if decoded is None:
-                raise ValueError("stored audio could not be decoded")
+                raise StoredDecodeError("stored audio could not be decoded")
             pcm, count = decoded
             skip = max(0, round((end - p["start_ms"]) * SR / 1000))
             pcm.seek(skip * 2, os.SEEK_CUR)
@@ -735,14 +739,16 @@ async def stream(device: str, after: dt.datetime | None, edge_s: float | None = 
                     try:
                         blocks, skip = await anyio.to_thread.run_sync(
                             lambda: stack.enter_context(piece_blocks(p, max(end, ms, lo))), limiter=threads.MEDIA)
-                    except subprocess.TimeoutExpired:
+                    except (subprocess.TimeoutExpired, StoredDecodeError) as exc:
+                        reason = "无进展" if isinstance(exc, subprocess.TimeoutExpired) else "失败"
                         decode_failures += 1
                         if decode_failures >= DECODE_ATTEMPTS:
-                            ws.note(f"{device}：音频解码连续 {DECODE_ATTEMPTS} 次无进展，已暂停；请检查文件后重启处理任务", "error")
+                            ws.note(f"{device}：音频解码连续 {DECODE_ATTEMPTS} 次{reason}，已暂停；请检查文件后重启服务器", "error")
                             # Keep the piece queued, without skipping audio or letting
-                            # lasting() restart the same failing decode forever.
+                            # lasting() restart the same failing decode forever. A server
+                            # restart retries from finalized progress with a fresh budget.
                             await anyio.sleep_forever()
-                        ws.note(f"{device}：音频解码无进展，60 s 后重试（{decode_failures}/{DECODE_ATTEMPTS}）", "warn")
+                        ws.note(f"{device}：音频解码{reason}，60 s 后重试（{decode_failures}/{DECODE_ATTEMPTS}）", "warn")
                         await anyio.sleep(60)
                         continue
                     decode_failures = 0
