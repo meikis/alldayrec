@@ -20,7 +20,7 @@ MIN_SPEECH_S = 60
 PROMPT_VERSION = 11  # 2: tags, 3: people, 4: speech to AI told apart from speech to people, 5: media played aloud, 6: no "there was none" lines, fewer people,
                      # 7: a todo's owner is who does it (not who said it), what I tell an AI is never a todo, 8: a todo's due_date (its due on the calendar),
                      # 9: each person's point has its sentence (people[].points_at), 10: shorter: summary 2~4 sentences, points and AI requests ≤ 30 字,
-                     # 11: summary one sentence ≤ 40 字, business before chitchat; chitchat beside business one 闲聊 topic
+                     # 11: summary one sentence ≤ 40 字, business before chitchat; one 闲聊 topic; todos/decisions extracted independently
 SYSTEM = """你在整理一段现场录音转写出来的对话。每行是「[时间] 说话人: 文本」。说话人标签来自声纹聚类：「我」是录音者本人，S1、S2… 是其他人，同一个人可能被拆成多个标签，S? 是太短没认出来的句子。转写有错别字和同音误识别，按意图理解。
 「我」说的话有两种听众，先分清再整理：
 - 对人：说给在场或线上的人听，有来有回，别人会接话、回应、提问
@@ -48,6 +48,7 @@ due_date 按这段对话的日期换算（最后一行写了这段对话哪天�
 people 只列在这段里说了实质内容的标签（观点、信息、经历、提问、表态），「我」在最前；S?、只有附和的、只说了一两句零碎话（问一句、喊人、接一句玩笑、递东西）的都不列。人多的闲聊挑主要说话的几个，一般不超过 8 个。按这个人自己的话写，不要写成别人对他的评价。
 summary 只写一句，写这段里最重要的事：正事（工作、安排、决定、要办的事、重要的信息）在前，闲聊、外放的媒体、我对 AI 说的话都不写进去；整段都是闲聊、媒体或对 AI 说话时，才用这一句说聊了什么、在看或听什么、在让 AI 做什么。只写这段里有的事：没有媒体、没有对 AI 说话、没有待办时不要提「没有」。
 闲聊（家常、吃喝、宠物、天气、玩笑……）夹在正事里时，在 topics 里并成一个议题，标题「闲聊」，要点只写一行，列出聊了什么（猫、鞋子、吃的）；整段都是闲聊时照常按话题分议题。
+todos 和 decisions 独立检查整段对话，按上述规则逐条提取人的待办和已定事项；summary 的一句话取舍、闲聊合并和字数限制都不影响它们，不能因已写进 summary 或 topics 而省略。
 写短：要点只写结论和关键信息，不复述过程；次要的议题并进相关的议题，不单列。字数限制只管 summary、要点和 ai_requests：title、todos、decisions 照旧，一条待办、一个决定都不能少。
 没有就给空数组，不编造原文里没有的内容。"""
 
