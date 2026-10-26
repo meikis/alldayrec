@@ -39,3 +39,14 @@ def test_odd_todo_keeps_due_todos(tmp_path):
     db.put_summary(summary.result(c, rows, {"title": "t", "summary": "s", "todos": [
         {**todo, "text": ["买菜"]}, {**todo, "text": "交报告", "due": 1}, {**todo, "text": "买票"}]}, {"model": "m"}))
     assert [t["text"] for t in db.due_todos("2026-10-27")] == ["买票"]
+
+
+def test_resummarize_picks():
+    """The backfill redoes a closed conversation with enough speech whose summary is older or failed; one on the current
+    prompt is skipped (a second run resumes), so is a short one (立即总结's summary stays) and one already pending."""
+    from alldayrec.resummarize import due
+    c = {"state": "closed", "speech_s": 120}
+    assert [due({**c, "summary": s}) for s in ({"status": "done", "prompt_version": summary.PROMPT_VERSION - 1}, {"status": "failed"}, None,
+                                               {"status": "done", "prompt_version": summary.PROMPT_VERSION}, {"status": "pending"})] == [
+        None, None, None, "current", "pending"]
+    assert due({**c, "speech_s": 59}) == "short" and due({**c, "state": "open"}) == "open"

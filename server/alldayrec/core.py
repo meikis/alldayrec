@@ -39,6 +39,8 @@ def conversation_rows(c: dict) -> list[dict]:
 
 def queue_summary(c: dict, keep: bool = False):
     """keep: the current summary stays on the page until the new one is written (a rename redoes it)."""
+    if keep and (old := db.summary(c["id"])) and old.get("error"):
+        db.put_summary({**old, "error": None})
     if not keep:
         db.put_summary({"conversation": c["id"], "status": "pending", "error": None})
     T().summaries[0].send_nowait(c)

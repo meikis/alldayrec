@@ -185,8 +185,16 @@ async def recap_get(date: str = ""):
         closed, al, todos = db.closed_todos(), db.aliases(), []
         for x in r["todos"]:
             c, s = db.conversation(x["conv"]), db.summary(x["conv"]) or {}
-            found = (x["id"], db.todo(x["id"])) if x.get("id") else db.todo_by_text(x["conv"], x["text"])  # recaps before 10-24 hold no id
-            v = {**db.todo_view(c, s, *found, closed, al), **x} if c and found and found[1] else x
+            # A regenerated summary can reuse an unmarked id for another action. Match the cached text and its
+            # recipient/due when recorded; ambiguous or missing actions have no mark control until recap_redo.
+            ts = s.get("todos") or []
+            matches = [(i, t) for i, t in zip(db.todo_ids(x["conv"], ts), ts)
+                       if t.get("owner") == "我" and t.get("text") == x["text"]
+                       and all(t.get(k) == x[k] for k in ("to", "due") if k in x)]
+            if c and len(matches) == 1:
+                v = {**db.todo_view(c, s, *matches[0], closed, al), **x, "id": matches[0][0]}
+            else:
+                v = {**x, "id": None} if x.get("id") else x
             if v.get("id") not in closed:
                 todos.append(v)
         r["todos"] = todos

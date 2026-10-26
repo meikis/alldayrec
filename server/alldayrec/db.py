@@ -400,17 +400,33 @@ def mark_todos(ids: list[str], mark: str | None):
 
 
 def carry_marks(conv: str, old: list[dict], new: list[dict], c: sqlite3.Connection):
-    """A redone summary (new: its todos) keeps the marks of the old todos it repeats: a todo cited from the same sentence
-    has the same id; one cited from another sentence (or none) gets the mark of the old one with the same quote, else
-    the same text. The old id keeps its mark too: a recap names a todo by it."""
+    """Carry marks only across a unique match in text, else quote, with the same owner and recipient. Time alone is
+    not identity: two actions in one sentence can trade places. Refuse the whole replacement if a marked action is
+    missing/ambiguous or an old marked id would name another action (including in an existing recap)."""
     marks = {r[0]: (r[1], r[2]) for r in c.execute("SELECT id, mark, at FROM todo_marks WHERE conv = ?", (conv,))}
-    new = list(zip(todo_ids(conv, new), new))
-    for i, t in zip(todo_ids(conv, old), old):
-        if i in marks and i not in dict(new):
-            j = next((j for k in ("quote", "text") for j, n in new if j not in marks and t.get(k) and n.get(k) == t[k]), None)
-            if j:
-                marks[j] = marks[i]
-                c.execute("INSERT INTO todo_marks VALUES (?, ?, ?, ?)", (j, conv, *marks[i]))
+    before, after = list(zip(todo_ids(conv, old), old)), list(zip(todo_ids(conv, new), new))
+    moves, used = {}, set()
+    for i, t in before:
+        if i not in marks:
+            continue
+        match = []
+        for key in ("text", "quote"):
+            same = lambda n: t.get(key) and n.get(key) == t[key] and all(n.get(k) == t.get(k) for k in ("owner", "to"))
+            match = [(j, n) for j, n in after if same(n)]
+            if len(match) == 1 and sum(bool(same(n)) for _, n in before) == 1:
+                break
+            match = []
+        if not match or match[0][0] in used:
+            raise ValueError("marked todo has no unique match; old summary kept")
+        j = match[0][0]
+        if (i != j and any(k == i for k, _ in after)) or (j in marks and i != j):
+            raise ValueError("marked todo id would name a different action; old summary kept")
+        moves[i], used = j, used | {j}
+    if any(j in marks and j not in moves for j, _ in after):
+        raise ValueError("new todo reuses a historical marked id; old summary kept")
+    for i, j in moves.items():
+        if i != j:
+            c.execute("INSERT INTO todo_marks VALUES (?, ?, ?, ?)", (j, conv, *marks[i]))
 
 
 def todo_view(conv: dict, s: dict, i: str, t: dict, closed: dict, al: dict) -> dict:

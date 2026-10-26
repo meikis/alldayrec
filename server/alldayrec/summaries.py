@@ -59,16 +59,21 @@ async def summarize_loop():
                 if delay:
                     await anyio.sleep(delay)
         old = db.summary(c["id"])
-        if res["status"] == "failed" and old and old["status"] == "done":  # a failed upgrade keeps the old summary
-            ws.note(f"对话 {c['start'][11:19]} 的摘要重新生成失败，保留原来的：{res['error']}", "error")
-            continue
         media = summary.media_labels(conversation_rows(c), res.get("media_spans") or [])
-        with db.tx() as t:
-            db.put_summary(res, t)
-            if old and old["status"] == "done" and res["status"] == "done":
-                db.carry_marks(c["id"], old.get("todos") or [], res.get("todos") or [], t)
-            if media:  # a redone summary found media: its voices leave the voiceprint bank
-                t.executemany("DELETE FROM voices WHERE conv = ? AND label = ?", [(c["id"], m) for m in media])
+        try:
+            with db.tx() as t:
+                if old and old["status"] == "done":
+                    if res["status"] == "failed":
+                        raise ValueError(res["error"])
+                    db.carry_marks(c["id"], old.get("todos") or [], res.get("todos") or [], t)
+                db.put_summary(res, t)
+                if media:  # a redone summary found media: its voices leave the voiceprint bank
+                    t.executemany("DELETE FROM voices WHERE conv = ? AND label = ?", [(c["id"], m) for m in media])
+        except ValueError as e:
+            # Keep status=done and its content/marks; the backfill can report a failed upgrade without waiting out a timeout.
+            db.put_summary({**old, "error": f"[resummarize_failed] {e}"[:300]})
+            ws.note(f"对话 {c['start'][11:19]} 的摘要重新生成失败，保留原来的：{e}", "error")
+            continue
         if media:
             T().speakers["at"] = 0.0
         ws.note(f"对话 {c['start'][11:19]} 的摘要" + (f"：{res['title']}" if res["status"] == "done" else f"生成失败：{res['error']}"),

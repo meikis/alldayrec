@@ -127,12 +127,15 @@ def test_ids_unique_per_summary(tmp_path):
 
 def test_redo_keeps_summary_and_marks(tmp_path, monkeypatch):
     """重新生成 (and resummarize.py) keeps the old summary until the new one is written; the new todos keep the old ones'
-    marks: the same sentence is the same id, another sentence finds it by its quote or its text. The old ids stay
-    marked: a recap names its todos by them."""
+    marks through unique text or quote matches; a timestamp alone is not identity. Old marked ids stay reserved
+    because a recap can name its todos by them."""
     today = dt.date.today().isoformat()
     a = "2026-10-01T10:01:00.000"
     store(tmp_path, [mine("发文档", today, at=a, quote="我把文档发你"), mine("约会议", today, at="2026-10-01T10:02:00.000", quote="周五开会"),
                      mine("买票", today), mine("没标的", today, at="2026-10-01T10:09:00.000")])
+    db.conn().execute("INSERT INTO stars VALUES (?, ?, ?)", ("sentence", C1, today))
+    recap = {"date": today, "headline": "before", "todos": []}
+    db.put_kv(f"recap:{today}", recap)
     old = db.todo_ids(C1, db.summary(C1)["todos"])
     anyio.run(todo_marks, {"ids": old[:3], "mark": "done"})
     new = [mine("把文档发给他", today, at=a, quote="我把文档发你"), mine("约个会", today, at="2026-10-01T10:03:00.000", quote="周五开会"),
@@ -155,3 +158,61 @@ def test_redo_keeps_summary_and_marks(tmp_path, monkeypatch):
     assert [(t["text"], t["mark"]) for t in anyio.run(conversation, C1)["summary"]["todos"]] == [
         ("把文档发给他", "done"), ("约个会", "done"), ("买票", "done"), ("新的", None)]
     assert set(old[:3]) < set(db.closed_todos()) and old[3] not in db.closed_todos()
+    assert [tuple(x) for x in db.conn().execute("SELECT * FROM stars")] == [("sentence", C1, today)]
+    assert db.kv(f"recap:{today}") == recap
+
+
+@pytest.mark.parametrize("change", ["reorder", "missing", "ambiguous", "owner", "historical"])
+def test_redo_refuses_unsafe_marks(tmp_path, monkeypatch, change):
+    """A shared timestamp is not identity. Unsafe replacements keep all old content and marks, with an observable
+    error for the backfill; a retry clears that error while keeping the old summary visible."""
+    at = "2026-10-01T10:01:00.000"
+    old = [mine("发文档", None, at=at, quote="发文档和约会议"), mine("约会议", None, at=at, quote="发文档和约会议")]
+    store(tmp_path, old)
+    ids = db.todo_ids(C1, old)
+    db.mark_todos(ids[:1], "wrong")
+    new = {
+        "reorder": old[::-1],
+        "missing": old[1:],
+        "ambiguous": [{**t, "text": "改写"} for t in old],
+        "owner": [{**old[0], "owner": "S1"}, old[1]],
+        "historical": old + [mine("新的", None, at="historical")],
+    }[change]
+    if change == "historical":
+        db.mark_todos([f"{C1}:historical"], "done")
+    before_marks = db.closed_todos()
+    before = db.summary(C1)
+
+    async def fake(c, tags):
+        return {**before, "prompt_version": 11, "summary": "new", "todos": new}
+
+    async def run():
+        await resummarize(C1)
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(summaries.summarize_loop)
+            with anyio.fail_after(2):
+                while not db.summary(C1).get("error"):
+                    await anyio.sleep(.01)
+            tg.cancel_scope.cancel()
+        got = db.summary(C1)
+        assert got.pop("error").startswith("[resummarize_failed]")
+        assert got == before and db.closed_todos() == before_marks
+        await resummarize(C1)
+        assert db.summary(C1).get("error") is None
+
+    monkeypatch.setattr(summaries, "summarize", fake)
+    anyio.run(run)
+
+
+def test_cached_recap_never_marks_reused_id(tmp_path):
+    at = "2026-10-01T10:01:00.000"
+    store(tmp_path, [mine("发文档", None, at=at), mine("约会议", None, at=at)])
+    ids = db.todo_ids(C1, db.summary(C1)["todos"])
+    db.put_kv("recap:2026-10-01", {"date": "2026-10-01", "todos": [
+        {"conv": C1, "id": ids[0], "text": "发文档", "short": "发文档"},
+        {"conv": C1, "id": ids[1], "text": "约会议", "short": "约会议"}]})
+    db.put_summary({"conversation": C1, "status": "done", "todos": [mine("买票", None, at=at), mine("发文档", None, at=at)]})
+    got = anyio.run(recap_get, "2026-10-01")["todos"]
+    assert [(t["text"], t["id"]) for t in got] == [("发文档", ids[1]), ("约会议", None)]
+    anyio.run(todo_mark, got[0]["id"], {"mark": "done"})
+    assert db.todo(ids[0])["text"] == "买票" and ids[0] not in db.closed_todos()

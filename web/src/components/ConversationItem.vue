@@ -90,9 +90,5 @@ const media = computed(() => (c.summary?.media_share ?? 0) >= MOSTLY_MEDIA);
 .gist {
   font-size: var(--fs-sm);
   color: var(--fg-2);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
 }
 </style>
