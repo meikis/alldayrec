@@ -5,7 +5,9 @@
   <img src="https://raw.githubusercontent.com/suyiiyii/alldayrec/main/docs/public/brand/mark-light.svg" height="48" alt="">
 </picture>
 
-# alldayrec（全天录）
+# AllDayRec（全天录）
+
+读作 **all day rec**。
 
 ### 开源心力球，私有第二大脑。
 
@@ -49,12 +51,12 @@
 
 ## 架构
 
-<a href="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-zh-light-20261026.png">
+<a href="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-zh-light-name-20261026.png">
 <picture>
-  <source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-narrow-zh-dark-20261026.png">
-  <source media="(max-width: 600px)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-narrow-zh-light-20261026.png">
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-zh-dark-20261026.png">
-  <img alt="架构图：开源录音设备、飞书录音豆和手机麦克风经手机 App 上传，浏览器的 /record 页直接上传；自部署服务器先存下音频，再做语音检测、语音识别、认人，大模型写摘要；网页、MCP 和命令行读取结果" src="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-zh-light-20261026.png">
+  <source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-narrow-zh-dark-name-20261026.png">
+  <source media="(max-width: 600px)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-narrow-zh-light-name-20261026.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-zh-dark-name-20261026.png">
+  <img alt="架构图：开源录音设备、飞书录音豆和手机麦克风经手机 App 上传，浏览器的 /record 页直接上传；自部署服务器先存下音频，再做语音检测、语音识别、认人，大模型写摘要；网页、MCP 和命令行读取结果" src="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-zh-light-name-20261026.png">
 </picture>
 </a>
 

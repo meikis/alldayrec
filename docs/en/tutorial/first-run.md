@@ -1,11 +1,11 @@
 ---
 type: tutorial
-description: "Tutorial: run alldayrec with Docker on your computer, record a few sentences in the browser and see their transcript in the web UI. About 15 minutes."
+description: "Tutorial: run AllDayRec with Docker on your computer, record a few sentences in the browser and see their transcript in the web UI. About 15 minutes."
 ---
 
 # Your first transcript
 
-In this tutorial, you run alldayrec with Docker on your own computer, record a few sentences in the browser, and then see their transcript in the web UI. It takes about 15 minutes.
+In this tutorial, you run AllDayRec with Docker on your own computer, record a few sentences in the browser, and then see their transcript in the web UI. It takes about 15 minutes.
 
 ## What you need
 
@@ -92,7 +92,7 @@ Then open `http://127.0.0.1:8770/conversations`. What you just recorded is alrea
 
 ## What you've done
 
-You ran alldayrec on your own computer, recorded a few sentences, and saw their transcript with speakers in the web UI. The recording and the transcript are both in the `data/` directory.
+You ran AllDayRec on your own computer, recorded a few sentences, and saw their transcript with speakers in the web UI. The recording and the transcript are both in the `data/` directory.
 
 Next, you can:
 

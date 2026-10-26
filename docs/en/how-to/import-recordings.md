@@ -1,6 +1,6 @@
 ---
 type: how-to
-description: "Import recordings you already have (MP3, WAV, m4a, Plaud exports) into alldayrec on the web page Import recordings."
+description: "Import recordings you already have (MP3, WAV, m4a, Plaud exports) into AllDayRec on the web page Import recordings."
 ---
 
 # How to import recordings you already have
@@ -16,7 +16,7 @@ Pick the audio files on the web page, check their start times and upload them; t
 | Anker × Feishu 录音豆 | Yes, connect it directly | The Android app connects to the bean directly and uploads what it records after the binding, see [How to bind a recorder](./bind-recorder.md#feishu-recorder-bean). For recordings from before the binding, download them one at a time from the Feishu Minutes web page, then upload them |
 | OPPO 心力球 | No | It keeps no original audio, so there is no audio to import |
 
-The sources for the third-party products are in [What alldayrec is](../explanation/intro.md#how-it-compares).
+The sources for the third-party products are in [What AllDayRec is](../explanation/intro.md#how-it-compares).
 
 ## Import on the web page
 

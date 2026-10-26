@@ -30,7 +30,7 @@
     "people": "People",
     "person": "Person",
     "device": "Device log",
-    "record": "alldayrec recorder",
+    "record": "AllDayRec recorder",
     "import": "Import recordings",
     "connect": "Connect a phone"
   },
@@ -844,7 +844,7 @@
   "timeline": {
     "start": "Get started in three steps",
     "install": "Install the app",
-    "installSub": "Install the alldayrec app on your phone",
+    "installSub": "Install the AllDayRec app on your phone",
     "scan": "Scan",
     "scanSub": "In the app, open Settings › Scan to sign in and scan the QR code on the Connect page",
     "wear": "Wear the recorder",

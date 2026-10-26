@@ -1,11 +1,11 @@
 ---
 type: how-to
-description: "Run alldayrec long-term with Docker Compose on Linux or macOS: fill in .env, start it, pin an image version, set the time zone, find the data."
+description: "Run AllDayRec long-term with Docker Compose on Linux or macOS: fill in .env, start it, pin an image version, set the time zone, find the data."
 ---
 
 # How to deploy with Docker
 
-This page runs alldayrec long-term with Docker Compose on a Linux or macOS machine. If you are new to it, go through [Your first transcript](../tutorial/first-run.md) first.
+This page runs AllDayRec long-term with Docker Compose on a Linux or macOS machine. If you are new to it, go through [Your first transcript](../tutorial/first-run.md) first.
 
 ::: info Version
 `docker-compose.yml` uses the image `ghcr.io/suyiiyii/alldayrec:latest` by default, the newest version tag; the `main` tag follows the main branch. To choose a version, see [Pin an image version](#pin-an-image-version) below.

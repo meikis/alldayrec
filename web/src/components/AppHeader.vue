@@ -34,7 +34,7 @@ const DEMO = import.meta.env.MODE === "demo";
 <template>
   <header :class="{ bare: !inApp }">
     <div class="bar">
-      <h1><img src="../brand/mark.svg" alt="" width="24" height="24" />alldayrec</h1>
+      <h1><img src="../brand/mark.svg" alt="" width="24" height="24" />AllDayRec</h1>
       <a v-if="DEMO" class="demo-tag" :href="lang() === 'en' ? '../en/' : '../'">{{
         t("common.demo")
       }}</a>

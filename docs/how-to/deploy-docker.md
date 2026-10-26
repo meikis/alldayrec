@@ -1,11 +1,11 @@
 ---
 type: how-to
-description: "在 Linux 或 macOS 机器上用 Docker Compose 长期运行 alldayrec：填 .env、启动、固定镜像版本、设时区，以及数据存在哪。"
+description: "在 Linux 或 macOS 机器上用 Docker Compose 长期运行 AllDayRec：填 .env、启动、固定镜像版本、设时区，以及数据存在哪。"
 ---
 
 # 如何用 Docker 部署
 
-这篇讲在一台 Linux 或 macOS 机器上用 Docker Compose 长期运行 alldayrec。第一次接触的话，先跟着[第一次跑起来](../tutorial/first-run.md)走一遍。
+这篇讲在一台 Linux 或 macOS 机器上用 Docker Compose 长期运行 AllDayRec。第一次接触的话，先跟着[第一次跑起来](../tutorial/first-run.md)走一遍。
 
 ::: info 适用版本
 `docker-compose.yml` 默认用镜像 `ghcr.io/suyiiyii/alldayrec:latest`，即最新的版本标签；`main` 标签跟着 main 分支。要用哪个版本见下面的[固定镜像版本](#固定镜像版本)。

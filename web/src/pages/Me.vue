@@ -141,7 +141,7 @@ function pick(l: Lang) {
         <span class="text"
           ><b>{{ t("me.about") }}</b
           ><span class="muted"
-            >alldayrec · {{ t("me.version", { commit: status?.commit || "—" })
+            >AllDayRec · {{ t("me.version", { commit: status?.commit || "—" })
             }}{{ status?.engine ? " · " + t("me.engine", { engine: engines(status) }) : "" }}</span
           ></span
         >

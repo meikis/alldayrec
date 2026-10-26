@@ -1,11 +1,11 @@
 ---
 name: alldayrec-deploy
-description: Deploy alldayrec (全天录), the self-hosted all-day recorder, with Docker Compose, give its owner a token, connect the phone app, and connect an AI agent to its MCP endpoint. Use when someone asks to install, self-host, set up or connect alldayrec.
+description: Deploy AllDayRec (全天录), the self-hosted all-day recorder, with Docker Compose, give its owner a token, connect the phone app, and connect an AI agent to its MCP endpoint. Use when someone asks to install, self-host, set up or connect AllDayRec.
 ---
 
-# Deploy and connect alldayrec
+# Deploy and connect AllDayRec
 
-alldayrec is a server (FastAPI, SQLite, Docker image `ghcr.io/suyiiyii/alldayrec`) plus a web UI, a phone app and an
+AllDayRec is a server (FastAPI, SQLite, Docker image `ghcr.io/suyiiyii/alldayrec`) plus a web UI, a phone app and an
 optional Bluetooth recorder. Repo: https://github.com/suyiiyii/alldayrec. The links below are relative to the URL this
 file was served from; every page also exists as Markdown at the same path (`.md`). Chinese pages sit at the same
 paths without `en/`.

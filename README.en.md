@@ -5,7 +5,9 @@
   <img src="https://raw.githubusercontent.com/suyiiyii/alldayrec/main/docs/public/brand/mark-light.svg" height="48" alt="">
 </picture>
 
-# alldayrec（全天录）
+# AllDayRec（全天录）
+
+Pronounced **"all day rec"**.
 
 ### An open-source Plaud for your whole day: a private second brain.
 
@@ -23,7 +25,7 @@ The web UI switches to English on the 「我的」 (Me) page.
 
 </div>
 
-alldayrec is an all-day recording and memory service that runs on your own server. Record from morning to night with your phone, an open-source recorder or a Feishu recorder bean, and within a minute your server turns the audio into transcripts with speakers, then into a timeline of your day: conversation summaries, the people you talked to, to-dos and a daily recap. The original audio is kept, so every line can be played back. Your agent can search your days over MCP.
+AllDayRec is an all-day recording and memory service that runs on your own server. Record from morning to night with your phone, an open-source recorder or a Feishu recorder bean, and within a minute your server turns the audio into transcripts with speakers, then into a timeline of your day: conversation summaries, the people you talked to, to-dos and a daily recap. The original audio is kept, so every line can be played back. Your agent can search your days over MCP.
 
 ## What it does
 
@@ -51,12 +53,12 @@ alldayrec is an all-day recording and memory service that runs on your own serve
 
 ## Architecture
 
-<a href="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-light-20261026.png">
+<a href="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-light-name-20261026.png">
 <picture>
-  <source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-narrow-en-dark-20261026.png">
-  <source media="(max-width: 600px)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-narrow-en-light-20261026.png">
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-dark-20261026.png">
-  <img alt="Architecture: the open recorder, the Feishu bean and the phone mic upload through the phone app, the browser's /record page uploads directly; the self-hosted server stores the audio, then runs VAD, ASR and speakers, and an LLM writes summaries; the web UI, MCP and CLI read the results" src="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-light-20261026.png">
+  <source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-narrow-en-dark-name-20261026.png">
+  <source media="(max-width: 600px)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-narrow-en-light-name-20261026.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-dark-name-20261026.png">
+  <img alt="Architecture: the open recorder, the Feishu bean and the phone mic upload through the phone app, the browser's /record page uploads directly; the self-hosted server stores the audio, then runs VAD, ASR and speakers, and an LLM writes summaries; the web UI, MCP and CLI read the results" src="https://raw.githubusercontent.com/suyiiyii/alldayrec/assets/img/architecture-wide-en-light-name-20261026.png">
 </picture>
 </a>
 

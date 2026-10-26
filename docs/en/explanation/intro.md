@@ -1,11 +1,11 @@
 ---
 type: explanation
-description: "What alldayrec is: an open-source Plaud for your whole day, a private second brain that works on every platform. Screenshots, features, how it compares."
+description: "What AllDayRec is: an open-source Plaud for your whole day, a private second brain that works on every platform. Screenshots, features, how it compares."
 ---
 
-# What alldayrec is
+# What AllDayRec is
 
-alldayrec is an all-day recording and memory service that runs on your own server. Record from morning to night with your phone, an open-source recorder or a Feishu recorder bean, and within a minute your server turns the audio into transcripts with speakers, then into a timeline of your day: conversation summaries, the people you talked to, to-dos and a daily recap. The original audio is kept, so every line can be played back.
+AllDayRec is an all-day recording and memory service that runs on your own server. Record from morning to night with your phone, an open-source recorder or a Feishu recorder bean, and within a minute your server turns the audio into transcripts with speakers, then into a timeline of your day: conversation summaries, the people you talked to, to-dos and a daily recap. The original audio is kept, so every line can be played back.
 
 ## What it looks like
 
@@ -38,7 +38,7 @@ The Live page: captions come up as people speak, and the AI live summary keeps u
 
 <div class="compare">
 
-| | **alldayrec** | Anker × Feishu AI recorder (录音豆) | OPPO AI 心力球 | DingTalk A1 | Plaud | Bee (Amazon) | Omi |
+| | **AllDayRec** | Anker × Feishu AI recorder (录音豆) | OPPO AI 心力球 | DingTalk A1 | Plaud | Bee (Amazon) | Omi |
 |---|---|---|---|---|---|---|---|
 | **Price / subscription** | Free software; ASR paid by use, Qwen about ¥0.05/h; LLM extra | From ¥899; 6 months of AI credits, then ¥69/month membership[^lrd]; the membership transcribes about 50 h a month[^lrd3] | ¥499 trial price, invitation only, bought with an invite code[^xlq2][^xlq3]; OPPO, OnePlus and realme phones only[^xlq]; software pricing due at the end of November[^xlq4] | ¥499 / ¥799[^a1c]; membership ¥599 or ¥1499/year[^a1] | NotePin S $179[^plaud-dev]; free 300 min/month, Pro $17.99/month[^plaud-plan] | Relaunched 2026-10-15: Frontier $74.99, on sale in the US; Eclipse $99.99, no release date; Pro $11.99/month[^bee] | Pendant $179 ($129 on offer); free 300 cloud min/month, Pro $269/year[^omi-price] |
 | **All-day wear** | Yes: the phone app, a Feishu recorder bean (Android), or a home-built recorder that writes to its card | 8 h per charge, 32 h with the case[^lrd] | 24 h of continuous recording[^xlq] | A card on the back of the phone, 45 h of recording[^a1] | NotePin S about 20 h[^plaud-dev] | Frontier on the wrist or clipped on, 7 days[^bee-x] | Pendant |
@@ -54,7 +54,7 @@ The Live page: captions come up as people speak, and the AI live summary keeps u
 
 As of 2026-10-25. "No" means no published design files or source code; "Unknown" means we found no reliable source.
 
-For a closer look at OPPO's 心力球 and the Feishu recorder bean, and which to pick, see [alldayrec vs 心力球 and the Feishu bean](./vs-xinliqiu.md).
+For a closer look at OPPO's 心力球 and the Feishu recorder bean, and which to pick, see [AllDayRec vs 心力球 and the Feishu bean](./vs-xinliqiu.md).
 
 Limitless was bought by Meta on 2025-12-05 and is no longer sold[^limitless].
 
