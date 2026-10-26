@@ -1265,7 +1265,7 @@ abstract class AppLocalizations {
   /// No description provided for @keepRecordingsIos.
   ///
   /// In zh, this message translates to:
-  /// **'上传后存到「文件」App › 我的 iPhone › AllDayRec › recordings › 日期'**
+  /// **'上传后存到「文件」App › 我的 iPhone › alldayrec › recordings › 日期'**
   String get keepRecordingsIos;
 
   /// No description provided for @keepRecordingsAndroid.
@@ -1529,7 +1529,7 @@ abstract class AppLocalizations {
   /// No description provided for @linkNoPermission.
   ///
   /// In zh, this message translates to:
-  /// **'没有蓝牙权限：在 设置 › AllDayRec 里允许蓝牙'**
+  /// **'没有蓝牙权限：在 设置 › alldayrec 里允许蓝牙'**
   String get linkNoPermission;
 
   /// No description provided for @linkUnbound.

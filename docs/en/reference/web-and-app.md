@@ -53,5 +53,5 @@ Of the app's four bottom tabs, **时间线** (Timeline), **实时** (Live) and *
 | Token | The tenant token |
 | 扫码登录 (Scan to sign in) | Scans the QR code on the web page **连接手机** (Connect a phone), then fills in and saves the address and token |
 | 设备名 (Device name) | Read-only, taken from the phone name in the system settings; a Bluetooth recorder's audio is uploaded under the recorder's own name |
-| 本地保留录音 (Keep recordings on the phone) | Keeps a copy on the phone after upload: on iOS in the Files app › On My iPhone › alldayrec › recordings › date; on Android in `Android/data/com.suyiiyii.live_record/files/recordings/<date>/` |
+| 本地保留录音 (Keep recordings on the phone) | Keeps a copy on the phone after upload: on iOS in the Files app › On My iPhone › AllDayRec › recordings › date; on Android in `Android/data/com.suyiiyii.live_record/files/recordings/<date>/` |
 | 切片长度（服务端下发） (Piece length, set by the server) | Read-only: seconds of audio per piece in the foreground and in the background (and with the screen off on Android), set by the server's `SLICE_*` variables |
