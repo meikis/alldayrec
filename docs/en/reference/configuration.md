@@ -107,6 +107,8 @@ The server also reads the variables below, which `.env.example` doesn't list. Th
 | `SLICE_FOREGROUND_S`, `SLICE_BACKGROUND_S`, `SLICE_SCREEN_OFF_S` | `1`, `20`, `60` | Seconds of audio per piece while the app is in the foreground, in the background, or with the screen off (Android); the app reads them from `/api/client-config` and from the answer to each upload | `routes_upload.py` |
 | `SLICE_WATCHED_S` | `2` | While the 实时 (Live) page `/live` is open, pieces in the background and with the screen off are at most this many seconds, so captions appear within seconds even with the phone in a pocket; the card of the conversation going on, on the 时间线 (Timeline) page, does not count. Back to normal within a minute after the page closes | `routes_upload.py` |
 | `REFINE_WINDOW_S` | `240` | The most seconds of audio the draft layer handles at once | `device_pipeline.py` |
+| `LOCAL_DRAFT_WAIT_S` | `0.5` | Pure-local drafts: minimum actual ASR-slot admission delay in the previous pass before skipping audio already left undrafted when it finished; the first successful pass after a page opens is never skipped. Any cloud or mixed-cloud configuration keeps its previous window | `device_pipeline.py` |
+| `LOCAL_DRAFT_WINDOW_S` | `30` | Seconds of the latest audio to preview after that real contention; newly arrived large pieces alone do not activate it. Finals retain every sample | `device_pipeline.py` |
 | `LIVE_EVERY_S` | `120` | The live analysis is redone each time an ongoing conversation gains this many seconds of speech | `device_pipeline.py` |
 | `SQUEEZE_KEEP_S` | `3` | Before audio goes to the engine, silences longer than this many seconds are cut to this length; 0 sends the audio whole | `asr.py` |
 | `SQUEEZE_VAD` | `0.3` | The VAD threshold that finds those silences | `segmenter.py` |
@@ -114,7 +116,6 @@ The server also reads the variables below, which `.env.example` doesn't list. Th
 | `QWEN_ASR_MODEL` | `qwen-audio-3.1-asr-flash-filetrans` | The Bailian model the `qwen` engine uses | `qwen_asr.py` |
 | `ASR_CALLS`, `INFER_CALLS`, `DB_CALLS`, `MEDIA_CALLS` | `1`, `2`, `8`, `16` | How many local ASR runs, voiceprint computations, whole-database queries and audio encodes or decodes run at once | `threads.py` |
 | `INFER_THREADS` | `4` | onnxruntime threads per voiceprint computation | `infer.py` |
-| `LOCAL_ASR_THREADS` | `1` | Threads per ONNX session in the local ASR recognizer (three sessions); independent of `INFER_THREADS`. Start with 1 on a CPU quota: spinning thread pools can contend with voiceprints even with `ASR_CALLS=1`. Cloud engines are unaffected | `local_asr.py` |
 | `MUSIC_DETECT` | `1` | At finalization, a sentence heard as music (a song played aloud, the voice about as loud as its accompaniment) gets no voiceprint: its speaker is `S?` and it never reaches the People page. It is still transcribed, with a music-note icon on its row. Fixing its speaker to someone makes it a voice: the icon goes and its voiceprint is learnt as usual. 0 turns it off | `music.py` |
 | `VAD_GAIN_MAX_DB` | `16` | The most dB the VAD's features are raised (this affects only speech detection, not the audio sent to the engine or played back); 0 turns it off | `infer.py` |
 | `ASR_GAIN_MAX_DB` | `16` | The most dB the audio sent to the engine is raised; 0 sends it as is | `squeeze.py` |

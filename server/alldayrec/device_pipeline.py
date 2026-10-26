@@ -36,6 +36,8 @@ REFINE_EVERY_S = int(os.environ.get("REFINE_EVERY_S", "30"))  # draft layer: a p
 REFINE_WINDOW_S = int(os.environ.get("REFINE_WINDOW_S", "240"))    # draft layer: most audio one pass takes
 REFINE_MARGIN_S = 1.0                      # audio re-read before the last drafted time: the engine's sentence starts come a little late
 DRAFT_BACK_S = 300                         # a page that opens gets drafts this far back at most (the minutes not final yet)
+LOCAL_DRAFT_WAIT_S = float(os.environ.get("LOCAL_DRAFT_WAIT_S", "0.5"))  # actual ASR admission delay, not audio age
+LOCAL_DRAFT_WINDOW_S = int(os.environ.get("LOCAL_DRAFT_WINDOW_S", "30"))
 RELABEL_GROUPS = True                      # relabel at a close: the engine's speaker ids in a piece as units, split when their voices disagree
 LIVE_AUDIO_S = 120                         # a device whose audio came this recently is recording now: drafts and live analysis
 LIVE_EVERY_S = int(os.environ.get("LIVE_EVERY_S", "120"))  # new speech in the open conversation before the live analysis is redone
@@ -64,6 +66,7 @@ async def pipeline(device: str):
     if resume:
         log.info("%s resuming after the last finalized row at %s", device, resume)
     fcost, dcost = {}, {}  # what the final and the draft layer spent since their last perf_pieces row (perf.piece)
+    first_draft, draft_wait_s, draft_buffer_end = True, 0.0, None
 
     async def feed():
         """The device's audio stream into the final layer's segmenter, taking the next stretch only while finalization
@@ -444,27 +447,42 @@ async def pipeline(device: str):
     async def draft_pass(end: dt.datetime | None = None) -> bool:
         """One draft pass; True when more remains. Timer (end None): [draft_to - margin, + window], rows near its end
         left open; VAD: from 1 s before the first undrafted utterance to `end`, a point in the pause after one."""
+        nonlocal first_draft, draft_wait_s, draft_buffer_end
         dto = st.draft_to
+        window_s = REFINE_WINDOW_S
+        waited, buffered = draft_wait_s, draft_buffer_end
+        draft_wait_s, draft_buffer_end = 0.0, None  # consume a previous call's admission signal only once
+        if (not first_draft and asr.ENGINE == asr.DRAFT_ENGINE == "local"
+                and asr.ENGINE_FALLBACK in ("", "local") and waited > 0 and waited >= LOCAL_DRAFT_WAIT_S
+                and buffered and (buffered - dto).total_seconds() > LOCAL_DRAFT_WINDOW_S):
+            # This audio was already left undrafted when a call that waited finished: a newly uploaded big piece
+            # alone cannot trigger this. A page's first successful pass always keeps DRAFT_BACK_S coverage.
+            window_s = min(window_s, LOCAL_DRAFT_WINDOW_S)
+            before = dto
+            dto = st.draft_to = max(dto, dseg.time_at(max(dseg.audio_base, dseg.samples - int(window_s * SR))))
+            log.info("draft %s: ASR waited %.3f s; skip %.3f s of old preview", device, waited, (dto - before).total_seconds())
+            if end is not None and end <= dto:
+                return False
         t_run = time.perf_counter()
         if end is None:
-            t0, x = dseg.window(REFINE_WINDOW_S, dto - dt.timedelta(seconds=REFINE_MARGIN_S))
+            t0, x = dseg.window(window_s, dto - dt.timedelta(seconds=REFINE_MARGIN_S))
         else:
             us = st.draft_utts = [u for u in st.draft_utts if u[1] > dto]
             if not us:
                 return False
             start = max(us[0][0] - dt.timedelta(seconds=1), dto - dt.timedelta(seconds=REFINE_MARGIN_S))
-            t0, x = dseg.window(min(REFINE_WINDOW_S, (dseg.sample_at(end) - dseg.sample_at(start)) / SR), start)
+            t0, x = dseg.window(min(window_s, (dseg.sample_at(end) - dseg.sample_at(start)) / SR), start)
         a0 = dseg.sample_at(t0)
         at = lambda s: dseg.time_at(a0 + int(s * SR))
         since = max(0.0, (dseg.sample_at(dto) - a0) / SR)
-        edge = 0.0 if end is not None and len(x) / SR < REFINE_WINDOW_S else EDGE_S  # a window cut short of its pause may end mid-sentence
+        edge = 0.0 if end is not None and len(x) / SR < window_s else EDGE_S  # a window cut short of its pause may end mid-sentence
         if len(x) / SR - since < (0.3 if end is not None else EDGE_S + 10):
             return False
         hi = at(len(x) / SR - EDGE_S)
         if end is None and not dseg.speaking() and (st.last_speech is None or st.last_speech <= dto):
             st.draft_to = hi  # silence: nothing to send
             db.put_kv(f"draft_to:{device}", iso(hi))
-            return (dseg.time_at(dseg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
+            return (dseg.time_at(dseg.samples) - hi).total_seconds() > window_s - REFINE_MARGIN_S
         sent, n_rows = since, 0  # seconds into the window up to which rows went out while the call ran
 
         async def publish(rows: list[dict], upto: dt.datetime, engine: str):
@@ -487,10 +505,17 @@ async def pipeline(device: str):
 
         send, answers = anyio.create_memory_object_stream(math.inf)
         got = []
+        admission_s = 0.0
 
         async def call():
+            nonlocal admission_s
             with send, perf.timed(dcost, "asr_ms"):  # closed when the call ends, and with it the answers
-                got.append(await asr.engine_segs(x, speech_in(dseg, a0, len(x)), send.send_nowait, asr.DRAFT_ENGINE, "draft", device))
+                threads.clear_asr_wait()
+                try:
+                    got.append(await asr.engine_segs(x, speech_in(dseg, a0, len(x)), send.send_nowait, asr.DRAFT_ENGINE, "draft", device))
+                    admission_s = threads.asr_wait_s() if asr.DRAFT_ENGINE == "local" else 0.0
+                finally:
+                    threads.clear_asr_wait()
         m0 = ddia.mark()
         try:
             with answers:
@@ -521,15 +546,18 @@ async def pipeline(device: str):
                                 "early_to": sent, "from": iso(at(since)), "to": iso(hi), "segs": raw}, ensure_ascii=False) + "\n")
         engine = raw[0]["engine"] if raw else asr.DRAFT_ENGINE
         await publish(rows, hi, engine)
+        first_draft = False
+        draft_wait_s, draft_buffer_end = admission_s, dseg.time_at(dseg.samples)
         perf.piece(device, "draft", len(x) / SR, n_rows, dcost)
         st.draft = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
                        "engine": engine, "changed": n_rows, "early_s": round(sent - since), "to": iso(hi)}
         log.info("draft %s: %s", device, st.draft)
         if end is not None:  # pauses that came during the pass have set wake again
-            return len(x) / SR >= REFINE_WINDOW_S
-        return (dseg.time_at(dseg.samples) - hi).total_seconds() > REFINE_WINDOW_S - REFINE_MARGIN_S
+            return len(x) / SR >= window_s
+        return (dseg.time_at(dseg.samples) - hi).total_seconds() > window_s - REFINE_MARGIN_S
 
     async def draft_loop():
+        nonlocal first_draft
         while True:
             with anyio.move_on_after(REFINE_EVERY_S):  # a pause after speech drafts at once; the timer covers pause-less speech
                 await st.wake.wait()
@@ -543,6 +571,7 @@ async def pipeline(device: str):
             st.draft_to = max(t for t in (st.draft_to, st.done_to, floor, dseg.time_at(dseg.audio_base)) if t)
             if not st.drafting:
                 st.drafting = True
+                first_draft = True
                 st.latency.clear()  # counted afresh: the rows of an earlier watch say nothing of this one
                 ws.note(f"{device}：页面在看，开始出初稿（从 {st.draft_to.strftime('%H:%M:%S')} 起）", "state")
                 while await draft_pass():  # what came before the page opened, in windows

@@ -4,7 +4,7 @@ labels the sentences, as for stepfun-sse. The 10-23 bench on 5 far-field recordi
 qwen-audio-3.1 13.5, StepFun SSE 18.2), RTF 0.024 at 4 threads on a 16-core desktop (0.045 at 1), 330 MB after load; its
 rows span two speakers 11 % of the time cut at 。？！ alone, 4 % cut also at ， and pauses, so sentences() cuts at both.
 A window is decoded in pieces of at most PIECE_S cut where it is quietest (what the bench measured). One recognizer
-for the process, built at the first call with LOCAL_ASR_THREADS threads; its files live in MODELS_DIR/NAME, taken then
+for the process, built at the first call with INFER_THREADS threads; its files live in MODELS_DIR/NAME, taken then
 out of the release tarball (LOCAL_ASR_URL: GitHub's, or a mirror's copy of the same tarball; sha256-checked) when
 missing or not the pinned ones (FILES).
 
@@ -24,7 +24,6 @@ import numpy as np
 from alldayrec import infer
 from alldayrec import threads
 
-THREADS = int(os.environ.get("LOCAL_ASR_THREADS", "1"))  # per ONNX session; independent of voiceprint threads
 SR = 16000
 TAR = "sherpa-onnx-x-asr-zipformer-transducer-zh-en-punct-int8-2026-06-03"  # the release tarball and its top directory
 NAME = TAR.removeprefix("sherpa-onnx-")  # MODELS_DIR/NAME
@@ -83,7 +82,7 @@ def recognizer():
             f = lambda n: str(d / n)
             _rec = sherpa_onnx.OfflineRecognizer.from_transducer(
                 f("encoder-epoch-99-avg-1.int8.onnx"), f("decoder-epoch-99-avg-1.onnx"), f("joiner-epoch-99-avg-1.int8.onnx"),
-                f("tokens.txt"), modeling_unit="cjkchar+bpe", bpe_vocab=f("bpe.model"), num_threads=THREADS)
+                f("tokens.txt"), modeling_unit="cjkchar+bpe", bpe_vocab=f("bpe.model"), num_threads=infer.THREADS)
         return _rec
 
 
