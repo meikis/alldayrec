@@ -16,6 +16,7 @@ def test_sixty_second_pieces_get_whole_drafts(tmp_path, monkeypatch, first_s):
     async def final_engine(x, partial=None):
         await anyio.sleep_forever()
     rig(tmp_path, monkeypatch, final_engine)
+    monkeypatch.setattr(asr, "ENGINE", "local")
     monkeypatch.setattr(asr, "DRAFT_ENGINE", "local")
     windows = []
 
@@ -55,6 +56,7 @@ def test_open_page_drafts_all_120_seconds_unfinal(tmp_path, monkeypatch):
     async def final_engine(x, partial=None):
         await anyio.sleep_forever()
     rig(tmp_path, monkeypatch, final_engine)
+    monkeypatch.setattr(asr, "ENGINE", "local")
     monkeypatch.setattr(asr, "DRAFT_ENGINE", "local")
     windows = []
     async def draft_engine(x, partial=None):
