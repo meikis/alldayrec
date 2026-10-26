@@ -39,8 +39,9 @@ const when = computed(() =>
     <ul>
       <li v-for="(h, i) in recap.highlights" :key="i">
         <RouterLink v-if="h.conv" :to="'/c/' + h.conv"
-          >{{ labelText(h.text) }}<Icon class="go" name="chevron-right" :size="16" /></RouterLink
-        ><template v-else>{{ labelText(h.text) }}</template>
+          >{{ labelText(h.text, h.participants)
+          }}<Icon class="go" name="chevron-right" :size="16" /></RouterLink
+        ><template v-else>{{ labelText(h.text, h.participants) }}</template>
       </li>
     </ul>
     <template v-if="todos.length">

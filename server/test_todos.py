@@ -157,15 +157,15 @@ def test_redo_keeps_summary_and_marks(tmp_path, monkeypatch):
     anyio.run(redo)
     assert [(t["text"], t["mark"]) for t in anyio.run(conversation, C1)["summary"]["todos"]] == [
         ("把文档发给他", "done"), ("约个会", "done"), ("买票", "done"), ("新的", None)]
-    assert set(old[:3]) < set(db.closed_todos()) and old[3] not in db.closed_todos()
+    assert set(old[:3]) == set(db.closed_todos()), "the original mark rows never move or duplicate"
+    assert db.todo_ids(C1, db.summary(C1)["todos"])[:3] == old[:3]
     assert [tuple(x) for x in db.conn().execute("SELECT * FROM stars")] == [("sentence", C1, today)]
     assert db.kv(f"recap:{today}") == recap
 
 
 @pytest.mark.parametrize("change", ["reorder", "missing", "ambiguous", "owner", "historical"])
-def test_redo_refuses_unsafe_marks(tmp_path, monkeypatch, change):
-    """A shared timestamp is not identity. Unsafe replacements keep all old content and marks, with an observable
-    error for the backfill; a retry clears that error while keeping the old summary visible."""
+def test_redo_preserves_unmatched_marked_todos(tmp_path, monkeypatch, change):
+    """Reorder/missing/ambiguous/different-owner outputs never block regeneration or move marks."""
     at = "2026-10-01T10:01:00.000"
     old = [mine("发文档", None, at=at, quote="发文档和约会议"), mine("约会议", None, at=at, quote="发文档和约会议")]
     store(tmp_path, old)
@@ -191,14 +191,17 @@ def test_redo_refuses_unsafe_marks(tmp_path, monkeypatch, change):
         async with anyio.create_task_group() as tg:
             tg.start_soon(summaries.summarize_loop)
             with anyio.fail_after(2):
-                while not db.summary(C1).get("error"):
+                while db.summary(C1).get("summary") != "new":
                     await anyio.sleep(.01)
             tg.cancel_scope.cancel()
         got = db.summary(C1)
-        assert got.pop("error").startswith("[resummarize_failed]")
-        assert got == before and db.closed_todos() == before_marks
-        await resummarize(C1)
-        assert db.summary(C1).get("error") is None
+        assert got["prompt_version"] == 11 and not got.get("error")
+        assert db.closed_todos() == before_marks
+        assert db.todo(ids[0])["text"] == old[0]["text"] and db.todo(ids[0])["owner"] == "我"
+        current_ids = db.todo_ids(C1, got["todos"])
+        assert len(current_ids) == len(set(current_ids))
+        if change == "historical":
+            assert f"{C1}:historical" not in current_ids
 
     monkeypatch.setattr(summaries, "summarize", fake)
     anyio.run(run)
@@ -226,6 +229,78 @@ def test_cached_recap_keeps_historical_mark_filter(tmp_path):
     db.mark_todos([id], "done")
     new = [mine("把文档发给他", None, at=at, quote="我把文档发你")]
     with db.tx() as c:
-        db.carry_marks(C1, db.summary(C1)["todos"], new, c)
+        new = db.preserve_todos(C1, db.summary(C1)["todos"], new, c)
         db.put_summary({"conversation": C1, "status": "done", "todos": new}, c)
     assert anyio.run(recap_get, "2026-10-01")["todos"] == [], "a completed reworded action stays out of the cached recap"
+
+
+@pytest.mark.parametrize("to", ["Bob", "Alice"])
+def test_marked_todos_survive_rename_merge_and_undo(tmp_path, monkeypatch, to):
+    import json
+    from alldayrec.routes_speakers import apply_rename, keep_undo, speaker_undo
+    old = [dict(owner="S1", to="我", text="发文档", quote="文档给你", at="2026-10-01T10:01:00.000"),
+           dict(owner="我", to="S1", text="买票", quote="票给你", at="2026-10-01T10:02:00.000"),
+           dict(owner="Alice", to="我", text="约会议", quote="约个会议", at="2026-10-01T10:03:00.000")]
+    store(tmp_path, old)
+    db.conn().execute("UPDATE conversations SET participants=? WHERE id=?", (json.dumps(["我", "S1", "Alice"]), C1))
+    with db.tx() as c:
+        db.insert_sentences(c, [dict(id="one", start=old[0]["at"], end="2026-10-01T10:01:05.000", speaker="S1", text="文档给你", source="mic")])
+    ids = db.todo_ids(C1, old)
+    db.mark_todos(ids, "done")
+    rounds = 0
+    async def fake(c, tags):
+        nonlocal rounds
+        rounds += 1
+        ts = db.summary(C1)["todos"]
+        return {"conversation": C1, "status": "done", "prompt_version": 11, "model": None, "title": "t", "summary": f"round{rounds}",
+                "todos": [{**t, "text": t["text"] + "!", "at": None} for t in ts if rounds != 1 or t["id"] != ids[0]]}
+    async def wait(n):
+        with anyio.fail_after(2):
+            while db.summary(C1).get("summary") != f"round{n}":
+                await anyio.sleep(.01)
+    async def run():
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(summaries.summarize_loop)
+            _, _, before = apply_rename(C1, "S1", to)
+            await wait(1)
+            assert db.todo(ids[0])["owner"] == to and db.todo(ids[1])["to"] == to
+            assert db.todo(ids[2])["owner"] == "Alice"
+            await speaker_undo({"undo": keep_undo([before])})
+            await wait(2)
+            assert db.todo(ids[0])["owner"] == "S1" and db.todo(ids[1])["to"] == "S1"
+            assert db.todo(ids[2])["owner"] == "Alice", "undo a merge must not rename the original Alice's action"
+            await resummarize(C1)
+            await wait(3)
+            tg.cancel_scope.cancel()
+    monkeypatch.setattr(summaries, "summarize", fake)
+    anyio.run(run)
+    assert db.closed_todos() == {i: "done" for i in ids}
+    assert set(db.todo_ids(C1, db.summary(C1)["todos"])) == set(ids)
+
+
+def test_pinned_todo_regeneration_undo_and_cached_recap(tmp_path):
+    old = [mine("发文档", None, at="2026-10-01T10:01:00.000", quote="文档给你")]
+    store(tmp_path, old)
+    id = db.todo_ids(C1, old)[0]
+    db.put_kv("recap:2026-10-01", {"todos": [{"conv": C1, "id": id, "text": "发文档"}]})
+    db.mark_todos([id], "done")
+    for n in range(3):
+        with db.tx() as c:
+            ts = db.preserve_todos(C1, db.summary(C1)["todos"], [mine(f"发出文档{n}", None, at=None, quote="文档给你")], c)
+            db.put_summary({"conversation": C1, "status": "done", "todos": ts}, c)
+        assert db.todo_ids(C1, ts) == [id] and db.closed_todos() == {id: "done"}
+        assert anyio.run(recap_get, "2026-10-01")["todos"] == []
+    anyio.run(todo_unmark, id)  # current ID and an old toast's ID are identical
+    got = anyio.run(recap_get, "2026-10-01")["todos"]
+    assert [(t["id"], t["text"], t["mark"]) for t in got] == [(id, "发出文档2", None)]
+    anyio.run(todo_marks, {"ids": [id], "mark": "wrong"})
+    assert anyio.run(recap_get, "2026-10-01")["todos"] == []
+    anyio.run(todo_marks, {"ids": [id], "mark": None})
+    assert len(anyio.run(recap_get, "2026-10-01")["todos"]) == 1 and db.closed_todos() == {}
+
+
+def test_recap_supplies_linked_participants(tmp_path):
+    store(tmp_path, [])
+    db.put_kv("recap:2026-10-01", {"todos": [], "highlights": [{"conv": C1, "text": "S1 uses S3"}, {"conv": None, "text": "Galaxy S24"}]})
+    h = anyio.run(recap_get, "2026-10-01")["highlights"]
+    assert h[0]["participants"] == ["我", "S1", "王哥"] and "participants" not in h[1]

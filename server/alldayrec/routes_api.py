@@ -185,21 +185,23 @@ async def recap_get(date: str = ""):
         closed, al, todos = db.closed_todos(), db.aliases(), []
         for x in r["todos"]:
             c, s = db.conversation(x["conv"]), db.summary(x["conv"]) or {}
-            # A regenerated summary can reuse an unmarked id for another action. Match the cached text and its
-            # recipient/due when recorded; ambiguous or missing actions have no mark control until recap_redo.
             ts = s.get("todos") or []
-            matches = [(i, t) for i, t in zip(db.todo_ids(x["conv"], ts), ts)
-                       if t.get("owner") == "我" and t.get("text") == x["text"]
-                       and all(t.get(k) == x[k] for k in ("to", "due") if k in x)]
-            if c and len(matches) == 1:
-                v = {**db.todo_view(c, s, *matches[0], closed, al), **x, "id": matches[0][0]}
+            pairs = list(zip(db.todo_ids(x["conv"], ts), ts))
+            # A pinned ID survives rewording, time changes and renames. Legacy unpinned IDs still need a text match.
+            matches = [(i, t) for i, t in pairs if x.get("id") == i == t.get("id")]
+            if not matches:
+                matches = [(i, t) for i, t in pairs if t.get("text") == x["text"]
+                           and all(t.get(k) == x[k] for k in ("to", "due") if k in x)]
+            if c and len(matches) == 1 and matches[0][1].get("owner") == "我":
+                v = {**x, **db.todo_view(c, s, *matches[0], closed, al)}
             else:
-                if x.get("id") in closed:  # a marked action can have been reworded; its historical mark still filters the recap
-                    continue
                 v = {**x, "id": None} if x.get("id") else x
             if v.get("id") not in closed:
                 todos.append(v)
         r["todos"] = todos
+        for h in r.get("highlights") or []:
+            if h.get("conv") and (c := db.conversation(h["conv"])):
+                h["participants"] = c["participants"]
     return r
 
 

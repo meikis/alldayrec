@@ -5,7 +5,7 @@ import Icon from "./Icon.vue";
 
 // open: the last topic is still being discussed. shown: whether a topic's points, decisions, todos and questions are
 // open; with it each title is a button that asks to flip them (flip), without it they all show. labels: the
-// conversation's, for its S<n> in the text (labelText; none given: every S<n>)
+// conversation's, for its S<n> in the text (labelText; none given: verbatim)
 const { labels } = defineProps<{
   topics: LiveTopic[];
   open?: boolean;

@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import json
 import re
+import secrets
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -359,12 +360,13 @@ SAME_DAY = ("待会", "等下", "一会", "今晚", "晚上", "下午", "今天"
 
 def todo_ids(conv: str, todos: list[dict]) -> list[str]:
     """The ids of a summary's todos, in its order: the conversation and the time the todo was said (else a hash of its
-    text); a later one said at the same time as an earlier one gets #2, #3… Stable while the summary is unchanged."""
+    text); a later one said at the same time gets #2, #3… Regeneration pins identity in each todo's id."""
     seen, out = {}, []
     for t in todos:
         base = f"{conv}:{t.get('at') or hashlib.sha1((conv + (t.get('text') or '')).encode()).hexdigest()[:16]}"
         seen[base] = n = seen.get(base, 0) + 1
-        out.append(base if n == 1 else f"{base}#{n}")
+        pinned = t.get("id")
+        out.append(pinned if isinstance(pinned, str) and pinned.startswith(conv + ":") else base if n == 1 else f"{base}#{n}")
     return out
 
 
@@ -399,34 +401,63 @@ def mark_todos(ids: list[str], mark: str | None):
             c.executemany("INSERT OR REPLACE INTO todo_marks VALUES (?, ?, ?, ?)", [(i, i.split(":", 1)[0], mark, now) for i in ids])
 
 
-def carry_marks(conv: str, old: list[dict], new: list[dict], c: sqlite3.Connection):
-    """Carry marks only across a unique match in text, else quote, with the same owner and recipient. Time alone is
-    not identity: two actions in one sentence can trade places. Refuse the whole replacement if a marked action is
-    missing/ambiguous or an old marked id would name another action (including in an existing recap)."""
-    marks = {r[0]: (r[1], r[2]) for r in c.execute("SELECT id, mark, at FROM todo_marks WHERE conv = ?", (conv,))}
-    before, after = list(zip(todo_ids(conv, old), old)), list(zip(todo_ids(conv, new), new))
-    moves, used = {}, set()
-    for i, t in before:
-        if i not in marks:
-            continue
-        match = []
+def preserve_todos(conv: str, old: list[dict], new: list[dict], c: sqlite3.Connection) -> list[dict]:
+    """Pin a uniquely matched action to its old ID; keep unmatched marked actions unchanged. Marks never move.
+    Text, else quote, must match uniquely on both sides with the same owner/recipient. New actions get fresh IDs,
+    so a removed action's ID (including a cached recap's) cannot be reused by another action."""
+    marks = {r[0] for r in c.execute("SELECT id FROM todo_marks WHERE conv = ?", (conv,))}
+    before = list(zip(todo_ids(conv, old), old))
+    after = [{k: v for k, v in t.items() if k not in ("id", "mark")} for t in new]
+    used = set()
+    for id, t in before:
+        matches = []
         for key in ("text", "quote"):
-            same = lambda n: t.get(key) and n.get(key) == t[key] and all(n.get(k) == t.get(k) for k in ("owner", "to"))
-            match = [(j, n) for j, n in after if same(n)]
-            if len(match) == 1 and sum(bool(same(n)) for _, n in before) == 1:
+            def same(n):
+                return t.get(key) and n.get(key) == t[key] and all(n.get(k) == t.get(k) for k in ("owner", "to"))
+            matches = [i for i, n in enumerate(new) if same(n)]
+            if len(matches) == 1 and sum(bool(same(n)) for n in old) == 1:
                 break
-            match = []
-        if not match or match[0][0] in used:
-            raise ValueError("marked todo has no unique match; old summary kept")
-        j = match[0][0]
-        if (i != j and any(k == i for k, _ in after)) or (j in marks and i != j):
-            raise ValueError("marked todo id would name a different action; old summary kept")
-        moves[i], used = j, used | {j}
-    if any(j in marks and j not in moves for j, _ in after):
-        raise ValueError("new todo reuses a historical marked id; old summary kept")
-    for i, j in moves.items():
-        if i != j:
-            c.execute("INSERT INTO todo_marks VALUES (?, ?, ?, ?)", (j, conv, *marks[i]))
+            matches = []
+        if matches and matches[0] not in used:
+            after[matches[0]]["id"] = id
+            used.add(matches[0])
+        elif id in marks:
+            after.append({**t, "id": id})
+    reserved = marks | {i for i, _ in before}
+    for t in after:
+        if "id" not in t:
+            id = f"{conv}:{secrets.token_hex(16)}"
+            while id in reserved:
+                id = f"{conv}:{secrets.token_hex(16)}"
+            t["id"] = id
+        reserved.add(t["id"])
+    return after
+
+
+def rename_todos(conv: str, frm: str, to: str, c: sqlite3.Connection) -> dict:
+    """Apply an authorized full-label rename immediately; record changed fields by pinned ID for merge-safe undo."""
+    s, changed = summary(conv), {}
+    if not s or not s.get("todos"):
+        return changed
+    for id, t in zip(todo_ids(conv, s["todos"]), s["todos"]):
+        t["id"] = id
+        fields = {k: t[k] for k in ("owner", "to") if t.get(k) == frm}
+        if fields:
+            changed[id] = fields
+            t.update({k: to for k in fields})
+    put_summary(s, c)
+    return changed
+
+
+def undo_todo_rename(conv: str, changed: dict, to: str, c: sqlite3.Connection):
+    s = summary(conv)
+    if not s or not changed:
+        return
+    for id, t in zip(todo_ids(conv, s.get("todos") or []), s.get("todos") or []):
+        for k, value in changed.get(id, {}).items():
+            if t.get(k) == to:
+                t[k] = value
+    put_summary(s, c)
 
 
 def todo_view(conv: dict, s: dict, i: str, t: dict, closed: dict, al: dict) -> dict:

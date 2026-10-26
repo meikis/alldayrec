@@ -1,6 +1,8 @@
 """summary.py's self-check: a model reply's times resolved to rows (prompt v9: each person's point too), due dates, media,
 an odd reply's fields dropped; and one odd reply does not break the tags list that every later summary asks first."""
 import runpy
+
+import pytest
 from pathlib import Path
 
 from alldayrec import core
@@ -50,3 +52,45 @@ def test_resummarize_picks():
                                                {"status": "done", "prompt_version": summary.PROMPT_VERSION}, {"status": "pending"})] == [
         None, None, None, "current", "pending"]
     assert due({**c, "speech_s": 59}) == "short" and due({**c, "state": "open"}) == "open"
+
+
+def assert_summary_contract(prompt, lang):
+    lines = prompt.splitlines()
+    shape = next(x for x in lines if '"summary":' in x)
+    assert "一句话" in shape and "不超过 40 字" in shape
+    lead = next(x for x in lines if x.startswith("summary 只写一句"))
+    assert "正事（工作、安排、决定、要办的事、重要的信息）在前" in lead
+    chitchat = next(x for x in lines if x.startswith("闲聊（"))
+    assert '在 topics 里并成一个议题，标题「闲聊」' in chitchat and "要点只写一行" in chitchat
+    extraction = next(x for x in lines if x.startswith("todos 和 decisions 独立检查整段对话"))
+    assert "summary 的一句话取舍、闲聊合并和字数限制都不影响它们" in extraction
+    assert "不能因已写进 summary 或 topics 而省略" in extraction
+    assert prompt.endswith(summary.EN if lang == "en" else summary.ZH)
+    if lang == "en":
+        assert "summary (40 字 above) at most 25 words" in prompt
+
+
+@pytest.mark.parametrize("lang", ["zh", "en"])
+def test_summary_prompt_contract(tmp_path, lang):
+    from alldayrec.tenant import T
+    db.open_db(tmp_path / "t.db")
+    T().lang = lang
+    assert_summary_contract(summary.instructions(["work"], "2026-10-26T10:00:00"), lang)
+
+
+@pytest.mark.parametrize("lang", ["zh", "en"])
+def test_live_final_prompt_contract(tmp_path, monkeypatch, lang):
+    import anyio
+    from alldayrec import live
+    from alldayrec.tenant import T
+    db.open_db(tmp_path / "t.db")
+    T().lang = lang
+    captured = []
+    async def complete(messages, **kwargs):
+        captured.append(messages[-1]["content"])
+        return {}, {}
+    monkeypatch.setattr(live, "complete", complete)
+    start = "2026-10-26T10:00:00"
+    anyio.run(live.final, live.new(start, "mic", []), [], ["work"], start)
+    assert live.FINAL in captured[0]
+    assert_summary_contract(captured[0], lang)

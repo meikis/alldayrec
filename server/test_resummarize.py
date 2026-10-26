@@ -80,3 +80,56 @@ def test_http_429_retry(monkeypatch):
     monkeypatch.setattr(r.time, "sleep", sleeps.append)
     assert r.client("http://localhost", "test", 5, 20)("POST", "/summarize") == {"ok": True}
     assert sleeps == [7, 10]
+
+
+def test_failed_retry_waits_for_this_attempt_before_next_post(tmp_path, monkeypatch):
+    import anyio
+    from alldayrec import db, summaries
+    from alldayrec import routes_api
+    db.open_db(tmp_path / "t.db")
+    for id in ("a", "b"):
+        with db.tx() as c:
+            db.insert_conversation(c, {"id": id, "start": "2026-10-26T10:00:00.000", "end": "2026-10-26T10:03:00.000",
+                                       "participants": ["我"], "sentences": 1, "speech_s": 120})
+            db.put_summary({"conversation": id, "status": "failed", "error": "old failure"}, c)
+    posted, polls, finished = [], [], []
+    gate = anyio.Event()
+    async def fake(c, tags):
+        if c["id"] == "a":
+            await gate.wait()
+        finished.append(c["id"])
+        return {"conversation": c["id"], "status": "done", "prompt_version": r.PROMPT_VERSION, "title": "t", "todos": []}
+    def api(method, path, **params):
+        if path == "/api/conversations":
+            return sorted(db.conversations(), key=lambda c: c["id"])
+        if path == "/api/calls":
+            return {"calls": []}
+        id = path.split("/")[3]
+        if method == "POST":
+            if posted:
+                assert posted[-1] in finished, "the previous model call must finish before the next POST"
+            posted.append(id)
+            out = anyio.from_thread.run(routes_api.resummarize, id)
+            if id == "a":
+                assert db.summary(id)["status"] == "pending", "an old failure is not this attempt's outcome"
+            return out
+        out = anyio.from_thread.run(routes_api.conversation, id)
+        if id == "a" and posted and out["summary"]["status"] == "pending":
+            polls.append(out["summary"]["status"])
+            if len(polls) == 3:
+                anyio.from_thread.run_sync(gate.set)
+        return out
+    async def run():
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(summaries.summarize_loop)
+            with anyio.fail_after(3):
+                result = await anyio.to_thread.run_sync(lambda: r.main(["--days", "1", "--delay", "0"]))
+            tg.cancel_scope.cancel()
+        return result
+    monkeypatch.setattr(summaries, "summarize", fake)
+    monkeypatch.setattr(r, "client", lambda *args: api)
+    monkeypatch.setattr(r.time, "sleep", lambda _: None)
+    monkeypatch.setenv("LIVE_RECORD_URL", "http://localhost")
+    monkeypatch.setenv("LIVE_RECORD_TOKEN", "test")
+    result = anyio.run(run)
+    assert result["redone"] == 2 and result["failed"] == 0 and polls[:3] == ["pending"] * 3

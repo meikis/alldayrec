@@ -84,7 +84,7 @@ def calls(api, since: str) -> dict[str, dict]:
 
 def redo(api, c: dict, timeout: float, poll: float = 3.0) -> tuple[dict | None, bool]:
     """POST the redo and wait: (the conversation as it is then, whether the model answered 429 meanwhile). The first is
-    None when it is still on its old version at the timeout, or every try failed."""
+    None when this attempt failed; uncertain completion at the timeout raises TimeoutError."""
     since = dt.datetime.now().isoformat(timespec="seconds")
     api("POST", f"/api/conversation/{c['id']}/summarize")
     end, hit429 = time.monotonic() + timeout, False
@@ -94,6 +94,7 @@ def redo(api, c: dict, timeout: float, poll: float = 3.0) -> tuple[dict | None, 
         s = x.get("summary") or {}
         failed = calls(api, since).get("summary", {}).get("failed", {})
         hit429 = hit429 or "429" in failed
+        # POST resets a failed old row to pending; a failure observed here belongs to this retry.
         if s.get("error") or s.get("status") == "failed":
             return None, hit429
         if s.get("status") == "done" and (s.get("prompt_version") or 0) >= PROMPT_VERSION:

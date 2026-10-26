@@ -111,6 +111,7 @@ export interface LiveTopic {
 }
 // the live analysis of an open conversation; kept as the conversation's timeline once it closes
 export interface LiveState {
+  participants?: string[]; // actual labels from the analyzed rows; absent: prose stays verbatim
   device: string;
   start: string;
   topics: LiveTopic[];
@@ -331,7 +332,7 @@ export interface Recap {
   date: string;
   conversations: number;
   headline: string;
-  highlights: { text: string; conv: string | null }[];
+  highlights: { text: string; conv: string | null; participants?: string[] }[];
   todos: TodoView[];
   people: { who: string; note: string }[];
 }

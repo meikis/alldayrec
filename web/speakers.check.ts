@@ -47,11 +47,7 @@ assert.equal(
   ]),
   "我和 说话人 1 聊了猫，说话人 12说未识别没听清；S3 存储和 Galaxy S24 不是人，S1x 也不是",
 );
-assert.equal(
-  labelText("S2 提醒水开了"),
-  "说话人 2 提醒水开了",
-  "no labels given (a day's recap): every one",
-);
+assert.equal(labelText("S2 提醒水开了"), "S2 提醒水开了", "no participant context: verbatim");
 i18n.global.locale.value = "en"; // 我 stays the key in the data, the page says Me
 assert.deepEqual(["S2", "S?", "我", "同事A"].map(speakerLabel), [
   "Speaker 2",

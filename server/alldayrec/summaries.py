@@ -60,20 +60,16 @@ async def summarize_loop():
                     await anyio.sleep(delay)
         old = db.summary(c["id"])
         media = summary.media_labels(conversation_rows(c), res.get("media_spans") or [])
-        try:
-            with db.tx() as t:
-                if old and old["status"] == "done":
-                    if res["status"] == "failed":
-                        raise ValueError(res["error"])
-                    db.carry_marks(c["id"], old.get("todos") or [], res.get("todos") or [], t)
-                db.put_summary(res, t)
-                if media:  # a redone summary found media: its voices leave the voiceprint bank
-                    t.executemany("DELETE FROM voices WHERE conv = ? AND label = ?", [(c["id"], m) for m in media])
-        except ValueError as e:
-            # Keep status=done and its content/marks; the backfill can report a failed upgrade without waiting out a timeout.
-            db.put_summary({**old, "error": f"[resummarize_failed] {e}"[:300]})
-            ws.note(f"对话 {c['start'][11:19]} 的摘要重新生成失败，保留原来的：{e}", "error")
+        if res["status"] == "failed" and old and old["status"] == "done":
+            db.put_summary({**old, "error": f"[resummarize_failed] {res['error']}"[:300]})
+            ws.note(f"对话 {c['start'][11:19]} 的摘要重新生成失败，保留原来的：{res['error']}", "error")
             continue
+        with db.tx() as t:
+            if res["status"] == "done":
+                res["todos"] = db.preserve_todos(c["id"], (old or {}).get("todos") or [], res.get("todos") or [], t)
+            db.put_summary(res, t)
+            if media:  # a redone summary found media: its voices leave the voiceprint bank
+                t.executemany("DELETE FROM voices WHERE conv = ? AND label = ?", [(c["id"], m) for m in media])
         if media:
             T().speakers["at"] = 0.0
         ws.note(f"对话 {c['start'][11:19]} 的摘要" + (f"：{res['title']}" if res["status"] == "done" else f"生成失败：{res['error']}"),

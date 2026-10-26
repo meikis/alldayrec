@@ -339,3 +339,16 @@ def test_apush_same_as_push(vad, monkeypatch):
         assert len(want[0]) >= 5 and len(want[1]) >= 20, (name, len(want[0]), len(want[1]))
         assert got[name] == want, (name, got[name][0][:3], want[0][:3])
     assert not torn, torn[:3]
+
+
+def test_live_participants_come_from_rows(tmp_path, monkeypatch):
+    import anyio
+    from alldayrec import db, live
+    db.open_db(tmp_path / "t.db")
+    async def complete(*args, **kwargs):
+        return {"ops": []}, {"choices": [{"message": {"content": "{}"}}]}
+    monkeypatch.setattr(live, "complete", complete)
+    start = "2026-10-26T10:00:00"
+    state = anyio.run(live.analyze, live.new(start, "mic", []), [
+        {"start": start, "end": "2026-10-26T10:00:05", "speaker": "S1", "text": "Amazon S3 and Galaxy S24"}])
+    assert live.public(state)["participants"] == ["S1"], "product tokens are not inferred as speakers"
