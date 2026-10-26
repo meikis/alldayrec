@@ -37,7 +37,7 @@ def deploy(tmp: Path, *instances: str, disabled: str = "") -> subprocess.Complet
 def test_stops_before_installing(tmp_path):
     good = instance(tmp_path, "good", GOOD)
     for bad, why in ((instance(tmp_path, "none"), "no tenants file"), (instance(tmp_path, "open", GOOD, 0o644), "chmod 600"),
-                     (instance(tmp_path, "broken", "["), "JSONDecodeError"),
+                     (instance(tmp_path, "broken", "["), "invalid JSON at line 1, column 2"),
                      (instance(tmp_path, "nodir", GOOD, data_dir=False), "no tenants file")):
         r = deploy(tmp_path, good, bad)  # the good one first: not installed either
         assert r.returncode == 1 and why in r.stderr and "tenants.sh migrate first" in r.stdout and "nothing installed" in r.stdout, r.stdout + r.stderr
