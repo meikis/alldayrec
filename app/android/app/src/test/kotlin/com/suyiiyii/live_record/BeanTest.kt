@@ -123,8 +123,8 @@ class BeanTest {
 
     /** What a fake bean records goes up as pieces, each unit once and dated by its seq: live from where the bean is
      *  (begun 30 s before), on in the next file it rotates to, a drop mid-file resumed by its byte offset, a hole
-     *  asked for again once the recording stops, the start of the first file pulled as backlog; the hold until all of
-     *  it is up, then the end. A file from before the bean was added is never asked for. */
+     *  asked for again once the recording stops, the start of the first file pulled as backlog, then the end after
+     *  everything uploads. A file from before the bean was added is never asked for. */
     @Test fun sync() {
         val dir = Files.createTempDirectory("bean").toFile()
         val chunks = File(dir, "chunks"); val state = File(dir, "state.json")
@@ -165,7 +165,8 @@ class BeanTest {
         val anchorA = one.files[a]!!.anchor
         val anchors = one.files.mapValues { it.value.anchor }  // the files go once deleted on the bean
         assertTrue("the phone's clock, near the bean's", anchorA - a * 1000 in 0L..3000L)
-        assertEquals("live began past the file's start: the hold", anchorA + 1500 * 20 - 60_000, bean.held)
+        assertNull("closed A is pending while B records: no hold", bean.held)
+        assertTrue("live never sets a hold", bean.holds.isEmpty())
         assertTrue(Bean.u32(bean.sentOf(0x01A6), 0) in t0 / 1000 - 1..t0 / 1000 + 1)
 
         // a new session (what the phone knows of the files read back): on in B from its offset, then the backlog
@@ -198,6 +199,83 @@ class BeanTest {
         assertEquals(listOf(anchors[b]!! + 300 * 20), bean.ends)
         assertFalse(bean.transfers.any { it.first == old })
         assertEquals("whole on the server: off the bean, once", listOf(a, b), bean.deleted)
+    }
+
+    /** A closed file is pending while live runs in another file. It cannot be fetched until stop, so live never
+     *  sets a hold for it, and a previous app's persisted hold is released after its queued older pieces upload. */
+    @Test fun closedBacklogWhileRecordingDoesNotHold() {
+        for (persisted in listOf(false, true)) {
+            val dir = Files.createTempDirectory("bean").toFile()
+            val t0 = 1_793_000_000_000L
+            val bean = FakeBean(t0)
+            val open = t0 / 1000
+            val chunks = File(dir, "chunks").also { it.mkdirs() }
+            bean.recording = true; bean.open = open
+            bean.listed[open - 600] = 60_000; bean.listed[open] = 0
+            if (persisted) bean.held = t0 - 60_000
+            val queued = if (persisted) File(chunks, "${t0 - 1000}@D3200-0A0B.ogg").also { it.writeBytes(ByteArray(0)) } else null
+            bean.onTransfer = { file, _, live ->
+                assertTrue("only live is read while recording", live)
+                assertEquals(open, file)
+                bean.header(file, 0xFFFFFFFFL)
+                bean.units(file, (24L..123L).toList())
+            }
+            bean.script += { bean.now += 6000 }
+            bean.script += {
+                if (persisted) assertEquals("queued older pieces still hold", t0 - 60_000, bean.held)
+                queued?.delete()  // the uploader takes the already-cut older piece
+                bean.now += 6000
+            }
+            val sync = BeanSync("D3200-0A0B", File(dir, "state.json"), chunks, bean)
+            assertThrows(IOException::class.java) { sync.session(t0 - 3_600_000, "") }
+            assertNull("closed backlog cannot hold a recording run", bean.held)
+            assertTrue("no transient hold either", bean.holds.none { it != null })
+        }
+    }
+
+    /** Live starts half a second into a file, then resumes past holes on reconnect. These holes can only be read
+     *  after the file closes, so none of them should block finals while it records. */
+    @Test fun openFileHolesDoNotHold() {
+        val dir = Files.createTempDirectory("bean").toFile()
+        val t0 = 1_793_000_000_000L
+        val bean = FakeBean(t0)
+        val id = t0 / 1000
+        bean.recording = true; bean.open = id; bean.listed[id] = 0
+        var seq = 24L
+        bean.onTransfer = { file, _, live ->
+            assertTrue(live)
+            bean.header(file, 0xFFFFFFFFL)
+            bean.units(file, (seq..seq + 99).toList())
+            bean.script += { throw IOException("link dropped") }
+        }
+        for (first in listOf(24L, 1600L, 4500L)) {
+            seq = first
+            val sync = BeanSync("D3200-0A0B", File(dir, "state.json"), File(dir, "chunks"), bean)
+            assertThrows(IOException::class.java) { sync.session(t0 - 3_600_000, "") }
+            assertNull("open-file hole at $first does not hold", bean.held)
+        }
+        assertFalse(bean.logs.any { it.first == "hold" })
+    }
+
+    /** An old app's persisted hold must go after upgrading, once its already-cut older pieces are uploaded,
+     *  even though the open file still has a hole. */
+    @Test fun oldOpenFileHoldIsReleased() {
+        val dir = Files.createTempDirectory("bean").toFile()
+        val chunks = File(dir, "chunks")
+        val t0 = 1_793_000_000_000L
+        val bean = FakeBean(t0)
+        bean.recording = true; bean.open = t0 / 1000; bean.listed[bean.open] = 0
+        bean.held = t0 - 60_000
+        bean.onTransfer = { file, _, _ ->
+            bean.header(file, 0xFFFFFFFFL)
+            bean.units(file, (24L..123L).toList())
+        }
+        repeat(2) { bean.script += { bean.now += 6000 } }
+        val sync = BeanSync("D3200-0A0B", File(dir, "state.json"), chunks, bean)
+        assertThrows(IOException::class.java) { sync.session(t0 - 3_600_000, "") }
+        assertNull(bean.held)
+        assertTrue(bean.logs.any { it.first == "hold" && "不再压住定稿" in it.second })
+        assertEquals("the hole remains until close", 0L, sync.gap(sync.files[bean.open]!!))
     }
 
     /** A transfer asked for right after the one before ended got code 4 (10-25): the next waits 200 ms as the SDK does,
@@ -578,6 +656,7 @@ class FakeBean(var now: Long) : BeanSync.Io {
     val script = ArrayDeque<() -> Unit>()
     val logs = mutableListOf<Pair<String, String>>()
     var held: Long? = null
+    val holds = mutableListOf<Long?>()
     val ends = mutableListOf<Long>()
     var refused = emptySet<Long>()
     val deleted = mutableListOf<Long>()  // each 1A/10 asked
@@ -632,7 +711,7 @@ class FakeBean(var now: Long) : BeanSync.Io {
     override fun log(kind: String, text: String, level: String?, fields: Map<String, Any?>, at: Long?) { logs += kind to text }
     val reports = mutableListOf<Map<String, Any?>>()
     override fun report(hw: Map<String, Any?>) { reports += hw.toMap() }
-    override fun hold(at: Long?) { held = at }
+    override fun hold(at: Long?) { holds += at; held = at }
     override fun held() = held
     override fun end(at: Long) { ends += at }
     override fun piece() {}
