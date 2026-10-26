@@ -51,7 +51,7 @@ class NoticeTest {
         assertEquals("Live upload · catching up 1.5 / 44.5 MB" to "Battery 68% · Charging",
             ble(*live, "hw" to hw + ("charge" to "charging"), "syncDone" to 1536L, "syncTotal" to 45568L, str = en))
         assertEquals("Reading the recorder's status" to "", ble("link" to say("status"), str = en))
-        assertEquals("alldayrec is uploading · 7 pieces left" to "The server could not decode a piece: dropped",
+        assertEquals("AllDayRec is uploading · 7 pieces left" to "The server could not decode a piece: dropped",
             RecorderService.notice(mapOf("running" to false, "pending" to 7, "note" to say("rejected")), now, en))
     }
 
@@ -78,7 +78,7 @@ class NoticeTest {
     }
 
     @Test fun micAndUpload() {
-        assertEquals("alldayrec 正在录音" to "", RecorderService.notice(mapOf("running" to true, "source" to "mic", "pending" to 0), now, zh))
-        assertEquals("alldayrec 正在上传 · 剩 7 块" to "", RecorderService.notice(mapOf("running" to false, "pending" to 7), now, zh))
+        assertEquals("AllDayRec 正在录音" to "", RecorderService.notice(mapOf("running" to true, "source" to "mic", "pending" to 0), now, zh))
+        assertEquals("AllDayRec 正在上传 · 剩 7 块" to "", RecorderService.notice(mapOf("running" to false, "pending" to 7), now, zh))
     }
 }

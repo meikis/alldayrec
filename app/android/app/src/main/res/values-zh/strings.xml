@@ -29,8 +29,8 @@
     <string name="note_upload_failed">上传失败 %1$s</string>
     <string name="note_end_failed">结束信号失败 %1$s</string>
     <string name="note_archive_failed">归档失败 %1$s</string>
-    <string name="notice_uploading">alldayrec 正在上传 · 剩 %1$s 块</string>
-    <string name="notice_recording">alldayrec 正在录音</string>
+    <string name="notice_uploading">AllDayRec 正在上传 · 剩 %1$s 块</string>
+    <string name="notice_recording">AllDayRec 正在录音</string>
     <string name="notice_live_catching_up">实时上传 · 后台补传 %1$.1f / %2$.1f MB</string>
     <string name="notice_bean_catching_up">补传录音豆里的录音 %1$.1f / %2$.1f MB</string>
     <string name="notice_fetching_current">接上实时前先取正在录的这段 · 还差 %1$.1f MB</string>

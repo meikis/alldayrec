@@ -401,7 +401,7 @@
   "deviceNameHelp": "取自系统设置里的手机名称；BLE 录音硬件的音频按硬件名上传",
   "recordingSection": "录音",
   "keepRecordings": "本地保留录音",
-  "keepRecordingsIos": "上传后存到「文件」App › 我的 iPhone › alldayrec › recordings › 日期",
+  "keepRecordingsIos": "上传后存到「文件」App › 我的 iPhone › AllDayRec › recordings › 日期",
   "keepRecordingsAndroid": "上传后存到 Android/data/com.suyiiyii.live_record/files/recordings/日期/",
   "pieceLength": "切片长度（服务端下发）",
   "piecesIos": "前台 {foreground} 秒 · 后台 {background} 秒",
@@ -511,7 +511,7 @@
     }
   },
   "linkBluetoothOff": "蓝牙已关闭",
-  "linkNoPermission": "没有蓝牙权限：在 设置 › alldayrec 里允许蓝牙",
+  "linkNoPermission": "没有蓝牙权限：在 设置 › AllDayRec 里允许蓝牙",
   "linkUnbound": "未绑定录音设备",
   "linkKicked": "已被其他手机绑定：在「录音设备」页重新添加",
   "linkElsewhere": "{name} 正连着其他手机",

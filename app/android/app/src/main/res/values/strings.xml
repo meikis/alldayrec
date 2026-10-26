@@ -31,8 +31,8 @@
     <string name="note_upload_failed">Upload failed: %1$s</string>
     <string name="note_end_failed">End signal failed: %1$s</string>
     <string name="note_archive_failed">Archiving failed: %1$s</string>
-    <string name="notice_uploading">alldayrec is uploading · %1$s pieces left</string>
-    <string name="notice_recording">alldayrec is recording</string>
+    <string name="notice_uploading">AllDayRec is uploading · %1$s pieces left</string>
+    <string name="notice_recording">AllDayRec is recording</string>
     <string name="notice_live_catching_up">Live upload · catching up %1$.1f / %2$.1f MB</string>
     <string name="notice_bean_catching_up">Fetching from the bean %1$.1f / %2$.1f MB</string>
     <string name="notice_fetching_current">Fetching the file being recorded before going live · %1$.1f MB left</string>

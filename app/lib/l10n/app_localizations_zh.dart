@@ -680,7 +680,7 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get keepRecordingsIos =>
-      '上传后存到「文件」App › 我的 iPhone › alldayrec › recordings › 日期';
+      '上传后存到「文件」App › 我的 iPhone › AllDayRec › recordings › 日期';
 
   @override
   String get keepRecordingsAndroid =>
@@ -837,7 +837,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get linkBluetoothOff => '蓝牙已关闭';
 
   @override
-  String get linkNoPermission => '没有蓝牙权限：在 设置 › alldayrec 里允许蓝牙';
+  String get linkNoPermission => '没有蓝牙权限：在 设置 › AllDayRec 里允许蓝牙';
 
   @override
   String get linkUnbound => '未绑定录音设备';
