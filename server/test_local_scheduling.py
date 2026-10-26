@@ -8,6 +8,7 @@ from alldayrec import local_asr, threads
 
 @pytest.mark.parametrize("long_kind", ["final", "draft"])
 def test_local_short_call_runs_between_long_call_pieces(monkeypatch, long_kind):
+    monkeypatch.setattr(local_asr, "_backlogged", {object()}, raising=False)
     short_kind = "draft" if long_kind == "final" else "final"
     entered, release = threading.Event(), threading.Event()
     order = []
@@ -55,27 +56,31 @@ def test_local_short_call_runs_between_long_call_pieces(monkeypatch, long_kind):
     assert got[short_kind] == [{'start_ms': 100, 'end_ms': 700, 'text': '测试。'}]
 
 
-@pytest.mark.parametrize("engine,limit,heard", [("local", 30, 2), ("stepfun-sse", 240, 1)])
-def test_local_drafts_skip_old_audio_but_cloud_keeps_window(tmp_path, monkeypatch, engine, limit, heard):
-    """A queued 60 s recording drafts its newest 30 s locally; cloud keeps the existing full window."""
+@pytest.mark.parametrize("engine,seconds,limit,heard,behind", [("local", 120, 30, 2, True),
+                         ("local", 45, 240, 2, False), ("stepfun-sse", 120, 240, 1, False)])
+def test_local_drafts_skip_old_audio_but_cloud_keeps_window(tmp_path, monkeypatch, engine, seconds, limit, heard, behind):
+    """Only a local draft over 60 s behind changes the original window and shared scheduling policy."""
     import datetime as dt
     from alldayrec import asr, audio, device_pipeline
     from test_backlog import rig, flac, tone
 
+    monkeypatch.setattr(local_asr, "_backlogged", set(), raising=False)
     calls = []
+    modes = []
     async def final_engine(x, partial=None):
         await anyio.sleep_forever()
     rig(tmp_path, monkeypatch, final_engine)
     monkeypatch.setattr(asr, 'DRAFT_ENGINE', engine)
     async def draft_engine(x, partial=None):
+        modes.append(bool(local_asr._backlogged))
         voiced = np.abs(x.astype(np.int32))
         calls.append((len(x) / local_asr.SR, round((np.median(voiced[voiced > 500]) - 1000) / 50)))
         return []
     monkeypatch.setitem(asr.PROVIDERS, engine, draft_engine)
     now = dt.datetime.now()
-    body = flac(np.concatenate([tone(1, 30), tone(2, 27), np.zeros(3 * local_asr.SR, np.int16)]))
+    body = flac(np.concatenate([tone(1, seconds - 30), tone(2, 27), np.zeros(3 * local_asr.SR, np.int16)]))
     async def scenario():
-        audio.save('test-local-window', round((now - dt.timedelta(seconds=60)).timestamp() * 1000), body, 'audio/flac')
+        audio.save('test-local-window', round((now - dt.timedelta(seconds=seconds)).timestamp() * 1000), body, 'audio/flac')
         async with anyio.create_task_group() as tg:
             tg.start_soon(device_pipeline.pipeline, 'test-local-window')
             with anyio.fail_after(10):
@@ -85,9 +90,14 @@ def test_local_drafts_skip_old_audio_but_cloud_keeps_window(tmp_path, monkeypatc
     anyio.run(scenario)
     assert max(seconds for seconds, _ in calls) <= limit
     assert calls[0][1] == heard, calls
+    assert modes[0] is behind
+    if not behind:
+        assert calls[0][0] > 30, calls
+    assert not local_asr._backlogged, "stopping a pipeline must release its scheduling handle"
 
 
 def test_local_piece_yield_preserves_cross_piece_sentences(monkeypatch):
+    monkeypatch.setattr(local_asr, "_backlogged", {object()}, raising=False)
     from test_local_asr import Rec
 
     audio = np.full(45 * local_asr.SR, 1000, np.int16)
@@ -98,3 +108,17 @@ def test_local_piece_yield_preserves_cross_piece_sentences(monkeypatch):
     expected = local_asr._transcribe(audio)
     assert expected == [{"start_ms": 14950, "end_ms": 15400, "text": "你好。"}]
     assert anyio.run(local_asr.transcribe, audio) == expected
+
+
+def test_no_backlog_keeps_main_whole_window_job(monkeypatch):
+    monkeypatch.setattr(local_asr, "_backlogged", set(), raising=False)
+    jobs = []
+    original = anyio.to_thread.run_sync
+    async def observed(func, *args, **kw):
+        jobs.append((func, len(args[0]), kw.get("limiter")))
+        return await original(func, *args, **kw)
+    monkeypatch.setattr(anyio.to_thread, "run_sync", observed)
+    monkeypatch.setattr(local_asr, "_transcribe", lambda x: [{"text": "whole"}])
+    x = np.zeros(240 * local_asr.SR, np.int16)
+    assert anyio.run(local_asr.transcribe, x) == [{"text": "whole"}]
+    assert jobs == [(local_asr._transcribe, len(x), threads.ASR)]

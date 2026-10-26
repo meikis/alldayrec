@@ -48,6 +48,15 @@ log = logging.getLogger("live")
 
 _lock = threading.Lock()
 _rec = None
+_backlogged: set[object] = set()  # opaque live-pipeline handles needing cooperation on the process-wide ASR slot
+
+
+def draft_backlog(handle: object, active: bool):
+    """Only scheduling state, no tenant data. A pipeline removes its handle when caught up, unwatched or stopped."""
+    if active:
+        _backlogged.add(handle)
+    else:
+        _backlogged.discard(handle)
 
 
 def fetch(d: Path):
@@ -156,8 +165,10 @@ def _transcribe(x: np.ndarray) -> list[dict]:
 
 
 async def transcribe(x: np.ndarray, partial=None) -> list[dict]:
-    """Decode under the same ASR cap, yielding between the existing <=20 s acoustic pieces. A long final or draft
-    must not hold the slot for its whole window. Join tokens before sentences, retaining cross-piece boundaries."""
+    """Keep the original whole-window call unless a live draft is behind. Only then yield the same ASR cap between
+    existing <=20 s acoustic pieces. Join tokens before sentences, retaining cross-piece boundaries."""
+    if not _backlogged:
+        return await anyio.to_thread.run_sync(_transcribe, x, limiter=threads.ASR)
     out = []
     for a, b in pieces(x):
         ts = await anyio.to_thread.run_sync(_tokens, x[a:b], limiter=threads.ASR)

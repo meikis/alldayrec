@@ -16,6 +16,7 @@ from alldayrec import asr
 from alldayrec import audio
 from alldayrec import db
 from alldayrec import live
+from alldayrec import local_asr
 from alldayrec import perf
 from alldayrec import qwen_stream
 from alldayrec import summary
@@ -36,6 +37,8 @@ REFINE_EVERY_S = int(os.environ.get("REFINE_EVERY_S", "30"))  # draft layer: a p
 REFINE_WINDOW_S = int(os.environ.get("REFINE_WINDOW_S", "240"))    # draft layer: most audio one pass takes
 REFINE_MARGIN_S = 1.0                      # audio re-read before the last drafted time: the engine's sentence starts come a little late
 DRAFT_BACK_S = 300                         # a page that opens gets drafts this far back at most (the minutes not final yet)
+LOCAL_DRAFT_LAG_S = 60                     # two missed default draft periods: preserve normal passes until actually behind
+LOCAL_DRAFT_WINDOW_S = 30                  # when behind, spend the CPU budget on a recent preview; finals keep full coverage
 RELABEL_GROUPS = True                      # relabel at a close: the engine's speaker ids in a piece as units, split when their voices disagree
 LIVE_AUDIO_S = 120                         # a device whose audio came this recently is recording now: drafts and live analysis
 LIVE_EVERY_S = int(os.environ.get("LIVE_EVERY_S", "120"))  # new speech in the open conversation before the live analysis is redone
@@ -62,6 +65,13 @@ async def pipeline(device: str):
     if resume:
         log.info("%s resuming after the last finalized row at %s", device, resume)
     fcost, dcost = {}, {}  # what the final and the draft layer spent since their last perf_pieces row (perf.piece)
+    local_slot = object()  # an opaque handle, not a device or tenant id, for the shared local ASR scheduler
+
+    def local_backlog() -> bool:
+        behind = bool(asr.DRAFT_ENGINE == "local" and st.drafting and st.draft_to and dseg.anchors
+                      and (dseg.time_at(dseg.samples) - st.draft_to).total_seconds() > LOCAL_DRAFT_LAG_S)
+        local_asr.draft_backlog(local_slot, behind)
+        return behind
 
     async def feed():
         """The device's audio stream into the final layer's segmenter, taking the next stretch only while finalization
@@ -436,10 +446,10 @@ async def pipeline(device: str):
         left open; VAD: from 1 s before the first undrafted utterance to `end`, a point in the pause after one."""
         dto = st.draft_to
         window_s = REFINE_WINDOW_S
-        if asr.DRAFT_ENGINE == "local":
+        if local_backlog():
             # Drafts are disposable: spend the small CPU box's budget on what is being said now, not on catching up
             # old draft windows. Finals still cover every sample. Recheck on every pass, including the catch-up loop.
-            window_s = min(window_s, 30)
+            window_s = min(window_s, LOCAL_DRAFT_WINDOW_S)
             dto = st.draft_to = max(dto, dseg.time_at(max(dseg.audio_base, dseg.samples - int(window_s * SR))))
             if end is not None and end <= dto:
                 return False
@@ -462,6 +472,7 @@ async def pipeline(device: str):
         if end is None and not dseg.speaking() and (st.last_speech is None or st.last_speech <= dto):
             st.draft_to = hi  # silence: nothing to send
             db.put_kv(f"draft_to:{device}", iso(hi))
+            local_backlog()
             return (dseg.time_at(dseg.samples) - hi).total_seconds() > window_s - REFINE_MARGIN_S
         sent, n_rows = since, 0  # seconds into the window up to which rows went out while the call ran
 
@@ -519,6 +530,7 @@ async def pipeline(device: str):
                                 "early_to": sent, "from": iso(at(since)), "to": iso(hi), "segs": raw}, ensure_ascii=False) + "\n")
         engine = raw[0]["engine"] if raw else asr.DRAFT_ENGINE
         await publish(rows, hi, engine)
+        local_backlog()
         perf.piece(device, "draft", len(x) / SR, n_rows, dcost)
         st.draft = {"at": dt.datetime.now().isoformat(timespec="seconds"), "ms": round((time.perf_counter() - t_run) * 1000),
                        "engine": engine, "changed": n_rows, "early_s": round(sent - since), "to": iso(hi)}
@@ -534,6 +546,7 @@ async def pipeline(device: str):
             by_vad = st.take_draft_wake()
             if not drafting():
                 st.drafting = False
+                local_asr.draft_backlog(local_slot, False)
                 continue
             # from where drafts or final rows stop, but no further back than DRAFT_BACK_S: a page that opens sees the
             # minutes not final yet, not a backlog
@@ -635,6 +648,7 @@ async def pipeline(device: str):
             for name, part in (("feed", feed), ("edge", edge_feed), ("draft", drafts), ("final", final_loop)):
                 ptg.start_soon(forever, part, name=f"{name}:{device}")
     finally:
+        local_asr.draft_backlog(local_slot, False)
         st.ask = None  # no task group to run in until lasting() starts it again
         T().dias.remove(dia)
         T().dias.remove(ddia)
