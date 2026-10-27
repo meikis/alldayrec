@@ -363,7 +363,7 @@ class _HomeState extends State<Home> with WidgetsBindingObserver {
           l.deviceStatusAndMoreSub),
       entry(Icons.cloud_upload_outlined, l.upload, () => _open(l.upload, UploadPage(settings: s))),
       entry(Icons.settings_outlined, l.settings, _openSettings),
-      entry(Icons.info_outline, l.about, () => showAboutDialog(context: context, applicationName: 'alldayrec', applicationVersion: version),
+      entry(Icons.info_outline, l.about, () => showAboutDialog(context: context, applicationName: 'AllDayRec', applicationVersion: version),
           version),
     ]);
   }

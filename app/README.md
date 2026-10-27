@@ -1,4 +1,4 @@
-# alldayrec app
+# AllDayRec app
 
 The iOS and Android app (Flutter): records the phone's mic or the BLE recorder, uploads the audio to your server, and
 shows its pages. Installing it and connecting it to a server: [How to install and connect the phone app](https://suyiiyii.github.io/alldayrec/en/how-to/install-app.html).

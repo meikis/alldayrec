@@ -700,7 +700,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get keepRecordingsIos =>
-      'Kept after upload in the Files app › On My iPhone › alldayrec › recordings › date';
+      'Kept after upload in the Files app › On My iPhone › AllDayRec › recordings › date';
 
   @override
   String get keepRecordingsAndroid =>
@@ -862,7 +862,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get linkNoPermission =>
-      'No Bluetooth permission: allow it in Settings › alldayrec';
+      'No Bluetooth permission: allow it in Settings › AllDayRec';
 
   @override
   String get linkUnbound => 'No recorder bound';
