@@ -535,4 +535,127 @@ class BeanLinkTest {
         } finally { worker.interrupt(); worker.join(2000) }
     }
 
+
+    @Test fun cancellingFastScanRetriesStopImmediatelyBeforeOwnerExits() {
+        val started = CountDownLatch(1)
+        val finished = CompletableFuture<Unit>()
+        val stops = AtomicInteger()
+        val cancelledPi = AtomicBoolean()
+        val registered = AtomicBoolean()
+        val retries = AtomicInteger()
+        val discovery = BeanDiscovery<String>(name, { System.nanoTime() / 1_000_000 }, { _, _ ->
+            registered.set(true); started.countDown(); true
+        }, { _, _ ->
+            beanStopScan({
+                if (stops.incrementAndGet() == 1) throw IOException("transient stop failure")
+                registered.set(false)
+            }, { cancelledPi.set(true) })
+        })
+        discovery.again(BeanSync.Again("rotation", true))
+        val worker = Thread {
+            try {
+                discovery.wait.loop({ true }, { discovery.find(true) { true }; true },
+                    { retries.incrementAndGet(); true }, {})
+                finished.complete(Unit)
+            } catch (e: Throwable) { finished.completeExceptionally(e) }
+        }.apply { start() }
+        try {
+            assertTrue(started.await(2, TimeUnit.SECONDS))
+            worker.interrupt()
+            finished.get(500, TimeUnit.MILLISECONDS)
+            assertEquals(2, stops.get())
+            assertFalse(registered.get())
+            assertTrue(cancelledPi.get())
+            assertEquals(0, retries.get())
+        } finally { worker.interrupt(); worker.join(2000) }
+    }
+
+    @Test fun permanentStopFailureStillCancelsOriginalIntentAndCannotFallback() {
+        for (cancel in listOf(false, true)) {
+            val order = mutableListOf<String>()
+            var registrations = 0
+            val original = IOException("stop failed")
+            val discovery = BeanDiscovery<String>(name, { 10_000L }, { _, _ ->
+                registrations++
+                if (cancel) throw InterruptedException("cancelled")
+                false
+            }, { _, _ ->
+                beanStopScan({ order += "stop"; throw original }, { order += "cancel" },
+                    { throw IOException("diagnostic failed") })
+            })
+            discovery.again(BeanSync.Again("rotation", true))
+            if (cancel) {
+                val e = assertThrows(InterruptedException::class.java) { discovery.find(true) { true } }
+                assertTrue(e.suppressed.single() is BeanScanWait.CleanupFailure)
+            } else assertThrows(BeanScanWait.CleanupFailure::class.java) { discovery.find(true) { true } }
+            assertEquals(listOf("stop", "stop", "cancel"), order)
+            assertEquals(1, registrations)
+        }
+    }
+
+    @Test fun fastTimeoutRecoversTransientStopFailureBeforeStartingPowerScan() {
+        val h = DiscoveryHarness()
+        val order = mutableListOf<String>()
+        var stops = 0
+        lateinit var discovery: BeanDiscovery<String>
+        discovery = BeanDiscovery(name, h.now::get, { mode, id ->
+            order += mode.name
+            if (mode == BeanDiscovery.Mode.FAST) h.now.addAndGet(2000)
+            else {
+                assertEquals(listOf("FAST", "stop", "stop", "cancel", "POWER"), order)
+                discovery.deliver(id, name, true, "power")
+            }
+            true
+        }, { _, _ ->
+            beanStopScan({ order += "stop"; if (++stops == 1) throw IOException("transient") }, { order += "cancel" })
+        })
+        discovery.again(BeanSync.Again("rotation", true))
+        assertEquals("power", discovery.find(true) { true })
+        assertEquals(3, stops)
+    }
+
+    @Test fun normalStopPrecedesAuxiliaryCancellation() {
+        val order = mutableListOf<String>()
+        beanStopScan({ order += "stop" }, { order += "cancel" })
+        assertEquals(listOf("stop", "cancel"), order)
+    }
+
+    @Test fun timingObserverFailuresCannotChangeScanSuccessOrFallback() {
+        for (rejectFast in listOf(false, true)) {
+            val modes = mutableListOf<BeanDiscovery.Mode>()
+            lateinit var discovery: BeanDiscovery<String>
+            discovery = BeanDiscovery(name, { 10_000L }, { mode, id ->
+                modes += mode
+                if (mode == BeanDiscovery.Mode.FAST && rejectFast) false
+                else { discovery.deliver(id, name, true, "found"); true }
+            }, { _, _ -> }, { throw IOException("timing store unavailable") })
+            discovery.again(BeanSync.Again("rotation", true))
+            assertEquals("found", discovery.find(true) { true })
+            assertEquals(if (rejectFast) listOf(BeanDiscovery.Mode.FAST, BeanDiscovery.Mode.POWER)
+                else listOf(BeanDiscovery.Mode.FAST), modes)
+        }
+    }
+
+    @Test fun timingObserverCannotMaskCancellationBluetoothOffOrCleanupFailure() {
+        for (kind in 0..2) {
+            val modes = mutableListOf<BeanDiscovery.Mode>()
+            val discovery = BeanDiscovery<String>(name, { 10_000L }, { mode, _ ->
+                modes += mode
+                when (kind) {
+                    0 -> throw InterruptedException("original cancellation")
+                    1 -> throw BeanScanWait.Unavailable()
+                    else -> false
+                }
+            }, { _, _ -> if (kind == 2) throw IOException("original cleanup failure") },
+                { throw IOException("timing failed") })
+            discovery.again(BeanSync.Again("rotation", true))
+            when (kind) {
+                0 -> assertEquals("original cancellation", assertThrows(InterruptedException::class.java) { discovery.find(true) { true } }.message)
+                1 -> assertThrows(BeanScanWait.Unavailable::class.java) { discovery.find(true) { true } }
+                else -> assertEquals("original cleanup failure", assertThrows(BeanScanWait.CleanupFailure::class.java) { discovery.find(true) { true } }.message)
+            }
+            assertEquals(listOf(BeanDiscovery.Mode.FAST), modes)
+        }
+    }
+
 }

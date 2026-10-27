@@ -917,6 +917,42 @@ class BeanTest {
     }
 
     /** An Ogg file's packets (OpusHead, OpusTags, then the audio). */
+
+    @Test fun timingIoFailuresDoNotChangeAuthenticationAudioOrTransportFailure() {
+        for (failTransport in listOf(false, true)) {
+            val dir = Files.createTempDirectory("bean-timing").toFile()
+            val chunks = File(dir, "chunks")
+            val t0 = 1_793_000_000_000L
+            val id = t0 / 1000
+            val bean = FakeBean(t0)
+            bean.recording = true; bean.open = id; bean.listed[id] = 0
+            bean.onTransfer = { file, _, _ ->
+                bean.header(file, 0xFFFFFFFFL)
+                bean.units(file, (0L..24L).toList())
+            }
+            val io = object : BeanSync.Io by bean {
+                override fun send(frame: ByteArray) {
+                    if (failTransport) throw IOException("original transport failure")
+                    bean.send(frame)
+                }
+                override fun log(kind: String, text: String, level: String?, fields: Map<String, Any?>, at: Long?) {
+                    if (kind == "bean_connect_step") throw IOException("timing log failure")
+                    bean.log(kind, text, level, fields, at)
+                }
+            }
+            val sync = BeanSync("D3200-ABCD", File(dir, "state.json"), chunks, io)
+            val error = assertThrows(IOException::class.java) { sync.session(t0 - 1000, "") }
+            if (failTransport) {
+                assertEquals("original transport failure", error.message)
+                assertTrue(bean.transfers.isEmpty())
+            } else {
+                assertEquals("out of script", error.message)
+                assertEquals(listOf(Triple(id, 0L, true)), bean.transfers)
+                assertEquals(25, packets(Uploader.queue(chunks).single()).size - 2)
+            }
+        }
+    }
+
     private fun packets(f: File): List<ByteArray> {
         val b = f.readBytes(); val out = mutableListOf<ByteArray>(); var cur = ByteArrayOutputStream(); var p = 0
         while (p < b.size) {

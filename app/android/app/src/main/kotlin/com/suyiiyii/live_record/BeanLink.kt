@@ -37,6 +37,30 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.UUID
 
+/** The exiting owner retries stop immediately, even when cancelled; PI cancellation is an auxiliary OS cleanup.
+ * Android 14 GattService registers a CancelListener which calls stopScan(PendingIntent). Neither a returned
+ * cancel request nor a returned stop call proves radio state. Never start a replacement after an unconfirmed stop. */
+internal fun beanStopScan(stop: () -> Unit, cancel: () -> Unit, diagnostic: (Exception) -> Unit = {}) {
+    var failure: Exception? = null
+    try {
+        repeat(2) {
+            try { stop(); return }
+            catch (e: Exception) {
+                beanTiming { diagnostic(e) }
+                if (failure == null) failure = e else if (failure !== e) failure!!.addSuppressed(e)
+            }
+        }
+        throw BeanScanWait.CleanupFailure(failure!!)
+    } finally {
+        try { cancel() }  // Always after explicit stop attempts, including service cancellation and Bluetooth-off.
+        catch (e: Exception) {
+            beanTiming { diagnostic(e) }
+            if (failure == null) throw BeanScanWait.CleanupFailure(e)
+            else if (failure !== e) failure!!.addSuppressed(e)
+        }
+    }
+}
+
 /** One system scan at a time; duplicate or late deliveries cannot start a second connection. */
 internal class BeanScanWait<T>(private val name: String, private val start: () -> Unit, private val stop: () -> Unit,
                                private val now: () -> Long = { System.nanoTime() / 1_000_000 }) {
@@ -57,6 +81,7 @@ internal class BeanScanWait<T>(private val name: String, private val start: () -
             try { register() }
             catch (e: InterruptedException) { throw e }
             catch (e: Unavailable) { throw e }
+            catch (e: CleanupFailure) { throw e }
             catch (e: Exception) { throw ScanFailure(e) }
             val remaining = deadline?.let { (it - now()).coerceAtLeast(0) } ?: timeoutMs
             return f.get(remaining, TimeUnit.MILLISECONDS)
@@ -71,7 +96,7 @@ internal class BeanScanWait<T>(private val name: String, private val start: () -
                     failure.addSuppressed(cleanup)  // Preserve cancellation/Bluetooth-off and their retry semantics.
                 } else {
                     failure?.let { cleanup.addSuppressed(it) }
-                    throw CleanupFailure(cleanup)  // No fallback until the previous registration is confirmed stopped.
+                    throw if (cleanup is CleanupFailure) cleanup else CleanupFailure(cleanup)
                 }
             }
         }
@@ -117,6 +142,7 @@ internal class BeanDiscovery<T>(name: String, private val now: () -> Long,
     @Volatile private var active: Registration? = null
 
     fun again(e: BeanSync.Again) { rollover = e.naturalRollover }
+    private fun timing(fields: Map<String, Any?>) = beanTiming { report(fields) }
 
     fun find(foreground: Boolean, available: () -> Boolean): T? {
         val natural = rollover
@@ -125,7 +151,7 @@ internal class BeanDiscovery<T>(name: String, private val now: () -> Long,
         if (!available()) return null
         val t = now()
         val eligible = natural && foreground && lastFast?.let { t - it < 60_000 } != true
-        report(mapOf("event" to "eligibility", "reason" to reason, "foregroundImportance" to foreground,
+        timing(mapOf("event" to "eligibility", "reason" to reason, "foregroundImportance" to foreground,
             "fastEligible" to eligible, "fastBudgetMs" to 2000, "cooldownMs" to 60_000))
         if (eligible) {
             lastFast = t
@@ -155,7 +181,7 @@ internal class BeanDiscovery<T>(name: String, private val now: () -> Long,
         catch (e: BeanScanWait.Unavailable) { outcome = "unavailable"; throw e }
         catch (e: BeanScanWait.ScanFailure) { outcome = "scan_error"; throw e }
         finally {
-            report(mapOf("phase" to registration.id, "requestedMode" to if (mode == Mode.FAST) "LOW_LATENCY" else "LOW_POWER",
+            timing(mapOf("phase" to registration.id, "requestedMode" to if (mode == Mode.FAST) "LOW_LATENCY" else "LOW_POWER",
                 "reason" to reason, "budgetMs" to budget, "elapsedMs" to (now() - began), "outcome" to outcome))
         }
     }
@@ -296,7 +322,21 @@ class BeanLink(private val ctx: Context, private val prefs: SharedPreferences, c
     private fun available() = on && !Thread.currentThread().isInterrupted && adapter?.isEnabled == true &&
         prefs.getString("bleName", null) == name
     private var cleanedScans = false
-    private var registeredScanner: BluetoothLeScanner? = null
+    private var scanRegistration: Pair<BluetoothLeScanner, PendingIntent>? = null
+
+    private fun stopScan(scanner: BluetoothLeScanner, intent: PendingIntent) =
+        beanStopScan({ scanner.stopScan(intent) }, { intent.cancel() }, { e ->
+            Log.w("live-record", "bean scan cleanup: ${e.javaClass.simpleName}")
+        })
+
+    private fun stopOwnedScan() {
+        val (scanner, intent) = scanRegistration ?: return
+        try { stopScan(scanner, intent); scanRegistration = null }
+        catch (e: Exception) {
+            cleanedScans = false
+            throw e  // Retain the ORIGINAL PI object for any later explicit cleanup, even after cancel().
+        }
+    }
 
     @Suppress("DEPRECATION")
     internal fun scanResult(intent: Intent) {
@@ -338,49 +378,40 @@ class BeanLink(private val ctx: Context, private val prefs: SharedPreferences, c
             if (Thread.currentThread().isInterrupted) throw InterruptedException()
             if (!available()) throw Gone()
             val scanner = adapter?.bluetoothLeScanner ?: throw Gone()
+            stopOwnedScan()  // An unconfirmed prior stop must finish before any replacement registration.
             // Remember the two identities so a new process can remove registrations left by a killed service.
             if (!cleanedScans) {
                 for (oldMode in BeanDiscovery.Mode.entries) prefs.getString("beanScan:${oldMode.name}", null)?.let {
                     val old = scanIntent(oldMode, it)
-                    scanner.stopScan(old)
-                    old.cancel()
+                    stopScan(scanner, old)
                 }
                 val legacy = PendingIntent.getBroadcast(ctx, 0,
                     Intent(ctx, BeanScanReceiver::class.java).setAction("${ctx.packageName}.BEAN_SCAN"),
                     PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0))
-                scanner.stopScan(legacy)
-                legacy.cancel()
+                stopScan(scanner, legacy)
                 cleanedScans = true
             }
             check(prefs.edit().putString("beanScan:${mode.name}", id).commit()) { "cannot retain scan cleanup identity" }
-            registeredScanner = scanner
+            val intent = scanIntent(mode, id)
+            scanRegistration = scanner to intent
             val error = scanner.startScan(listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(Bean.SERVICE)).build()),
                 ScanSettings.Builder().setScanMode(if (mode == BeanDiscovery.Mode.FAST) ScanSettings.SCAN_MODE_LOW_LATENCY
                     else ScanSettings.SCAN_MODE_LOW_POWER).setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
-                    .setReportDelay(0).build(), scanIntent(mode, id))
+                    .setReportDelay(0).build(), intent)
             scanTiming(mapOf("phase" to id, "requestedMode" to if (mode == BeanDiscovery.Mode.FAST) "LOW_LATENCY" else "LOW_POWER",
                 "registrationCode" to error, "event" to "registration_returned"))
             error == 0  // Accepted request is not evidence of the mode actually used by the platform.
-        }, { mode, id ->
-            try {
-                val intent = scanIntent(mode, id)
-                registeredScanner?.stopScan(intent)
-                intent.cancel()  // Only after stopScan; never use cancellation as a substitute for stopping.
-                registeredScanner = null
-            } catch (e: Exception) {
-                cleanedScans = false  // The next attempt must clean the saved identity before registering anything.
-                Log.w("live-record", "bean scan cleanup failed: ${e.javaClass.simpleName}")
-                throw IOException("scan cleanup failed", e)
-            }
-        }, ::scanTiming)
+        }, { _, _ -> stopOwnedScan() }, ::scanTiming)
     }
     private val scan get() = discovery.wait
 
     private fun scanTiming(fields: Map<String, Any?>) {
         if (fields["outcome"] == "found") connectionPhase = fields["phase"] as? String
         val timed = fields + ("atElapsedMs" to SystemClock.elapsedRealtime())
-        Log.i("live-record", "bean scan: $timed")
-        DeviceLog.app(name, "bean_scan", "扫描阶段计时（请求模式，非实际模式）", fields = timed)
+        beanTiming {
+            Log.i("live-record", "bean scan: $timed")
+            DeviceLog.app(name, "bean_scan", "扫描阶段计时（请求模式，非实际模式）", fields = timed)
+        }
     }
 
     private fun find(): BluetoothDevice? {
@@ -408,8 +439,10 @@ class BeanLink(private val ctx: Context, private val prefs: SharedPreferences, c
             finally {
                 val elapsed = SystemClock.elapsedRealtime() - t0
                 steps.append(if (steps.isEmpty()) "" else "，").append("$what $elapsed ms")
-                DeviceLog.app(name, "bean_connect_step", what, fields = mapOf("step" to what, "elapsedMs" to elapsed,
-                    "phase" to connectionPhase))
+                beanTiming {
+                    DeviceLog.app(name, "bean_connect_step", what, fields = mapOf("step" to what, "elapsedMs" to elapsed,
+                        "phase" to connectionPhase))
+                }
             }
         }
         notes.clear(); downStatus = 0

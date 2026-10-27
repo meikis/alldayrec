@@ -26,6 +26,9 @@ import javax.crypto.Mac
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
+/** Timing is diagnostic only: storage/logging failures must not change protocol or cancellation outcomes. */
+internal fun beanTiming(block: () -> Unit) { try { block() } catch (_: Exception) {} }
+
 /*
  * The Feishu recorder bean (Anker soundcore D3200, firmware 4.92): its BLE protocol, as bytes in and bytes out (no
  * Android Bluetooth here: BeanLink.kt carries the bytes, the unit tests run BeanSync against a fake bean).
@@ -370,7 +373,7 @@ class BeanSync(private val tag: String, private val stateFile: File, private val
             finally {
                 val elapsed = io.monotonicNow() - t0
                 t.append(if (t.isEmpty()) "" else "，").append("$what $elapsed ms")
-                io.log("bean_connect_step", what, fields = mapOf("step" to what, "elapsedMs" to elapsed))
+                beanTiming { io.log("bean_connect_step", what, fields = mapOf("step" to what, "elapsedMs" to elapsed)) }
             }
         }
         try {
