@@ -253,7 +253,9 @@ class BeanTest {
         bean.onTransfer = { file, _, _ -> bean.header(file, 0xFFFFFFFFL) }
         repeat(40) { bean.script += {} }
         val before = bean.now
-        assertEquals("file $id: no audio for 30 s", assertThrows(BeanSync.Again::class.java) { sync.session(t0 - 1000, "") }.message)
+        val stalled = assertThrows(BeanSync.Again::class.java) { sync.session(t0 - 1000, "") }
+        assertEquals("file $id: no audio for 30 s", stalled.message)
+        assertFalse(stalled.naturalRollover)
         assertTrue(bean.now - before in 30_000L..36_000L)
         assertEquals(1, bean.logs.count { it.first == "bean_stall" })
         assertEquals(listOf(Triple(id, 0L, true), Triple(id, 25L, true)), bean.transfers)
@@ -324,7 +326,11 @@ class BeanTest {
     }
 
     /** The bean may open the next file without ending the old transfer; its tail waits until recording stops. */
-    private fun rollover(late: Boolean) {
+    @Test fun manualStopStartDoesNotQualifyAsNaturalRollover() = rollover(false, manual = true)
+
+    @Test fun pausedFileChangeDoesNotQualifyAsNaturalRollover() = rollover(false, paused = true)
+
+    private fun rollover(late: Boolean, manual: Boolean = false, paused: Boolean = false) {
         val dir = Files.createTempDirectory("bean").toFile()
         val chunks = File(dir, "chunks")
         val t0 = 1_793_000_000_000L
@@ -337,6 +343,11 @@ class BeanTest {
                 live && file == a -> {
                     bean.header(file, 0xFFFFFFFFL)
                     bean.units(file, (0L..24L).toList())
+                    if (manual) {
+                        bean.push(0x1882, byteArrayOf(0))
+                        bean.push(0x1882, byteArrayOf(1))
+                    }
+                    if (paused) bean.push(0x1882, byteArrayOf(2))
                     bean.rotation(b, wait = 500)
                     bean.open = b; bean.listed[a] = 600; bean.listed[b] = 0
                 }
@@ -362,7 +373,9 @@ class BeanTest {
                 else -> fail("asked for $file from $from live $live")
             }
         }
-        assertEquals("file $a: rolled over to $b", assertThrows(BeanSync.Again::class.java) { sync.session(t0 - 3_600_000, "") }.message)
+        val again = assertThrows(BeanSync.Again::class.java) { sync.session(t0 - 3_600_000, "") }
+        assertEquals("file $a: rolled over to $b", again.message)
+        assertEquals(!manual && !paused, again.naturalRollover)
         assertEquals("no rejoin on the old connection", listOf(Triple(a, 0L, true)), bean.transfers)
         assertEquals(25, packets(Uploader.queue(chunks).single()).size - 2)
         assertThrows(IOException::class.java) { sync.session(t0 - 3_600_000, "") }
@@ -904,6 +917,42 @@ class BeanTest {
     }
 
     /** An Ogg file's packets (OpusHead, OpusTags, then the audio). */
+
+    @Test fun timingIoFailuresDoNotChangeAuthenticationAudioOrTransportFailure() {
+        for (failTransport in listOf(false, true)) {
+            val dir = Files.createTempDirectory("bean-timing").toFile()
+            val chunks = File(dir, "chunks")
+            val t0 = 1_793_000_000_000L
+            val id = t0 / 1000
+            val bean = FakeBean(t0)
+            bean.recording = true; bean.open = id; bean.listed[id] = 0
+            bean.onTransfer = { file, _, _ ->
+                bean.header(file, 0xFFFFFFFFL)
+                bean.units(file, (0L..24L).toList())
+            }
+            val io = object : BeanSync.Io by bean {
+                override fun send(frame: ByteArray) {
+                    if (failTransport) throw IOException("original transport failure")
+                    bean.send(frame)
+                }
+                override fun log(kind: String, text: String, level: String?, fields: Map<String, Any?>, at: Long?) {
+                    if (kind == "bean_connect_step") throw IOException("timing log failure")
+                    bean.log(kind, text, level, fields, at)
+                }
+            }
+            val sync = BeanSync("D3200-ABCD", File(dir, "state.json"), chunks, io)
+            val error = assertThrows(IOException::class.java) { sync.session(t0 - 1000, "") }
+            if (failTransport) {
+                assertEquals("original transport failure", error.message)
+                assertTrue(bean.transfers.isEmpty())
+            } else {
+                assertEquals("out of script", error.message)
+                assertEquals(listOf(Triple(id, 0L, true)), bean.transfers)
+                assertEquals(25, packets(Uploader.queue(chunks).single()).size - 2)
+            }
+        }
+    }
+
     private fun packets(f: File): List<ByteArray> {
         val b = f.readBytes(); val out = mutableListOf<ByteArray>(); var cur = ByteArrayOutputStream(); var p = 0
         while (p < b.size) {

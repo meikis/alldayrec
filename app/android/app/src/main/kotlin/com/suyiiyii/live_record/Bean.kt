@@ -26,6 +26,9 @@ import javax.crypto.Mac
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
+/** Timing is diagnostic only: storage/logging failures must not change protocol or cancellation outcomes. */
+internal fun beanTiming(block: () -> Unit) { try { block() } catch (_: Exception) {} }
+
 /*
  * The Feishu recorder bean (Anker soundcore D3200, firmware 4.92): its BLE protocol, as bytes in and bytes out (no
  * Android Bluetooth here: BeanLink.kt carries the bytes, the unit tests run BeanSync against a fake bean).
@@ -257,6 +260,7 @@ class BeanSync(private val tag: String, private val stateFile: File, private val
         /** The next notification, null after `ms` without one; throws once the link is gone. */
         fun receive(ms: Long): ByteArray?
         fun now(): Long
+        fun monotonicNow(): Long = System.nanoTime() / 1_000_000
         /** Units in a piece while recording live: the app's slice. */
         fun liveUnits(): Int
         fun log(kind: String, text: String, level: String? = null, fields: Map<String, Any?> = emptyMap(), at: Long? = null)
@@ -364,8 +368,13 @@ class BeanSync(private val tag: String, private val stateFile: File, private val
         val t = StringBuilder(steps)
         fun <T> step(code: String, what: String, block: () -> T): T {
             state = say(code)
-            val t0 = io.now()
-            return block().also { t.append(if (t.isEmpty()) "" else "，").append("$what ${io.now() - t0} ms") }
+            val t0 = io.monotonicNow()
+            try { return block() }
+            finally {
+                val elapsed = io.monotonicNow() - t0
+                t.append(if (t.isEmpty()) "" else "，").append("$what $elapsed ms")
+                beanTiming { io.log("bean_connect_step", what, fields = mapOf("step" to what, "elapsedMs" to elapsed)) }
+            }
         }
         try {
             val mine = Bean.keys()
@@ -564,12 +573,13 @@ class BeanSync(private val tag: String, private val stateFile: File, private val
             0x1A0A -> if (x != null && (p.size < 9 || Bean.u32(p, 5).let { it == 0L || it == x.file })) complete(x, p.getOrNull(0)?.toInt()?.and(255) ?: 0)
             0x1A06 -> if (p.size >= 4) {  // a new file: recording began, or the bean went on in the next file
                 val open = Bean.u32(p, 0)
+                val naturalRollover = x != null && liveFile == x.file && recording && !paused
                 paused = false
                 if (x != null && x.live && x.file != open) {
                     // The bean may skip 1A/0A at rollover: flush as usual, fetch the old tail after stop.
                     complete(x, 0, "；豆子开始录新文件 $open，缺的停录后补传")
                     liveAgain = 0
-                    throw Again("file ${x.file}: rolled over to $open")
+                    throw Again("file ${x.file}: rolled over to $open", naturalRollover = naturalRollover)
                 }
                 recording = true
                 listing = Bean.Listing(listing.files, open)
@@ -735,7 +745,7 @@ class BeanSync(private val tag: String, private val stateFile: File, private val
     private fun rest(f: F, from: Long): Long = f.have.firstOrNull { it[0] > from && it[1] - it[0] >= REST_UNITS }?.get(0) ?: -1
 
     /** The session ends on purpose: the link goes, which is how a transfer stops early; BeanLink connects again. */
-    class Again(why: String) : Exception(why)
+    class Again(why: String, val naturalRollover: Boolean = false) : Exception(why)
 
     private fun send(frame: ByteArray) {
         check(Bean.allowed(frame, deletable)) { "not sent: ${Bean.hex(frame)}" }  // the last check before the radio
