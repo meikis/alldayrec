@@ -26,6 +26,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 import anyio
 import anyio.to_thread
 from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse
 
 from alldayrec import addresses
 from alldayrec import asr
@@ -53,6 +54,7 @@ from alldayrec.device_pipeline import pipeline
 from alldayrec.monitor import balance_loop, loop_stalls, metrics_loop, status_loop
 from alldayrec.routes_speakers import voices_loop
 from alldayrec.summaries import RECAP_AT, recap_loop, summary_worker
+from alldayrec.late import processor as late_processor
 from alldayrec.tenant import T
 
 HERE = Path(__file__).resolve().parent
@@ -88,7 +90,7 @@ async def run_tenant(t: tenant.Tenant):
     t.recordings.mkdir(parents=True, exist_ok=True)
     with anyio.CancelScope() as t.scope:
         async with anyio.create_task_group() as t.tg:
-            for name, fn in (("pipeline", pipelines), ("status", status_loop), ("summary", summary_worker), ("voices", voices_loop),
+            for name, fn in (("pipeline", pipelines), ("status", status_loop), ("summary", summary_worker), ("voices", voices_loop), ("late", late_processor),
                              *((("recap", recap_loop),) if RECAP_AT else ())):
                 t.tg.start_soon(supervised, name, fn, name=f"{name}:{t.id}")
 
@@ -130,6 +132,12 @@ async def lasting(device: str):
             log.exception("pipeline %s ended", device)
             ws.note(f"{device} 的处理任务退出：{threads.first(e)!r}"[:140] + f"，{RESTART_S} s 后重来", "error")
         await anyio.sleep(RESTART_S)
+
+
+@app.exception_handler(Exception)
+async def server_error(request, exc):
+    # ServerErrorMiddleware is outside auth.Tenants, including its send wrapper.
+    return PlainTextResponse("Internal Server Error", status_code=500, headers={"Cache-Control": "no-store"})
 
 
 app.add_middleware(perf.Requests)  # inside Tenants (added after it): each request's tenant is known
@@ -206,7 +214,8 @@ def main():
     import uvicorn
     # a page's WebSocket would hold a stop for good: 5 s, then the lifespan cancels every task (pipelines resume from
     # their finalized time on the next start)
-    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=args.port, log_level="warning", timeout_graceful_shutdown=5)
+    uvicorn.run(app, host=os.environ.get("HOST", "127.0.0.1"), port=args.port, log_level="warning", access_log=False,
+                timeout_graceful_shutdown=5)
 
 
 if __name__ == "__main__":

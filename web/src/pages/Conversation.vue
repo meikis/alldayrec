@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // One conversation: its title, time and people, then two tabs. 摘要 (the default): how much recording it rests on, the
-// summary, todos, decisions, each person's points, topics (让 AI 做的事 and each topic's points folded under their
-// heading, a tap opens them); ▶ on them plays about 10 s of the sentence they cite, its time opens 原文 there
+// summary (one sentence since prompt v11, the lead), topics with their points (a tap on a title folds it), todos,
+// decisions, each person's points, 让 AI 做的事 (folded under its heading); speaker labels in what the model wrote read
+// like the header's (labelText); ▶ on them plays about 10 s of the sentence they cite, its time opens 原文 there
 // (QuoteAt). 原文: who spoke how much, the sentences, a player at the bottom that keeps the sentence playing lit and in
 // view. The tab is in the query (?tab=transcript) so back and forward step through it; ?at=<time> or #<time> from
 // another page opens 原文 there. Renaming, the speaker suggestions, a new summary and a correction are in the ⋯ menu;
@@ -49,7 +50,7 @@ import { dayLabel } from "../lib/calendar";
 import { useDismiss } from "../lib/dismiss";
 import { useSocket } from "../lib/socket";
 import { useMutation } from "../lib/mutation";
-import { likeness, speakerColor, speakerLabel } from "../lib/speakers";
+import { labelText, likeness, speakerColor, speakerLabel } from "../lib/speakers";
 import { loadStars } from "../lib/stars";
 import { toast } from "../lib/toast";
 import { markOf } from "../lib/todos";
@@ -74,6 +75,10 @@ async function load() {
     const x = await get<NonNullable<typeof c.value>>(`/api/conversation/${encodeURIComponent(id)}`);
     if (id !== props.id) return; // another conversation opened meanwhile (back/forward): not its
     c.value = x;
+    if (x.id !== id) {
+      await router.replace({ path: `/c/${encodeURIComponent(x.id)}`, query: route.query, hash: route.hash });
+      return;
+    }
     missing.value = false;
     failed.value = null;
     trackOpen(Date.parse(x.start), Date.parse(x.end), x.device ?? x.rows.find((r) => r.source)?.source ?? "");
@@ -84,16 +89,20 @@ async function load() {
   }
 }
 
-// 让 AI 做的事 folds to its heading and each topic to its time and title, the summary's ("s<i>") and the live ones
-// ("l<i>"); what is open stays open across the tabs, until another conversation
+// 让 AI 做的事 folds to its heading. The summary's topics ("s<i>") show their points until a tap folds them, the live
+// ones ("l<i>") fold to their time and title until a tap opens them; flipped: the ones tapped, which stay so across
+// the tabs, until another conversation
 const aiOpen = ref(false);
-const opened = reactive(new Set<string>());
-const flip = (k: string) => void (opened.has(k) ? opened.delete(k) : opened.add(k));
-const allOpen = (p: string, n: number) => [...Array(n).keys()].every((i) => opened.has(p + i));
+const flipped = reactive(new Set<string>());
+const shown = (k: string) => flipped.has(k) !== k.startsWith("s");
+const flip = (k: string) => void (flipped.has(k) ? flipped.delete(k) : flipped.add(k));
+const allOpen = (p: string, n: number) => [...Array(n).keys()].every((i) => shown(p + i));
 function flipAll(p: string, n: number) {
-  const close = allOpen(p, n);
-  for (let i = 0; i < n; i++) void (close ? opened.delete(p + i) : opened.add(p + i));
+  const open = !allOpen(p, n);
+  for (let i = 0; i < n; i++) if (shown(p + i) !== open) flip(p + i);
 }
+// what the model wrote, its S<n> as the header says them
+const said = (x: string) => labelText(x, c.value?.participants);
 
 // the tabs
 type Tab = "summary" | "transcript";
@@ -196,7 +205,7 @@ watch(
     failed.value = null;
     jumped.value = false;
     aiOpen.value = false;
-    opened.clear();
+    flipped.clear();
     sug.value = null;
     allMerges.value = false;
     panel.value = "";
@@ -209,6 +218,11 @@ watch(
   { immediate: true },
 );
 useSocket((m) => {
+  if (m.type === "conversation_removed" && m.id === props.id) {
+    void router.replace({ path: `/c/${encodeURIComponent(m.new)}`, query: route.query, hash: route.hash });
+  } else if (m.type === "conversation" && m.id === props.id) {
+    void reload();
+  }
   if (m.type === "summary" && m.conversation === props.id) {
     load();
     loadSug();
@@ -524,15 +538,38 @@ async function alias(name: string, of: string) {
           }}
         </button>
         <template v-if="s?.status === 'done'">
-          <div v-if="s.summary" class="card summary">{{ s.summary }}</div>
+          <div v-if="s.summary" class="card summary">{{ said(s.summary) }}</div>
           <div v-else-if="!s.model" class="card muted">{{ t("conv.tooShort") }}</div>
+          <section v-if="s.topics?.length" class="card">
+            <div class="hrow">
+              <h3>{{ t("conv.topics") }}</h3>
+              <button
+                v-if="s.topics.length > 1"
+                class="btn-ghost all"
+                @click="flipAll('s', s.topics.length)"
+              >
+                {{ allOpen("s", s.topics.length) ? t("conv.foldAll") : t("conv.openAll") }}
+              </button>
+            </div>
+            <div v-for="(tp, i) in s.topics" :key="i" class="topic">
+              <button class="fold" :aria-expanded="shown('s' + i)" @click="flip('s' + i)">
+                <Icon
+                  :name="shown('s' + i) ? 'chevron-down' : 'chevron-right'"
+                  :size="16"
+                /><b>{{ said(tp.title) }}</b></button
+              ><QuoteAt :at="tp.at" :c="c" @jump="jump" />
+              <ul v-if="shown('s' + i)" class="points">
+                <li v-for="p in tp.points" :key="p">{{ said(p) }}</li>
+              </ul>
+            </div>
+          </section>
           <section v-if="s.todos?.length" class="card">
             <h3>{{ t("conv.todos") }}</h3>
             <ul class="items">
               <li v-for="(td, i) in s.todos" :key="i" class="todo">
                 <TodoMarks v-if="td.id" :id="td.id" :mark="td.mark" />
                 <div class="body">
-                  <div>{{ td.text }}</div>
+                  <div>{{ said(td.text) }}</div>
                   <div class="sub">
                     <span class="who"
                       ><Avatar :name="td.owner" :size="20" />{{
@@ -547,25 +584,11 @@ async function alias(name: string, of: string) {
               </li>
             </ul>
           </section>
-          <section v-if="s.ai_requests?.length" class="card">
-            <h3>
-              <button class="fold" :aria-expanded="aiOpen" @click="aiOpen = !aiOpen">
-                <Icon :name="aiOpen ? 'chevron-down' : 'chevron-right'" :size="16" />{{
-                  t("conv.aiRequests", { n: s.ai_requests.length })
-                }}
-              </button>
-            </h3>
-            <ul v-if="aiOpen" class="items ai">
-              <li v-for="(r, i) in s.ai_requests" :key="i">
-                {{ r.text }}<QuoteAt :at="r.at" :c="c" @jump="jump" />
-              </li>
-            </ul>
-          </section>
           <section v-if="s.decisions?.length" class="card">
             <h3>{{ t("conv.decisions") }}</h3>
             <ul class="items">
               <li v-for="(d, i) in s.decisions" :key="i">
-                {{ d.text }}<QuoteAt :at="d.at" :c="c" @jump="jump" />
+                {{ said(d.text) }}<QuoteAt :at="d.at" :c="c" @jump="jump" />
                 <div v-if="d.quote" class="quote">{{ t("conv.quote", { q: d.quote }) }}</div>
               </li>
             </ul>
@@ -580,33 +603,24 @@ async function alias(name: string, of: string) {
               </div>
               <ul class="points">
                 <li v-for="(x, i) in p.points" :key="x">
-                  {{ x }}<QuoteAt :at="p.points_at?.[i]" :c="c" @jump="jump" />
+                  {{ said(x) }}<QuoteAt :at="p.points_at?.[i]" :c="c" @jump="jump" />
                 </li>
               </ul>
             </div>
           </section>
-          <section v-if="s.topics?.length" class="card">
-            <div class="hrow">
-              <h3>{{ t("conv.topics") }}</h3>
-              <button
-                v-if="s.topics.length > 1"
-                class="btn-ghost all"
-                @click="flipAll('s', s.topics.length)"
-              >
-                {{ allOpen("s", s.topics.length) ? t("conv.foldAll") : t("conv.openAll") }}
+          <section v-if="s.ai_requests?.length" class="card">
+            <h3>
+              <button class="fold" :aria-expanded="aiOpen" @click="aiOpen = !aiOpen">
+                <Icon :name="aiOpen ? 'chevron-down' : 'chevron-right'" :size="16" />{{
+                  t("conv.aiRequests", { n: s.ai_requests.length })
+                }}
               </button>
-            </div>
-            <div v-for="(tp, i) in s.topics" :key="i" class="topic">
-              <button class="fold" :aria-expanded="opened.has('s' + i)" @click="flip('s' + i)">
-                <Icon
-                  :name="opened.has('s' + i) ? 'chevron-down' : 'chevron-right'"
-                  :size="16"
-                /><b>{{ tp.title }}</b></button
-              ><QuoteAt :at="tp.at" :c="c" @jump="jump" />
-              <ul v-if="opened.has('s' + i)" class="points">
-                <li v-for="p in tp.points" :key="p">{{ p }}</li>
-              </ul>
-            </div>
+            </h3>
+            <ul v-if="aiOpen" class="items ai">
+              <li v-for="(r, i) in s.ai_requests" :key="i">
+                {{ said(r.text) }}<QuoteAt :at="r.at" :c="c" @jump="jump" />
+              </li>
+            </ul>
           </section>
         </template>
         <div v-else-if="s?.status === 'failed'" class="card bad failed">
@@ -627,7 +641,8 @@ async function alias(name: string, of: string) {
           </div>
           <Timeline
             :topics="c.timeline.topics"
-            :shown="(i: number) => opened.has('l' + i)"
+            :labels="c.participants"
+            :shown="(i: number) => shown('l' + i)"
             @flip="(i: number) => flip('l' + i)"
             @jump="listen"
           />
@@ -848,6 +863,7 @@ a.person {
 }
 .summary {
   font-size: var(--fs-md);
+  font-weight: 500; /* the lead: one sentence, what mattered most */
 }
 ul.items {
   list-style: none;

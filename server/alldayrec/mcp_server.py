@@ -89,6 +89,7 @@ def conversation(id: str) -> str:
     c = ask.t_conversation(id, with_transcript=False)
     if "error" in c:
         raise Bad("没有这段对话：id 照抄 day / search 结果里的")
+    id = c["id"]
     s, closed = {k: v or [] for k, v in c["summary"].items()}, db.closed_todos()
     out = [brief({**c, "summary": s["summary"] or None})[2:]]
     for p in s["people"]:
@@ -275,6 +276,8 @@ def handle(msg, headers) -> tuple[int, dict | None]:
                 or not isinstance(msg.get("params") or {}, dict):
             return 400, {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}}
         m, p = msg["method"], msg.get("params") or {}
+        if "_meta" in p and not isinstance(p["_meta"], dict):
+            return 400, {"jsonrpc": "2.0", "id": msg.get("id"), "error": {"code": -32600, "message": "_meta must be an object"}}
         if "id" not in msg:
             return 202, None
         v, hv = (p.get("_meta") or {}).get(PV), headers.get("mcp-protocol-version")

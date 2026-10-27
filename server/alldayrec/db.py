@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import json
 import re
+import secrets
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -16,10 +17,13 @@ import numpy as np
 from alldayrec import tenant
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS mcp_links (
+    id TEXT PRIMARY KEY, label TEXT NOT NULL, secret_hash TEXT NOT NULL UNIQUE,
+    prefix TEXT NOT NULL, created_at TEXT NOT NULL, last_used_at TEXT);
 CREATE TABLE IF NOT EXISTS sentences (       -- final rows; a finalization pass replaces the ones starting in [from, to)
     id TEXT NOT NULL, start TEXT NOT NULL, end TEXT NOT NULL, speaker TEXT, speaker_confidence REAL, text TEXT,
     source TEXT, engine TEXT, shown_at TEXT, dictation TEXT,  -- dictation: the app dictated into (history rows)
-    music INTEGER);  -- music: 1 when music.py heard music (no voiceprint taken: its speaker is S?)
+    music INTEGER, late INTEGER NOT NULL DEFAULT 0, late_job INTEGER);  -- late: insert-only rows protected from a live replay
 CREATE INDEX IF NOT EXISTS sentences_start ON sentences(start);
 CREATE INDEX IF NOT EXISTS sentences_id_source ON sentences(id, source);  -- a row by its id (relabel); id first: on (source, id) a
                                                                           -- pass's DELETE (start range and source) took it and walked the device's history
@@ -54,6 +58,18 @@ CREATE TABLE IF NOT EXISTS pieces (           -- uploaded audio pieces, the inge
                                                                                                 -- rms..full: audio.health()
 CREATE INDEX IF NOT EXISTS pieces_device ON pieces(device, start_ms);  -- each device's stream and backlog
 CREATE INDEX IF NOT EXISTS pieces_end ON pieces(device, start_ms + seconds * 1000);  -- where its audio ends: backlog, a stream's start, pending
+CREATE TABLE IF NOT EXISTS late_spans (
+    id INTEGER PRIMARY KEY, device TEXT NOT NULL, start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL,
+    first_ms INTEGER NOT NULL, last_ms INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'waiting',
+    tries INTEGER NOT NULL DEFAULT 0, note TEXT, next_ms INTEGER NOT NULL DEFAULT 0,
+    ready INTEGER NOT NULL DEFAULT 0, done_ms INTEGER, ranges TEXT NOT NULL, seam_ms INTEGER);
+CREATE INDEX IF NOT EXISTS late_spans_queue ON late_spans(status, start_ms);
+CREATE INDEX IF NOT EXISTS late_spans_device ON late_spans(device, status);
+CREATE TABLE IF NOT EXISTS processed_audio (
+    device TEXT NOT NULL, start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL, layer TEXT NOT NULL,
+    PRIMARY KEY(device, start_ms, end_ms, layer));
+CREATE INDEX IF NOT EXISTS processed_audio_range ON processed_audio(device, end_ms);
+CREATE TABLE IF NOT EXISTS conversation_aliases (old TEXT PRIMARY KEY, new TEXT NOT NULL, labels TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS timelines (conversation TEXT PRIMARY KEY, body TEXT NOT NULL);  -- the live analysis as it stood at the close
 CREATE TABLE IF NOT EXISTS feedback (conv TEXT NOT NULL, at TEXT NOT NULL, text TEXT NOT NULL);  -- what the owner says a summary got wrong, read back in batches
 CREATE TABLE IF NOT EXISTS todo_marks (       -- 完成 / 不对 on one todo (todo_ids), at: when; a row dropped is the undo
@@ -137,6 +153,12 @@ def init():
             conn().execute(f"ALTER TABLE pieces ADD COLUMN {col}")
     if "music" not in {r[1] for r in conn().execute("PRAGMA table_info(sentences)")}:  # 10-25: songs kept out of voiceprints
         conn().execute("ALTER TABLE sentences ADD COLUMN music INTEGER")
+    if "late" not in {r[1] for r in conn().execute("PRAGMA table_info(sentences)")}:
+        conn().execute("ALTER TABLE sentences ADD COLUMN late INTEGER NOT NULL DEFAULT 0")
+    if "late_job" not in {r[1] for r in conn().execute("PRAGMA table_info(sentences)")}:
+        conn().execute("ALTER TABLE sentences ADD COLUMN late_job INTEGER")
+    if "seam_ms" not in {r[1] for r in conn().execute("PRAGMA table_info(late_spans)")}:
+        conn().execute("ALTER TABLE late_spans ADD COLUMN seam_ms INTEGER")
     if "level" not in {r[1] for r in conn().execute("PRAGMA table_info(voices)")}:  # 10-14: how loud each voice is
         conn().execute("ALTER TABLE voices ADD COLUMN level REAL")
     for col in ("kind", "dictation_share"):  # 10-24: 口述 (history rows imported as dictation) no longer a kind of its own
@@ -214,13 +236,24 @@ def sentences(lo: str, hi: str, inclusive: bool = False, source: str | None = No
 
 def replace_sentences(c: sqlite3.Connection, lo: str, hi: str, rows: list[dict], source: str):
     """A device's pass replaces only that device's rows: another device may have recorded the same minutes."""
-    c.execute("DELETE FROM sentences WHERE start >= ? AND start < ? AND source = ?", (lo, hi, source))
-    insert_sentences(c, rows)
+    c.execute("DELETE FROM sentences WHERE start >= ? AND start < ? AND source = ? AND late = 0", (lo, hi, source))
+    protected = c.execute("SELECT id, start, end FROM sentences WHERE source = ? AND late = 1 AND start < ? AND end > ?", (source, hi, lo)).fetchall()
+    insert_sentences(c, [r for r in rows if not any(p["id"] == r["id"] or p["start"] < r["end"] and p["end"] > r["start"] for p in protected)])
 
 
 def insert_sentences(c: sqlite3.Connection, rows: list[dict]):
     c.executemany(f"INSERT INTO sentences ({','.join(S_COLS)}) VALUES ({','.join('?' * len(S_COLS))})",
                   [tuple(r.get(k) for k in S_COLS) for r in rows])
+
+
+def processed(device: str, start_ms: int, end_ms: int, layer: str | None = None) -> list[list[int]]:
+    """Committed sample coverage, including pauses; written atomically with its final rows."""
+    return [list(r) for r in conn().execute("SELECT start_ms,end_ms FROM processed_audio WHERE device=? AND start_ms < ? AND end_ms > ? "
+                                           "AND (? IS NULL OR layer=?)", (device, end_ms, start_ms, layer, layer))]
+
+
+def record_processed(t, device: str, ranges: list, layer: str):
+    t.executemany("INSERT OR IGNORE INTO processed_audio VALUES (?,?,?,?)", [(device, a, b, layer) for a, b in ranges if b > a])
 
 
 D_COLS = S_COLS[:-2]  # a draft has no dictation, no music
@@ -260,8 +293,25 @@ def insert_conversation(c: sqlite3.Connection, conv: dict):
 
 
 def conversation(conv_id: str) -> dict | None:
+    conv_id = resolve_conversation(conv_id)
     r = conn().execute("SELECT * FROM conversations WHERE id = ?", (conv_id,)).fetchone()
     return _conversation(r) if r else None
+
+
+def resolve_conversation(cid: str) -> str:
+    """Old conversation links survive a merge, including a chain of merges."""
+    return resolve_voice(cid, "")[0]
+
+
+def resolve_voice(cid: str, label: str) -> tuple[str, str]:
+    seen = set()
+    while cid not in seen:
+        seen.add(cid)
+        r = conn().execute("SELECT new, labels FROM conversation_aliases WHERE old = ?", (cid,)).fetchone()
+        if not r:
+            break
+        cid, label = r[0], json.loads(r[1]).get(label, label)
+    return cid, label
 
 
 def conversations(lo: str | None = None, hi: str | None = None) -> list[dict]:
@@ -325,6 +375,7 @@ def names() -> dict[str, int]:
 
 
 def summary(conv_id: str) -> dict | None:
+    conv_id = resolve_conversation(conv_id)
     r = conn().execute("SELECT body FROM summaries WHERE conversation = ?", (conv_id,)).fetchone()
     return json.loads(r["body"]) if r else None
 
@@ -335,6 +386,7 @@ def put_summary(s: dict, c: sqlite3.Connection | None = None):
 
 
 def timeline(conv_id: str) -> dict | None:
+    conv_id = resolve_conversation(conv_id)
     r = conn().execute("SELECT body FROM timelines WHERE conversation = ?", (conv_id,)).fetchone()
     return json.loads(r["body"]) if r else None
 
@@ -345,11 +397,13 @@ def put_timeline(conv_id: str, body: dict, c: sqlite3.Connection | None = None):
 
 def feedback(conv_id: str | None = None) -> list[dict]:
     """Newest first; every conversation's when none is given."""
+    conv_id = resolve_conversation(conv_id) if conv_id else conv_id
     q = "SELECT * FROM feedback" + (" WHERE conv = ?" if conv_id else "") + " ORDER BY at DESC"
     return [dict(r) for r in conn().execute(q, (conv_id,) if conv_id else ())]
 
 
 def add_feedback(conv_id: str, text: str):
+    conv_id = resolve_conversation(conv_id)
     conn().execute("INSERT INTO feedback VALUES (?, ?, ?)", (conv_id, dt.datetime.now().isoformat(timespec="seconds"), text))
 
 
@@ -359,12 +413,13 @@ SAME_DAY = ("待会", "等下", "一会", "今晚", "晚上", "下午", "今天"
 
 def todo_ids(conv: str, todos: list[dict]) -> list[str]:
     """The ids of a summary's todos, in its order: the conversation and the time the todo was said (else a hash of its
-    text); a later one said at the same time as an earlier one gets #2, #3… Stable while the summary is unchanged."""
+    text); a later one said at the same time gets #2, #3… Regeneration pins identity in each todo's id."""
     seen, out = {}, []
     for t in todos:
         base = f"{conv}:{t.get('at') or hashlib.sha1((conv + (t.get('text') or '')).encode()).hexdigest()[:16]}"
         seen[base] = n = seen.get(base, 0) + 1
-        out.append(base if n == 1 else f"{base}#{n}")
+        pinned = t.get("id")
+        out.append(pinned if isinstance(pinned, str) and pinned.startswith(conv + ":") else base if n == 1 else f"{base}#{n}")
     return out
 
 
@@ -381,7 +436,21 @@ def todo_by_text(conv: str, text: str) -> tuple[str, dict] | None:
 
 def todo(id: str) -> dict | None:
     """The todo with this id, from its conversation's summary."""
+    id = resolve_todo(id)
     return next((t for i, t in _todos(id.split(":", 1)[0]) if i == id), None)
+
+
+def resolve_todo(id: str) -> str:
+    cid = id.split(":", 1)[0]
+    seen = set()
+    while cid not in seen:
+        seen.add(cid)
+        r = conn().execute("SELECT new FROM conversation_aliases WHERE old = ?", (cid,)).fetchone()
+        if not r:
+            break
+        cid = r[0]
+        id = f"{cid}:merged-{hashlib.sha1(id.encode()).hexdigest()[:24]}"
+    return id
 
 
 def closed_todos() -> dict[str, str]:
@@ -391,12 +460,72 @@ def closed_todos() -> dict[str, str]:
 
 def mark_todos(ids: list[str], mark: str | None):
     """Mark these todos done or wrong; None drops their marks (the undo)."""
+    ids = [resolve_todo(i) for i in ids]
     with tx() as c:
         if mark is None:
             c.executemany("DELETE FROM todo_marks WHERE id = ?", [(i,) for i in ids])
         else:
             now = dt.datetime.now().isoformat(timespec="seconds")
             c.executemany("INSERT OR REPLACE INTO todo_marks VALUES (?, ?, ?, ?)", [(i, i.split(":", 1)[0], mark, now) for i in ids])
+
+
+def preserve_todos(conv: str, old: list[dict], new: list[dict], c: sqlite3.Connection) -> list[dict]:
+    """Pin a uniquely matched action to its old ID; keep unmatched marked actions unchanged. Marks never move.
+    Text, else quote, must match uniquely on both sides with the same owner/recipient. New actions get fresh IDs,
+    so a removed action's ID (including a cached recap's) cannot be reused by another action."""
+    marks = {r[0] for r in c.execute("SELECT id FROM todo_marks WHERE conv = ?", (conv,))}
+    before = list(zip(todo_ids(conv, old), old))
+    after = [{k: v for k, v in t.items() if k not in ("id", "mark")} for t in new]
+    used = set()
+    for id, t in before:
+        matches = []
+        for key in ("text", "quote"):
+            def same(n):
+                return t.get(key) and n.get(key) == t[key] and all(n.get(k) == t.get(k) for k in ("owner", "to"))
+            matches = [i for i, n in enumerate(new) if same(n)]
+            if len(matches) == 1 and sum(bool(same(n)) for n in old) == 1:
+                break
+            matches = []
+        if matches and matches[0] not in used:
+            after[matches[0]]["id"] = id
+            used.add(matches[0])
+        elif id in marks:
+            after.append({**t, "id": id})
+    reserved = marks | {i for i, _ in before}
+    for t in after:
+        if "id" not in t:
+            id = f"{conv}:{secrets.token_hex(16)}"
+            while id in reserved:
+                id = f"{conv}:{secrets.token_hex(16)}"
+            t["id"] = id
+        reserved.add(t["id"])
+    return after
+
+
+def rename_todos(conv: str, frm: str, to: str, c: sqlite3.Connection) -> dict:
+    """Apply an authorized full-label rename immediately; record changed fields by pinned ID for merge-safe undo."""
+    s, changed = summary(conv), {}
+    if not s or not s.get("todos"):
+        return changed
+    for id, t in zip(todo_ids(conv, s["todos"]), s["todos"]):
+        t["id"] = id
+        fields = {k: t[k] for k in ("owner", "to") if t.get(k) == frm}
+        if fields:
+            changed[id] = fields
+            t.update({k: to for k in fields})
+    put_summary(s, c)
+    return changed
+
+
+def undo_todo_rename(conv: str, changed: dict, to: str, c: sqlite3.Connection):
+    s = summary(conv)
+    if not s or not changed:
+        return
+    for id, t in zip(todo_ids(conv, s.get("todos") or []), s.get("todos") or []):
+        for k, value in changed.get(id, {}).items():
+            if t.get(k) == to:
+                t[k] = value
+    put_summary(s, c)
 
 
 def todo_view(conv: dict, s: dict, i: str, t: dict, closed: dict, al: dict) -> dict:
@@ -472,7 +601,18 @@ def profile(name: str) -> dict | None:
 
 
 def put_profile(p: dict):
+    p = resolve_references(p)
     conn().execute("INSERT OR REPLACE INTO profiles VALUES (?, ?)", (p["name"], json.dumps(p, ensure_ascii=False)))
+
+
+def resolve_references(value):
+    """A profile call can finish after a merge; canonicalize its structured source citations on write."""
+    if isinstance(value, list):
+        return [resolve_references(x) for x in value]
+    if isinstance(value, dict):
+        return {k: resolve_conversation(v) if k in ("conv", "conversation") and isinstance(v, str)
+                else resolve_references(v) for k, v in value.items()}
+    return value
 
 
 # pieces and state

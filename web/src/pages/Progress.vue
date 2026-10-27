@@ -28,6 +28,7 @@ import {
 } from "../lib/api";
 import { upgradeText } from "../lib/recorderLog";
 import { useSocket } from "../lib/socket";
+import { importLine, showLiveLag } from "../lib/progress";
 
 // What the server is doing per device: how far its audio has arrived, how far it is finalized, what is left and
 // when it should be done; refreshed by the status the socket sends every 2 s.
@@ -81,7 +82,7 @@ onMounted(() => {
   tick = window.setInterval(loadCalls, 60_000);
 });
 onUnmounted(() => clearInterval(tick));
-const KINDS = ["final", "draft", "summary", "hints", "profile", "recap", "live", "ask"];
+const KINDS = ["final", "draft", "late", "summary", "hints", "profile", "recap", "live", "ask"];
 const kind = (k: string) => (KINDS.includes(k) ? t(`progress.kind.${k}`) : k);
 const secs = (ms: number | null) => (ms == null ? "—" : `${(ms / 1000).toFixed(1)} s`);
 const sec = (n?: number | null) => (n == null ? "—" : t("common.sec", { n }));
@@ -191,6 +192,11 @@ const eta = (d: DeviceStatus) => {
   const hm = `${String(end.getHours()).padStart(2, "0")}:${String(end.getMinutes()).padStart(2, "0")}`;
   return t("progress.eta", { span: span(d.eta_s), at: hm });
 };
+const lateLine = (d: DeviceStatus) =>
+  Object.entries(d.late ?? {})
+    .filter(([, v]) => v.spans > 0)
+    .map(([s, v]) => t(`progress.late.${s}`, { n: v.spans, m: v.minutes.toFixed(1) }, v.spans) + (v.note ? ` (${v.note})` : ""))
+    .join(" · ");
 </script>
 
 <template>
@@ -278,21 +284,34 @@ const eta = (d: DeviceStatus) => {
       <div class="grid">
         <span>{{ t("progress.received") }}</span
         ><span>{{ at(d.received_to) }}</span> <span>{{ t("progress.finalized") }}</span
-        ><span>{{ at(d.done_to) }}</span> <span>{{ t("progress.left") }}</span
-        ><span>{{
-          t("progress.leftVal", {
-            left: caughtUp(d) ? "—" : t("progress.leftAudio", { span: span(d.left_s) }),
-            n: d.queued,
-          })
-        }}</span>
-        <template v-if="d.hold"
+        ><span>{{ at(d.done_to) }}</span>
+        <template v-if="d.import_progress">
+          <span>{{ t("progress.import") }}</span
+          ><span>{{ importLine(d) }}</span>
+        </template>
+        <template v-else>
+          <span>{{ t("progress.left") }}</span
+          ><span>{{
+            t("progress.leftVal", {
+              left: caughtUp(d) ? "—" : t("progress.leftAudio", { span: span(d.left_s) }),
+              n: d.queued,
+            })
+          }}</span>
+        </template>
+        <template v-if="d.hold || d.hold_expired"
           ><span>{{ t("progress.catchUp") }}</span
-          ><span>{{ held(d) }}</span></template
+          ><span>{{ d.hold_expired ? holdLeft(d) : held(d) }}</span></template
         >
+        <template v-if="lateLine(d)">
+          <span>{{ t("progress.late.title") }}</span>
+          <span :class="{ bad: d.late?.failed?.spans }">{{ lateLine(d) }}</span>
+        </template>
         <span>{{ t("progress.speed") }}</span
         ><span>{{ d.rate ? t("progress.speedVal", { rate: d.rate }) : "—" }}</span>
-        <span>{{ t("progress.etaLabel") }}</span
-        ><span>{{ caughtUp(d) ? "—" : d.hold ? t("progress.afterCatchUp") : eta(d) }}</span>
+        <template v-if="!d.import_progress || (!d.hold && (d.eta_s ?? 0) > 0)">
+          <span>{{ t("progress.etaLabel") }}</span
+          ><span>{{ caughtUp(d) ? "—" : d.hold ? t("progress.afterCatchUp") : eta(d) }}</span>
+        </template>
         <span>{{ t("progress.diarization") }}</span
         ><span :class="{ bad: d.refine?.error }">{{
           d.refine?.error
@@ -311,8 +330,10 @@ const eta = (d: DeviceStatus) => {
               )
             : t("progress.none")
         }}</span>
-        <span>{{ t("progress.liveLag") }}</span
-        ><span :class="{ bad: (d.arrival?.lag_s ?? 0) > 300 }">{{ arrived(d) }}</span>
+        <template v-if="showLiveLag(d)">
+          <span>{{ t("progress.liveLag") }}</span
+          ><span :class="{ bad: (d.arrival?.lag_s ?? 0) > 300 }">{{ arrived(d) }}</span>
+        </template>
         <span>{{ t("progress.quality") }}</span
         ><span :class="{ bad: noisy(d) }">{{ sound(d) }}</span>
         <template v-if="d.hw">

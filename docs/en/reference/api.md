@@ -71,6 +71,12 @@ Parameters: `name?` is optional; the parentheses give where it goes (query, path
 |---|---|---|
 | `GET` | What /app.apk is: the Android app compares versionCode with its own build number and offers the update. | — |
 
+### `/api/late-backfill`
+
+| Method | Description | Parameters |
+|---|---|---|
+| `POST` | Inspect historical missed speech, or enqueue it. | `days?` (query, integer)<br>`dry_run?` (query, boolean) |
+
 ### `/api/chunks`
 
 | Method | Description | Parameters |
@@ -216,8 +222,21 @@ Parameters: `name?` is optional; the parentheses give where it goes (query, path
 | Method | Description | Parameters |
 |---|---|---|
 | `GET` | No server-sent stream and no sessions to end (2026-07-28). | — |
-| `POST` | Remote MCP for the owner's agents (mcp_server.py), with the same token as every other client: stateless, JSON only. | — |
+| `POST` | Remote MCP, authenticated by a tenant bearer or an MCP-only connection link: stateless, JSON only. | — |
 | `DELETE` | No server-sent stream and no sessions to end (2026-07-28). | — |
+
+### `/api/mcp-links`
+
+| Method | Description | Parameters |
+|---|---|---|
+| `GET` | List this tenant's AI connection links: metadata only, never the secret or its hash. | — |
+| `POST` | Create a revocable MCP-only credential from JSON {label}: returns its path once (201). | — |
+
+### `/api/mcp-links/{link_id}`
+
+| Method | Description | Parameters |
+|---|---|---|
+| `DELETE` | Disable this tenant's link: 204 when calls finish, 202 {pending: true} after 2 s; unknown ids return 404. | `link_id` (path, string) |
 
 ### `/api/recap`
 
@@ -278,7 +297,7 @@ Parameters: `name?` is optional; the parentheses give where it goes (query, path
 
 | Method | Description | Parameters |
 |---|---|---|
-| `POST` | (no docstring) | `conv_id` (path, string) |
+| `POST` | Write a conversation's summary again with the current prompt (重新生成, the backfill script resummarize.py). | `conv_id` (path, string) |
 
 ### `/api/names`
 

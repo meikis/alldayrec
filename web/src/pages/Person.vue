@@ -6,7 +6,7 @@ import Icon from "../components/Icon.vue";
 import { t } from "../i18n";
 import { errorTitle, get, hhmm, post, type Person, type Profile } from "../lib/api";
 import { shiftDay, today } from "../lib/calendar";
-import { speakerLabel } from "../lib/speakers";
+import { labelText, speakerLabel } from "../lib/speakers";
 
 const props = defineProps<{ name: string }>();
 const p = ref<Person | null>(null),
@@ -242,9 +242,9 @@ function anchor(e: MouseEvent, id: string) {
           {{ c.participants.map(speakerLabel).join(t("common.list")) }}</span
         >
         <ul v-if="c.points.length" class="points">
-          <li v-for="x in c.points" :key="x">{{ x }}</li>
+          <li v-for="x in c.points" :key="x">{{ labelText(x, c.participants) }}</li>
         </ul>
-        <p v-else-if="c.summary" class="summary">{{ c.summary }}</p>
+        <p v-else-if="c.summary" class="summary">{{ labelText(c.summary, c.participants) }}</p>
       </section>
       <button v-if="p.conversations.length > shown" class="more" @click="shown += 20">
         {{ t("person.more") }}

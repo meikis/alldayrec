@@ -59,6 +59,7 @@ Used for conversation summaries, to-dos, "ask AI" and the daily recap. Any OpenA
 | `MODELS_DIR` | empty | `DATA_DIR/models` | The model files directory, an absolute, writable path; missing files are downloaded here at startup. Fixed at `/data/models` in Docker |
 | `PORT` | `8770` | `8770` | The port to listen on. Docker Compose fixes it at `8770` |
 | `HOST` | `127.0.0.1` | `127.0.0.1` | The address to listen on; set `0.0.0.0` when the reverse proxy runs on another machine. Docker Compose fixes it at `0.0.0.0` |
+| `HOLD_STALE_S` | `1200` | `1200` | While the phone keeps reporting its backfill hold, resume finals after this many seconds without new audio before it. A silent phone is still waited for up to 12 hours; returning after more than 5 minutes gives fresh grace for its backlog. Later older audio is saved for playback without transcription. Set very high (e.g. `315360000`) to effectively disable the no-progress timeout; `0` expires immediately, it does not disable it |
 | `DRAFT_ENGINE` | empty | same as `ENGINE` | The engine of the draft layer (while a page is open); it can also be `qwen-stream`: while a page is open, the audio streams to Qwen (Bailian qwen-audio-3.1-asr-flash-streaming, with `DASHSCOPE_API_KEY`), so words show as they are said |
 | `ENGINE_FALLBACK` | empty | none | The engine used when `ENGINE` or `DRAFT_ENGINE` fails on a window (402, 451, 5xx, timeout); empty means a retry later |
 | `VOLC_ASR_KEY` | empty | — | The API key of a Volcengine Ark Agent Plan, used by `volc` |
@@ -67,6 +68,8 @@ Used for conversation summaries, to-dos, "ask AI" and the daily recap. Any OpenA
 | `LOCAL_ASR_URL` | empty | the k2-fsa/sherpa-onnx GitHub Release | Where `local` downloads its model tarball (about 136 MB) from; the same tarball on a mirror works too (sha256-checked) |
 | `UI_LANG` | `zh` | `zh` | The language of what the LLM writes (summaries, to-dos, live analysis, the daily recap, "ask AI" answers and more): `zh` or `en`. A `lang` in `tenants.json` wins. The web pages use it too in a browser that hasn't picked a language; the app's UI doesn't change |
 | `RECAP_AT` | `10:00` | `10:00` | The time of day the server writes yesterday's recap; set it empty for no recap |
+| `LATE_SETTLE_S` | `180` | `180` | Seconds after the last extension before late audio is processed; end/hold release settles it immediately. Spans near an open conversation wait for it to close |
+| `LATE_PROCESS_TIMEOUT_S` | `1800` | `1800` | Maximum seconds for one late-audio job; each job contains at most 30 minutes of audio, so processing must be faster than real time (including diarization, RTF < 1); timeouts back off and stop after three attempts, retaining the failure reason |
 | `TZ` | `Asia/Shanghai` | the system time zone | The time zone for conversation dates and `RECAP_AT`. A Docker container's system time zone is UTC; an empty `TZ=` means UTC too |
 | `REFINE_EVERY_S` | `20` | `30` | Draft layer: run once after this many seconds without a pause |
 | `TURN_GAP_S` | `0` | `1.0` | Above 0, joins adjacent sentences of the same speaker less than this many seconds apart into one line; 0 keeps the engine's own sentence split |

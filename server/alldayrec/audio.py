@@ -9,17 +9,20 @@ that sends a backlog of older audio while another one is recording is streamed o
 pieces may overlap (a recorder's card read again over what its phone sent live: both kept); each reader takes every
 moment once (fresh).
 """
+import contextlib
 import datetime as dt
 import io
 import logging
 import os
 import re
+import shutil
 import struct
 import subprocess
 import tempfile
 import threading
 import time
 import wave
+from contextlib import nullcontext
 from pathlib import Path
 
 import anyio
@@ -27,15 +30,19 @@ import anyio.to_thread
 import numpy as np
 
 from alldayrec import db
+from alldayrec import late_store
 from alldayrec import perf
 from alldayrec import threads
+from alldayrec import ws
 from alldayrec.tenant import T
 
 log = logging.getLogger("live")
 SR = 16000
 # the current tenant's recordings dir: T().recordings; per device, the start of the last piece its reader has finished
 # with (later ones are queued): T().read_to
-HOLD_MAX_S = 12 * 3600  # a hold not said again for this long is let go: a phone that never comes back must not stop finals for good
+HOLD_MAX_S = 12 * 3600  # total life of one hold boundary, including silence, reconnects and progress
+HOLD_STALE_S = int(os.environ.get("HOLD_STALE_S", "1200"))  # no older audio arriving while the phone keeps saying hold
+_holds = threading.RLock()  # a hold refresh, older-piece arrival and expiry must preserve each other's persisted state
 _append = threading.Lock()  # uploads are saved in threads (threads.MEDIA): one append (and its index row) at a time
 
 
@@ -141,12 +148,12 @@ def primed(prev: bytes, body: bytes) -> bytes:
     return ogg(prev + ps[2:], ms, PREROLL * ms * 48, ps[0][9])
 
 
-def before(device: str, start_ms: int) -> bytes | None:
+def before(device: str, start_ms: int, max_bytes: int | None = None) -> bytes | None:
     """The stored Ogg piece of `device` that ends where start_ms begins (within a frame), as uploaded; None after a gap."""
     p = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms < ? ORDER BY start_ms DESC LIMIT 1", (device, start_ms)).fetchone()
     if p is None or not p["path"].endswith(".ogg") or abs(p["start_ms"] + p["seconds"] * 1000 - start_ms) >= 10:
         return None
-    return read(p)
+    return None if max_bytes is not None and p["size"] > max_bytes else read(p)
 
 
 def decode(body: bytes, aac: bool = False, n: int | None = None, prev: bytes | None = None) -> np.ndarray | None:
@@ -216,12 +223,14 @@ def append(path: Path, body: bytes) -> int:
     return pos
 
 
-def save(device: str, start_ms: int, body: bytes, content_type: str, n: int | None = None) -> float | None:
+def save(device: str, start_ms: int, body: bytes, content_type: str, n: int | None = None, report: dict | None = None) -> float | None:
     """Keeps one uploaded piece (start_ms: its device time, n: the samples its client wrote, when it says); returns
     its seconds, None when it is not audio. It is on disk and in the index before this returns, so the client may
     delete its copy once told so. Of a piece sent again (same device and start) the longer copy (in bytes) is kept: a
     resend as long or shorter only gets the kept copy's seconds back; a longer one replaces the row, appended to the
     hour file (an Android batch retried with more pieces after the answer to the first try was lost)."""
+    if report is not None:
+        report["late"] = False  # the upload's note uses the save transaction, not a cursor read after the await
     kept = lambda: db.conn().execute("SELECT seconds FROM pieces WHERE device = ? AND start_ms = ? AND size >= ?",
                                      (device, start_ms, len(body))).fetchone()
     if r := kept():
@@ -239,10 +248,252 @@ def save(device: str, start_ms: int, body: bytes, content_type: str, n: int | No
         if r := kept():  # the same piece in two requests at once
             return r[0]
         pos = append(path, body)
-        db.conn().execute("INSERT OR REPLACE INTO pieces (device, start_ms, seconds, path, pos, size, n, received_ms, rms, hum, zero_ms, full) "
+        received = int(time.time() * 1000)
+        with db.tx() as t:
+            queued_late = late_store.record(t, device, start_ms, start_ms + round(len(x) * 1000 / SR), received)
+            if report is not None:
+                report["late"] = queued_late
+            t.execute("INSERT OR REPLACE INTO pieces (device, start_ms, seconds, path, pos, size, n, received_ms, rms, hum, zero_ms, full) "
                           "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                          (device, start_ms, round(len(x) / SR, 3), str(path), pos, len(body), n, int(time.time() * 1000), *h))
+                          (device, start_ms, round(len(x) / SR, 3), str(path), pos, len(body), n, received, *h))
+        with _holds:
+            held = db.kv(f"hold:{device}")
+            if held and start_ms < held["at"] and not held.get("released"):
+                held["progress"] = time.time()
+                db.put_kv(f"hold:{device}", held)
     return len(x) / SR
+
+
+BLOCK_S = 10  # long files: bounded decode/health/VAD working sets
+WHOLE_S = 300  # keep ordinary device pieces and <=5-minute imports on their existing read path
+COPY_BYTES = 1024 * 1024
+DECODE_IDLE_S = 300  # no PCM progress, not a limit on the recording's duration
+DECODE_ATTEMPTS = 3
+
+
+class DecoderTerminated(RuntimeError):
+    """The decoder subprocess exited because of a signal."""
+
+
+def decode_process(args, output):
+    """Own the PCM writes so storage failures have a real OSError errno.
+    Supervise progress instead of imposing a total runtime on long recordings.
+    """
+    async def run():
+        async with await anyio.open_process(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+            try:
+                while True:
+                    try:
+                        with anyio.fail_after(DECODE_IDLE_S):
+                            data = await process.stdout.receive(COPY_BYTES)
+                    except anyio.EndOfStream:
+                        break
+                    output.write(data)
+                with anyio.fail_after(DECODE_IDLE_S):
+                    code = await process.wait()
+                output.flush()
+            except BaseException as exc:
+                if process.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+                if isinstance(exc, TimeoutError):
+                    raise subprocess.TimeoutExpired(args, DECODE_IDLE_S) from None
+                raise
+        if code < 0:
+            raise DecoderTerminated(f"audio decoder terminated by signal {-code}")
+        return code
+    # This API is synchronous (also used by offline readers); in the HTTP path
+    # its caller already runs in the bounded media pool, away from the event loop.
+    return anyio.run(run)
+
+
+@contextlib.contextmanager
+def decoded_file(source, aac=False, n=None, prev=None):
+    """Seekable upload -> disk PCM, with the same priming and AAC trimming as decode().
+    stdout/stderr never accumulate in RAM, even for a small compressed file lasting hours.
+    """
+    with tempfile.NamedTemporaryFile() as pcm, tempfile.NamedTemporaryFile() as priming:
+        source.seek(0)
+        if prev is not None:
+            body = source.read(COPY_BYTES + 1)
+            source.seek(0)
+            if len(body) <= COPY_BYTES:
+                priming.write(primed(prev, body))
+                priming.flush()
+                source = priming
+        source.seek(0)
+        mov = source.read(8)[4:8] == b"ftyp"
+        source.seek(0)
+        args = ["ffmpeg", "-nostdin", "-v", "error", "-threads", "1", *(["-f", "mov"] if mov else []),
+                "-i", source.name, "-f", "s16le", "-ac", "1", "-ar", str(SR), "pipe:1"]
+        code = decode_process(args, pcm)
+        count = os.fstat(pcm.fileno()).st_size // 2
+        if code or not count:
+            yield None
+            return
+        lo = AAC_DELAY if aac and (n or count > AAC_DELAY + AAC_FRAME) else 0
+        hi = min(count, AAC_DELAY + n) if aac and n else count - AAC_FRAME // 2 if aac and lo else count
+        pcm.seek(lo * 2)
+        yield pcm, max(0, hi - lo)
+
+
+def pcm_blocks(pcm, count):
+    """Owned arrays: no view can retain the rest of a file behind a short tail."""
+    while count > 0:
+        x = np.frombuffer(pcm.read(min(count, BLOCK_S * SR) * 2), np.int16)
+        if not len(x):
+            raise OSError("decoded audio ended early")
+        count -= len(x)
+        yield x
+
+
+def file_health(pcm, count):
+    """health() in bounded blocks, carrying zero runs over block boundaries."""
+    energy = hum = full = zeros = run = 0
+    for x in pcm_blocks(pcm, count):
+        f = x.astype(np.float64)
+        energy += np.dot(f, f)
+        hum += sum((2 * np.abs(f[i:i + SR] @ HUM[:len(f[i:i + SR])]) ** 2).sum() / len(f[i:i + SR])
+                   for i in range(0, len(f), SR))
+        full += int(np.count_nonzero((x >= 32767) | (x <= -32767)))
+        if x[0] != 0:
+            zeros += run if run >= ZERO_RUN else 0
+            run = 0
+        edges = np.flatnonzero(np.diff(np.r_[0, x == 0, 0]))
+        carried, run = run, 0
+        for a, b in zip(edges[::2], edges[1::2]):
+            length = b - a + (carried if a == 0 else 0)
+            if b == len(x):
+                run = length
+            elif length >= ZERO_RUN:
+                zeros += length
+    zeros += run if run >= ZERO_RUN else 0
+    dbfs = lambda ms: round(10 * np.log10(max(ms, 1e-3) / 32768 ** 2), 1)
+    return dbfs(energy / max(count, 1)), dbfs(hum / max(count, 1)), zeros * 1000 // SR, full
+
+
+def save_file(device, start_ms, source, content_type, n=None, report=None):
+    """HTTP upload already spooled to disk; retain the original bytes and one pieces row.
+    A failed decode publishes no row, so retrying never exposes a partial import to the pipeline.
+    """
+    if report is not None:
+        report["late"] = False
+    size = os.fstat(source.fileno()).st_size
+    kept = lambda: db.conn().execute("SELECT seconds FROM pieces WHERE device = ? AND start_ms = ? AND size >= ?",
+                                     (device, start_ms, size)).fetchone()
+    if r := kept():
+        return r[0]
+    ext = {"audio/ogg": "ogg", "audio/webm": "webm", "audio/aac": "aac"}.get(content_type.split(";")[0], "bin")
+    prev = before(device, start_ms, COPY_BYTES) if ext == "ogg" and size <= COPY_BYTES else None
+    with decoded_file(source, ext == "aac", n, prev) as decoded:
+        if decoded is None:
+            path = T().recordings / "rejected" / re.sub(r"[^\w.-]", "_", device) / f"{start_ms}.{ext}"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            source.seek(0)
+            with path.open("wb") as out:
+                shutil.copyfileobj(source, out, COPY_BYTES)
+            return None
+        pcm, count = decoded
+        h = file_health(pcm, count)
+    path = hour_file(device, start_ms, ext)
+    with _append:
+        if r := kept():
+            return r[0]
+        dest = T().recordings / path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        source.seek(0)
+        with dest.open("ab") as out:
+            pos = out.tell()
+            shutil.copyfileobj(source, out, COPY_BYTES)
+            out.flush()
+            os.fsync(out.fileno())
+        directory = os.open(dest.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        received = int(time.time() * 1000)
+        with db.tx() as t:
+            is_late = late_store.record(t, device, start_ms, start_ms + round(count * 1000 / SR), received)
+            t.execute("INSERT OR REPLACE INTO pieces (device, start_ms, seconds, path, pos, size, n, received_ms, rms, hum, zero_ms, full) "
+                      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      (device, start_ms, round(count / SR, 3), str(path), pos, size, n, received, *h))
+        if report is not None:
+            report["late"] = is_late
+        with _holds:
+            held = db.kv(f"hold:{device}")
+            if held and start_ms < held["at"] and not held.get("released"):
+                held["progress"] = time.time()
+                db.put_kv(f"hold:{device}", held)
+    return count / SR
+
+
+@contextlib.contextmanager
+def piece_file(p):
+    """Isolate one indexed piece from its append-only hour file, in bounded copies."""
+    with tempfile.NamedTemporaryFile() as source:
+        with open(T().recordings / p["path"], "rb") as stored:
+            stored.seek(p["pos"])
+            left = p["size"]
+            while left:
+                data = stored.read(min(left, COPY_BYTES))
+                if not data:
+                    raise OSError("stored audio ended early")
+                source.write(data)
+                left -= len(data)
+        source.flush()
+        yield source
+
+
+class StoredDecodeError(ValueError):
+    """The decoder returned no usable audio for an indexed piece."""
+
+
+@contextlib.contextmanager
+def piece_blocks(p, end):
+    """Long stored files decoded on disk, then read at the consumer's pace (including its backpressure)."""
+    with piece_file(p) as source:
+        with decoded_file(source, p["path"].endswith(".aac"), p["n"]) as decoded:
+            if decoded is None:
+                raise StoredDecodeError("stored audio could not be decoded")
+            pcm, count = decoded
+            skip = max(0, round((end - p["start_ms"]) * SR / 1000))
+            pcm.seek(skip * 2, os.SEEK_CUR)
+            yield pcm_blocks(pcm, max(0, count - skip)), skip
+
+
+def piece_window(p, offset, count):
+    """Only decode the requested samples of a long import, with 2 s codec preroll.
+    Short device pieces retain samples()'s exact Opus priming/dehum/AAC behavior.
+    """
+    if p["seconds"] <= WHOLE_S:
+        x = samples(p)
+        return None if x is None else x[offset:offset + count]
+    if p["path"].endswith(".aac"):
+        offset += AAC_DELAY
+    seek = max(0, offset // SR - 2)
+    with piece_file(p) as source, tempfile.TemporaryFile() as pcm:
+        source.seek(0)
+        header = source.read(512)
+        # Ogg's first packet identifies the codec, even for an upload stored as
+        # .bin. ffmpeg's FLAC-in-Ogg input seek can misalign data and timestamps.
+        if header.startswith(b"OggS") and len(header) >= 27 and header[27 + header[26]:].startswith(b"\x7fFLAC"):
+            with decoded_file(source) as decoded:
+                if decoded is None:
+                    return None
+                decoded_pcm, _ = decoded
+                decoded_pcm.seek(offset * 2, os.SEEK_CUR)
+                return np.frombuffer(decoded_pcm.read(count * 2), np.int16)
+        mov = header[4:8] == b"ftyp"
+        args = ["ffmpeg", "-nostdin", "-v", "error", "-threads", "1", *(["-ss", str(seek)] if seek else []),
+                *(["-f", "mov"] if mov else []), "-i", source.name,
+                "-af", f"aresample={SR}:first_pts=0,atrim=start_sample={offset - seek * SR},asetpts=PTS-STARTPTS",
+                "-t", str(count / SR),
+                "-f", "s16le", "-ac", "1", "-ar", str(SR), "pipe:1"]
+        if decode_process(args, pcm):
+            return None
+        pcm.seek(0)
+        return np.frombuffer(pcm.read(count * 2), np.int16)
 
 
 def read(p) -> bytes:
@@ -361,19 +612,83 @@ def hold(device: str, at_ms: int | None):
     sends what is said now): the device's queue (stream without edge_s) hands out nothing from at_ms on until
     that audio is in, so none of it arrives behind the reader. None: nothing older is coming. Every upload says it
     again; kept across a restart."""
-    db.put_kv(f"hold:{device}", None if at_ms is None else {"at": at_ms, "seen": time.time()})
+    with _holds:
+        h = db.kv(f"hold:{device}")
+        released = at_ms is None and h is not None
+        now = time.time()
+        if at_ms is None:
+            h = None
+        elif h and h["at"] == at_ms:
+            h.setdefault("since", h["seen"])  # a legacy hold's earliest known contact, before seen is refreshed
+            if now - h["seen"] > 5 * 60:
+                h["progress"] = now  # reconnect: live pieces upload first, so give the backlog a fresh grace period
+            h.setdefault("progress", now)  # a pre-timeout store gets one full grace period after upgrade
+            h["seen"] = now  # repeating a hold does not mean older audio made progress, or rearm an expired hold
+        else:
+            h = {"at": at_ms, "since": now, "seen": now, "progress": now}
+        db.put_kv(f"hold:{device}", h)
+    if released:
+        late_store.release(device)
 
 
 def held(device: str) -> int | None:
-    """Where the device's queue waits (unix ms); None when it does not (no hold, or one not said for HOLD_MAX_S)."""
+    """Where finals wait (unix ms). The no-progress clock advances only as the phone repeats the hold.
+    New older audio or a reconnect renews stale grace, within HOLD_MAX_S from this boundary's first set.
+    Expiry is persisted: repeated uploads and restarts cannot rearm the same hold or repeat its warning."""
+    with _holds:
+        h = db.kv(f"hold:{device}")
+        if not h or h.get("released"):
+            return None
+        if "since" not in h:
+            h["since"] = h["seen"]
+            db.put_kv(f"hold:{device}", h)
+        if time.time() - h["since"] >= HOLD_MAX_S:
+            h["released"] = "max"
+            db.put_kv(f"hold:{device}", h)
+            late_store.release(device)
+            return None
+        done = db.kv(f"finalized_to:{device}")
+        if done and int(dt.datetime.fromisoformat(done).timestamp() * 1000) >= h["at"]:
+            return None  # already passed: late pieces cannot be put back in front of the reader
+        if "progress" not in h:
+            h["progress"] = time.time()
+            db.put_kv(f"hold:{device}", h)
+        if h["seen"] - h["progress"] < HOLD_STALE_S:
+            return h["at"]
+        h.update(released="stale", stale_s=HOLD_STALE_S)
+        db.put_kv(f"hold:{device}", h)
+    late_store.release(device)
+    text = f"{device}：补传等了 {HOLD_STALE_S / 60:g} 分钟没有进展，先定稿；之后到的更早录音会补转写"
+    log.warning("%s", text)
+    # monitor.status runs in an AnyIO worker; ws.note schedules its broadcast on the tenant's event loop.
+    if T().tg:
+        try:
+            anyio.get_current_task()
+        except RuntimeError:
+            anyio.from_thread.run_sync(ws.note, text, "warn")
+        else:
+            ws.note(text, "warn")
+    else:
+        ws.note(text, "warn")
+    return None
+
+
+def hold_expired(device: str) -> dict | None:
+    """Why the queue stopped waiting, retained until the phone releases or replaces that hold."""
     h = db.kv(f"hold:{device}")
-    return h["at"] if h and time.time() - h["seen"] < HOLD_MAX_S else None
+    return {"reason": "stale", "seconds": h["stale_s"]} if h and h.get("released") == "stale" else None
 
 
 def hold_seen(device: str) -> float | None:
-    """When a phone last said the device's hold (unix s): it lets go HOLD_MAX_S after that."""
+    """When a phone last said the device's hold (unix s)."""
     h = db.kv(f"hold:{device}")
     return h and h["seen"]
+
+
+def hold_until(device: str) -> float | None:
+    """The hold's total-life deadline (unix s), unchanged by reconnects or older-piece arrivals."""
+    h = db.kv(f"hold:{device}")
+    return h.get("since", h["seen"]) + HOLD_MAX_S if h else None
 
 
 async def stream(device: str, after: dt.datetime | None, edge_s: float | None = None, spent: dict | None = None):
@@ -385,11 +700,14 @@ async def stream(device: str, after: dt.datetime | None, edge_s: float | None = 
     device's queue (read_to, queued). spent: the ms its pieces took to decode (decode_ms) and the seconds it handed out
     (fed_s) added to it (perf.piece)."""
     ms = int(after.timestamp() * 1000) if after else 0
+    if edge_s is None:
+        late_store.reset_reader(device, ms)
     p = db.conn().execute("SELECT * FROM pieces WHERE device = ? AND start_ms + seconds * 1000 > ? ORDER BY start_ms LIMIT 1",
                           (device, ms)).fetchone() if after else None  # None: from 0 all the same, and pieces_end would sort every piece
     # from `after` (or the piece holding it), not from the first piece there is now: that one may be held, older
     # audio after `after` still on its way (a pipeline started mid catch-up took 3 such pieces as late)
-    at, lo, end = min(p["start_ms"] - 1, ms) if p else ms, 0, 0.0
+    at, lo, end = min(p["start_ms"] - 1, ms) if p else ms, 0, float(ms)
+    decode_failures = 0
     while True:
         if edge_s is None:
             T().read_to[device] = at  # the reader came back for more, so the piece it had is done
@@ -398,12 +716,60 @@ async def stream(device: str, after: dt.datetime | None, edge_s: float | None = 
             lo = max(last[0] if last else 0, time.time() * 1000) - edge_s * 1000
         # the edge reader by the end (pieces_end: its last edge_s); by start (pieces_device), an idle device's reader
         # (at 0: nothing handed out yet) walked all its pieces each second
-        p = db.conn().execute(f"SELECT * FROM pieces{' INDEXED BY pieces_end' if edge_s else ''} WHERE device = ? AND start_ms > ? "
-                              "AND start_ms + seconds * 1000 > ? ORDER BY start_ms LIMIT 1", (device, at, lo)).fetchone()
-        if p is not None and edge_s is None and (h := held(device)) is not None and p["start_ms"] >= h:
-            p = None  # older audio is still on its way: it goes first
+        h = held(device) if edge_s is None else None
+        query = (f"SELECT * FROM pieces{' INDEXED BY pieces_end' if edge_s else ''} WHERE device = ? AND start_ms > ? "
+                 "AND start_ms + seconds * 1000 > ? ORDER BY start_ms LIMIT 1")
+        p = db.conn().execute(query, (device, at, lo)).fetchone()
+        if p is None or h is not None and p["start_ms"] >= h:
+            await anyio.sleep(1)
+            continue  # idle readers never take a write lock
+        # Save's late predicate and selection's cursor advance are serialized by SQLite. An upload
+        # cannot slip between the SELECT and advancing the reader and disappear behind it unregistered.
+        with db.tx() if edge_s is None else nullcontext(db.conn()) as t:
+            p = t.execute(query, (device, at, lo)).fetchone()
+            if p is not None and h is not None and p["start_ms"] >= h:
+                p = None
+            if p is not None and edge_s is None:
+                db.put_kv(f"read_to:{device}", p["start_ms"], t)
+                db.put_kv(f"read_end:{device}", round(p["start_ms"] + p["seconds"] * 1000), t)
         if p is None:
             await anyio.sleep(1)
+            continue
+        if p["seconds"] > WHOLE_S:
+            # Keep both decode and each read off the loop. The context owns temporary files;
+            # cancellation/close releases them even while the consumer is waiting on ASR.
+            with contextlib.ExitStack() as stack:
+                with perf.timed(spent, "decode_ms"):
+                    try:
+                        blocks, skip = await anyio.to_thread.run_sync(
+                            lambda: stack.enter_context(piece_blocks(p, max(end, ms, lo))), limiter=threads.MEDIA)
+                    except (subprocess.TimeoutExpired, StoredDecodeError, DecoderTerminated) as exc:
+                        # Entry decodes to disk before handing out any PCM. Later
+                        # block/consumer failures must propagate outside this budget.
+                        reason = "无进展" if isinstance(exc, subprocess.TimeoutExpired) else "失败"
+                        decode_failures += 1
+                        if decode_failures >= DECODE_ATTEMPTS:
+                            ws.note(f"{device}：音频解码连续 {DECODE_ATTEMPTS} 次{reason}，已暂停；请检查文件后重启服务器", "error")
+                            # Keep the piece queued, without skipping audio or letting
+                            # lasting() restart the same failing decode forever. A server
+                            # restart retries from finalized progress with a fresh budget.
+                            await anyio.sleep_forever()
+                        ws.note(f"{device}：音频解码{reason}，60 s 后重试（{decode_failures}/{DECODE_ATTEMPTS}）", "warn")
+                        await anyio.sleep(60)
+                        continue
+                    decode_failures = 0
+                for_block = lambda: next(blocks, None)
+                while (x := await anyio.to_thread.run_sync(for_block, limiter=threads.MEDIA)) is not None:
+                    s = p["start_ms"] + skip * 1000 / SR
+                    skip += len(x)
+                    end = p["start_ms"] + skip * 1000 / SR
+                    ranges = [[s, end]] if edge_s is not None else late_store.subtract([[s, end]], db.processed(device, round(s), round(end), "late"))
+                    for a, b in ranges:
+                        y = x[round((a - s) * SR / 1000):round((b - s) * SR / 1000)]
+                        if len(y):
+                            perf.add(spent, fed_s=len(y) / SR)
+                            yield dt.datetime.fromtimestamp(a / 1000), y
+            at = p["start_ms"]
             continue
         with perf.timed(spent, "decode_ms"):
             got = await anyio.to_thread.run_sync(fresh, p, end, limiter=threads.MEDIA)
@@ -411,8 +777,12 @@ async def stream(device: str, after: dt.datetime | None, edge_s: float | None = 
         if got is not None:
             s, x = got
             end = s + len(x) * 1000 / SR
-            perf.add(spent, fed_s=len(x) / SR)
-            yield dt.datetime.fromtimestamp(s / 1000), x
+            ranges = [[s, end]] if edge_s is not None else late_store.subtract([[s, end]], db.processed(device, round(s), round(end), "late"))
+            for a, b in ranges:
+                y = x[round((a - s) * SR / 1000):round((b - s) * SR / 1000)]
+                if len(y):
+                    perf.add(spent, fed_s=len(y) / SR)
+                    yield dt.datetime.fromtimestamp(a / 1000), y
 
 
 def cut(a: dt.datetime, b: dt.datetime, fmt: str, device: str | None = None) -> bytes | None:
@@ -422,16 +792,46 @@ def cut(a: dt.datetime, b: dt.datetime, fmt: str, device: str | None = None) -> 
     pieces = db.conn().execute(
         "SELECT * FROM pieces WHERE start_ms <= ? AND start_ms + seconds * 1000 >= ? AND (? IS NULL OR device = ?) ORDER BY start_ms",
         (b_ms, a_ms, device, device)).fetchall()
-    xs, end = [], {}
+    xs, end, drop = [], {}, None
+    need = int(((b - a).total_seconds() + 0.4) * SR)
     for p in pieces:
-        if got := fresh(p, end.get(p["device"], 0.0)):
-            end[p["device"]] = got[0] + len(got[1]) * 1000 / SR
-            xs.append(got)
+        previous = end.get(p["device"], 0.0)
+        if p["start_ms"] + p["seconds"] * 1000 <= previous:
+            continue
+        skip = max(0, round((previous - p["start_ms"]) * SR / 1000))
+        if p["seconds"] <= WHOLE_S:
+            got = fresh(p, previous)
+            if got is None:
+                continue
+            start, x = got
+            count = len(x)
+        else:
+            start = p["start_ms"] + skip * 1000 / SR
+            count = max(0, round(p["seconds"] * SR) - skip)
+            x = None
+        end[p["device"]] = start + count * 1000 / SR
+        if drop is None:
+            drop = int(max(0.0, (a_ms - start) / 1000 - 0.2) * SR)
+        if x is not None and drop >= count:
+            drop -= count
+            continue
+        # pieces.seconds is rounded to milliseconds; let EOF, rather than that
+        # metadata, decide the final sample of a long file.
+        take = min(need, count - drop) if x is not None else need
+        windowed = x is None
+        x = x[drop:drop + take] if x is not None else piece_window(p, skip + drop, take)
+        if x is not None and len(x):
+            if windowed:
+                end[p["device"]] = start + (drop + len(x)) * 1000 / SR
+            xs.append(x)
+            need -= len(x)
+        drop = 0
+        if need <= 0:
+            break
     if not xs:
         return None
     # concatenated back to back (the small gaps between pieces are ignored)
-    i = int(max(0.0, (a_ms - xs[0][0]) / 1000 - 0.2) * SR)
-    x = np.concatenate([x for _, x in xs])[i:i + int(((b - a).total_seconds() + 0.4) * SR)]
+    x = np.concatenate(xs)
     if not len(x):
         return None
     return x.tobytes() if fmt == "s16le" else wav(x)
@@ -554,6 +954,7 @@ if __name__ == "__main__":  # the stream's order, resume point and late pieces, 
 
     async def held_back():  # 10:05 came first, the phone still has older audio: 10:03 is to go before it
         send, got = anyio.create_memory_object_stream()
+        db.put_kv("finalized_to:phone", None)  # the earlier pending() check's completed recording is not this reader
         hold("phone", M(5))
         with send, got:
             async with anyio.create_task_group() as tg:

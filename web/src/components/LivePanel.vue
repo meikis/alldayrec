@@ -3,7 +3,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 import Timeline from "./Timeline.vue";
 import { t } from "../i18n";
-import { speakerLabel } from "../lib/speakers";
+import { labelText, speakerLabel } from "../lib/speakers";
 import {
   errorTitle,
   hhmm,
@@ -57,6 +57,7 @@ const current = computed(() => {
     null
   );
 });
+const prose = (text: string) => labelText(text, current.value?.participants);
 const said = (s: number) =>
   s < 60 ? t("common.sec", { n: s }) : t("common.minSec", { m: Math.floor(s / 60), s: s % 60 });
 // the head: what it is (label), the newest topic or how long the conversation has gone before there is one (headline)
@@ -215,11 +216,11 @@ watch(
   <div v-if="status && mini" class="mini">
     <Icon class="spark" name="sparkles" :size="16" />
     <div class="mini-text">
-      <b>{{ headline }}</b>
+      <b>{{ prose(headline) }}</b>
       <span v-if="askErr" class="bad" :title="askErrTitle">{{ askErr }}</span>
       <span v-else-if="sub" class="muted">{{ sub }}</span>
       <ul v-if="items.length" class="items">
-        <li v-for="(x, i) in items" :key="i" :class="x.cls">{{ x.text }}</li>
+        <li v-for="(x, i) in items" :key="i" :class="x.cls">{{ prose(x.text) }}</li>
       </ul>
     </div>
     <button
@@ -247,7 +248,7 @@ watch(
             ></span
           ></span
         >
-        <b class="title">{{ headline }}</b>
+        <b class="title">{{ prose(headline) }}</b>
         <span v-if="askErr" class="bad" :title="askErrTitle">{{ askErr }}</span>
       </button>
       <button
@@ -282,11 +283,17 @@ watch(
           )
         }}
       </div>
-      <Timeline :topics="current.topics" open @jump="$emit('jump', $event)" />
+      <Timeline
+        :topics="current.topics"
+        :labels="current.participants"
+        open
+        @jump="$emit('jump', $event)"
+      />
     </div>
     <div
       v-if="current"
       class="grip"
+      data-header-follow-ignore
       role="separator"
       aria-orientation="horizontal"
       :aria-label="t('livePanel.resize')"

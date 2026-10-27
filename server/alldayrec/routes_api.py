@@ -3,6 +3,7 @@ endpoint, recaps and todos, tags, feedback and summaries redone."""
 import datetime as dt
 import json
 import logging
+import time
 
 import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
@@ -15,6 +16,7 @@ from alldayrec import db
 from alldayrec import live
 from alldayrec import local_asr
 from alldayrec import mcp_server
+from alldayrec import mcp_links
 from alldayrec import tenant
 from alldayrec import threads
 from alldayrec.core import conversation_rows, find_conversation, queue_summary, tag_counts
@@ -155,21 +157,67 @@ async def ask_voice(request: Request):
 
 @router.post("/mcp")
 async def mcp(request: Request):
-    """Remote MCP for the owner's agents (mcp_server.py), with the same token as every other client: stateless, JSON only."""
+    """Remote MCP, authenticated by a tenant bearer or an MCP-only connection link: stateless, JSON only."""
     if not mcp_server.origin_ok(request.headers):
         return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32600, "message": "Origin not allowed"}}, 403)
     try:
         msg = await request.json()
     except ValueError:
         return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}, 400)
-    status, out = await anyio.to_thread.run_sync(mcp_server.handle, msg, request.headers, limiter=threads.DB)
-    return Response(status_code=202) if out is None else JSONResponse(out, status)
+    args = (mcp_server.handle, msg, request.headers)
+    if link_id := request.scope.get("mcp_link_id"):
+        args = (mcp_links.handle, link_id, msg, request.headers)
+    status, out = await anyio.to_thread.run_sync(*args, limiter=threads.DB)
+    return Response(status_code=status) if out is None else JSONResponse(out, status)
 
 
 @router.api_route("/mcp", methods=["GET", "DELETE"])
 async def mcp_stream():
     """No server-sent stream and no sessions to end (2026-07-28)."""
     return Response(status_code=405, headers={"Allow": "POST"})
+
+
+@router.get("/api/mcp-links")
+def mcp_links_list():
+    """List this tenant's AI connection links: metadata only, never the secret or its hash."""
+    return JSONResponse(mcp_links.listing(), headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/mcp-links")
+async def mcp_links_create(request: Request):
+    """Create a revocable MCP-only credential from JSON {label}: returns its path once (201)."""
+    if not mcp_server.origin_ok(request.headers):
+        raise HTTPException(403, "Origin not allowed")
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "Invalid JSON")
+    label = body.get("label") if isinstance(body, dict) else None
+    if not isinstance(label, str) or not 1 <= len(label.strip()) <= 80:
+        raise HTTPException(400, "Label must contain 1–80 characters")
+    try:
+        row = await anyio.to_thread.run_sync(mcp_links.create, label.strip(), limiter=threads.DB)
+    except mcp_links.LimitReached:
+        raise HTTPException(409, "[mcp_link_limit] Revoke a connection link before creating another (limit 20)")
+    return JSONResponse(row, status_code=201, headers={"Cache-Control": "no-store"})
+
+
+@router.delete("/api/mcp-links/{link_id}")
+async def mcp_links_revoke(link_id: str, request: Request):
+    """Disable this tenant's link: 204 when calls finish, 202 {pending: true} after 2 s; unknown ids return 404."""
+    if not mcp_server.origin_ok(request.headers):
+        raise HTTPException(403, "Origin not allowed")
+    # Delete before draining: no new execution lease can pass its live check.
+    # Default pool: queued MCP calls must not tie revocation to threads.DB.
+    if not await anyio.to_thread.run_sync(mcp_links.revoke, link_id):
+        raise HTTPException(404, "Link not found")
+    done = False
+    with anyio.move_on_after(mcp_links.REVOKE_WAIT_S):
+        done = await anyio.to_thread.run_sync(mcp_links.drained, link_id, time.monotonic() + mcp_links.REVOKE_WAIT_S,
+                                             abandon_on_cancel=True)
+    if not done:
+        return JSONResponse({"pending": True}, status_code=202, headers={"Cache-Control": "no-store"})
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/api/recap")
@@ -185,11 +233,25 @@ async def recap_get(date: str = ""):
         closed, al, todos = db.closed_todos(), db.aliases(), []
         for x in r["todos"]:
             c, s = db.conversation(x["conv"]), db.summary(x["conv"]) or {}
-            found = (x["id"], db.todo(x["id"])) if x.get("id") else db.todo_by_text(x["conv"], x["text"])  # recaps before 10-24 hold no id
-            v = {**db.todo_view(c, s, *found, closed, al), **x} if c and found and found[1] else x
+            ts = s.get("todos") or []
+            pairs = list(zip(db.todo_ids(x["conv"], ts), ts))
+            # A pinned ID survives rewording, time changes and renames. Legacy unpinned IDs still need a text match.
+            matches = [(i, t) for i, t in pairs if x.get("id") == i == t.get("id")]
+            if not matches:
+                matches = [(i, t) for i, t in pairs if t.get("owner") == "我" and t.get("text") == x["text"]
+                           and all(t.get(k) == x[k] for k in ("to", "due") if k in x)]
+            if c and len(matches) == 1:
+                if matches[0][1].get("owner") != "我":  # a resolved action owned by someone else is not an orphan of mine
+                    continue
+                v = {**x, **db.todo_view(c, s, *matches[0], closed, al)}
+            else:
+                v = {**x, "id": None} if x.get("id") else x
             if v.get("id") not in closed:
                 todos.append(v)
         r["todos"] = todos
+        for h in r.get("highlights") or []:
+            if h.get("conv") and (c := db.conversation(h["conv"])):
+                h["participants"] = c["participants"]
     return r
 
 
@@ -259,6 +321,7 @@ async def conversation(conv_id: str):
     c = find_conversation(conv_id)
     if not c:
         raise HTTPException(404, "no such conversation")
+    conv_id = c["id"]
     s, closed = db.summary(conv_id), db.closed_todos()
     if s and s.get("todos"):  # each todo with its id and mark, for 完成 / 不对 (/api/todos/{id}/mark)
         s["todos"] = [{**t, "id": i, "mark": closed.get(i)} for i, t in zip(db.todo_ids(conv_id, s["todos"]), s["todos"])]
@@ -288,8 +351,10 @@ async def feedback():
 
 @router.post("/api/conversation/{conv_id}/summarize")
 async def resummarize(conv_id: str):
+    """Write a conversation's summary again with the current prompt (重新生成, the backfill script resummarize.py). The
+    old summary stays until the new one is written, and stays if every try fails; the old todos' marks carry over."""
     c = find_conversation(conv_id)
     if not c:
         raise HTTPException(404, "no such conversation")
-    queue_summary(c)
+    queue_summary(c, keep=True)
     return {"status": "pending"}

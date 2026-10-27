@@ -49,7 +49,8 @@
       "analyzing": "正在分析",
       "no_open_conversation": "没有进行中的对话",
       "no_new_speech": "没有新的语音",
-      "bad_audio": "没录到能听的声音，再说一次"
+      "bad_audio": "没录到能听的声音，再说一次",
+      "mcp_link_limit": "最多保留 20 条 AI 连接网址，请先作废一条旧网址"
     }
   },
   "speaker": {
@@ -93,6 +94,7 @@
       "free": "剩 {free} / {total} GB"
     },
     "holdLeft": "手机 {seen} 后没再联系，最晚 {until} 不再等",
+    "holdStale": "补传等了 {minutes} 分钟没有进展，先定稿；之后到的更早录音会补转写",
     "view": "查看",
     "summaryFailed": "摘要生成失败",
     "summaryPending": "摘要生成中…"
@@ -147,7 +149,23 @@
     "warnTools": "用这个连接的会话里，别对联网和 Shell 工具开自动批准：录音里的话可能被当成指令，借这些工具把内容发出去。",
     "warnToken": "Token 能读写这里的全部数据，只放在自己的电脑上。",
     "hideToken": "隐藏 Token",
-    "showToken": "显示 Token"
+    "showToken": "显示 Token",
+    "linkTitle": "AI 连接网址",
+    "linkHow": "Grok Bot、ChatGPT、Dots 等云端 Agent 可直接填入此网址。先在上方选择公网 HTTPS 地址。",
+    "linkTunnel": "用 Cloudflare Tunnel 获取公网地址",
+    "linkLabel": "Agent 名称",
+    "linkPlaceholder": "例如 Grok Bot",
+    "linkCreate": "创建网址",
+    "linkOnce": "完整网址只在这里显示一次，请复制到 Agent 的连接器设置。",
+    "linkHide": "隐藏网址",
+    "linkRevoke": "作废",
+    "linkConfirm": "作废「{label}」的连接网址？这个 Agent 将无法继续访问。",
+    "linkCreated": "创建于 {at}",
+    "linkUsed": "上次使用 {at}",
+    "linkUnused": "尚未使用",
+    "linkSafety": "网址就是密钥，能查询对话和修改待办。每个 Agent 单独创建一个，不再使用时作废。",
+    "linkCopyError": "复制失败，请手动选中并复制网址。",
+    "linkDraining": "连接已作废；已有调用可能继续完成，新的调用已被拒绝。"
   },
   "conv": {
     "regenerating": "摘要重新生成中",
@@ -409,8 +427,7 @@
     "undecodable": "服务器解码不了这个文件",
     "done": "已导入 {n} 个文件。转写完成后，对话出现在：",
     "again": "再导入一批",
-    "history": "导入记录",
-    "transcribing": "转写中，还剩约 {n} 分钟"
+    "history": "导入记录"
   },
   "mediaFold": {
     "line": "媒体 {from}–{to} · {n} 句"
@@ -467,7 +484,8 @@
       "profile": "人物档案",
       "recap": "每日回顾",
       "live": "实时分析",
-      "ask": "问 AI"
+      "ask": "问 AI",
+      "late": "补转写"
     },
     "calls": "{n} 次",
     "failed": "失败 {n}（{list}）",
@@ -521,6 +539,8 @@
     "left": "待处理",
     "leftVal": "{left} · 排队 {n} 块",
     "leftAudio": "{span} 录音",
+    "import": "导入",
+    "importAudio": "已转写 {done} / {total} 分钟音频",
     "catchUp": "补传",
     "speed": "速度",
     "speedVal": "{rate} 倍实时",
@@ -552,7 +572,15 @@
     "summariesVal": "{n} 段对话",
     "noDevices": "还没有设备的处理任务",
     "events": "系统日志",
-    "noEvents": "还没有日志"
+    "noEvents": "还没有日志",
+    "late": {
+      "title": "补转写",
+      "waiting": "等待 {n} 段 · {m} 分钟",
+      "deferred": "对话结束后处理 {n} 段 · {m} 分钟",
+      "processing": "处理中 {n} 段 · {m} 分钟",
+      "failed": "失败 {n} 段 · {m} 分钟",
+      "done": "今天完成 {n} 段 · {m} 分钟"
+    }
   },
   "rec": {
     "ev": {

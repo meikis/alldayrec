@@ -13,7 +13,7 @@ FIELDS = ("points", "decisions", "todos", "open_questions")
 SYSTEM = """你在一段正在进行的对话现场（开会、讨论、聊天、日常生活都算），持续整理议题时间线，帮在场的我随时回顾刚才讲了什么。
 开始时你会先收到今天更早几段对话的总结，只作背景：帮你认出人、事和来龙去脉；时间线只写当前这段对话。
 之后每一轮收到当前的议题列表（#编号 [开始时间] 标题）和刚定稿的一段新转写，每行「[时间] 说话人: 文本」。「我」是录音者本人，S1、S2… 是其他人（同一个人可能被拆成多个标签），S? 是太短没认出来的句子。转写有错别字和同音误识别，按意图理解。
-「我」对电脑或手机上的 AI 助手（Claude、Codex、ChatGPT 等）做语音输入、下指令的话不是会议内容，跳过：特征是祈使句布置任务、提到代码文件日志命令、一口气一长段没人接话。
+所有说话人（「我」、其他标签或姓名）都用同一标准区分听众：对电脑或手机上的 AI 助手（Claude、Codex、ChatGPT 等）做语音输入、下指令的话不是会议内容，跳过。特征是给 AI 布置任务、提到代码文件日志命令、连续说话没人接话；不能仅凭独白或祈使语气把对人的话算成对 AI。夹在 AI 请求之间的对人说话和人类回应，仍按人的对话提取，保留原说话人主体。
 外放的视频、电视、直播、播客、音乐也不是在场的人说的，不写成议题、不写成谁的观点；在场的人围绕它聊起来时，才记成「在看/听什么、大家怎么说」。线上会议和电话不算外放。
 每一轮只输出对时间线的修改，一个 JSON 对象：
 {"ops": [
@@ -106,7 +106,7 @@ async def analyze(state: dict, rows: list[dict]) -> dict:
     res, raw = await complete(state["messages"] + [msg], timeout=120, kind="live")
     topics, next_id = apply(state, res.get("ops"), rows, fresh)
     reply = {"role": "assistant", "content": raw["choices"][0]["message"]["content"]}
-    return {**state, "topics": topics, "next_id": next_id, "fed_to": fresh[-1]["start"],
+    return {**state, "participants": sorted({r["speaker"] for r in rows if r.get("speaker")}), "topics": topics, "next_id": next_id, "fed_to": fresh[-1]["start"],
             "drafted": state.get("drafted") or any(r.get("state") == "draft" for r in fresh),
             "messages": state["messages"] + [msg, reply], "model": raw.get("model"), "usage": raw.get("usage")}
 

@@ -20,6 +20,7 @@ from alldayrec import asr
 from alldayrec import audio
 from alldayrec import core
 from alldayrec import db
+from alldayrec import late_store
 from alldayrec import device_pipeline
 from alldayrec import perf
 from alldayrec import stepfun_asr
@@ -40,18 +41,30 @@ def device_status(device: str, st: PipelineState) -> dict:
     # loop appends to these and clears them (progress it replaces whole)
     lat, fin = list(st.latency if st.drafting else st.final_latency), list(st.final_latency)
     left, received_to = audio.backlog(device, done)
-    hold, seen, arrived = audio.held(device), audio.hold_seen(device), audio.arrival(device)
+    hold, seen, until, arrived = audio.held(device), audio.hold_seen(device), audio.hold_until(device), audio.arrival(device)
     # seconds of audio finalized per second, over the commits of the last 10 min (silence goes fast, speech ~8x)
     rate = (pr[-1][1] - pr[0][1]).total_seconds() / (pr[-1][0] - pr[0][0]) if len(pr) > 1 and pr[-1][0] > pr[0][0] else None
+    import_progress = None
+    if imported(device):
+        total, _ = audio.backlog(device, None)
+        import_progress = {"done_s": round(total - left, 1), "total_s": total}
+        # Recording dates can have gaps: measure finalized audio, not distance along the calendar.
+        rate = None
+        if len(pr) > 1 and pr[-1][0] > pr[0][0] and time.time() - pr[-1][0] < 600:
+            before, _ = audio.backlog(device, pr[0][1])
+            after, _ = audio.backlog(device, pr[-1][1])
+            rate = (before - after) / (pr[-1][0] - pr[0][0])
     return {"device": device, "audio_end": end.isoformat(timespec="seconds") if end else None,
+            "import_progress": import_progress,
             "behind_s": round((dt.datetime.now() - end).total_seconds(), 1) if end else None,
             "queued": audio.queued(device), "done_to": done.isoformat(timespec="seconds") if done else None,
             "received_to": received_to.isoformat(timespec="seconds") if received_to else None, "left_s": left,
             # finalization waits here for older audio the phone is still sending (its hw: backlog_kb, backlog_eta_s)
             "hold": dt.datetime.fromtimestamp(hold / 1000).isoformat(timespec="seconds") if hold else None,
-            # when its phone last said it, and when it is let go without the phone (audio.HOLD_MAX_S)
+            # last contact, and the total-life deadline from the hold's first set (audio.HOLD_MAX_S)
             "hold_seen": dt.datetime.fromtimestamp(seen).isoformat(timespec="seconds") if hold and seen else None,
-            "hold_until": dt.datetime.fromtimestamp(seen + audio.HOLD_MAX_S).isoformat(timespec="seconds") if hold and seen else None,
+            "hold_until": dt.datetime.fromtimestamp(until).isoformat(timespec="seconds") if hold and until is not None else None,
+            "hold_expired": audio.hold_expired(device),
             # its newest audio came in device_pipeline.LIVE_AUDIO_S ago at most: behind_s and the latencies are about now (otherwise
             # behind_s is how long ago it last recorded); an import batch never records, its audio only just came in
             "recording": not imported(device) and bool(arrived) and time.time() * 1000 - arrived["at"] < device_pipeline.LIVE_AUDIO_S * 1000,
@@ -63,7 +76,7 @@ def device_status(device: str, st: PipelineState) -> dict:
             # how far behind what one reads now is: its newest sentence's end to its showing; the median a diagnosis
             "latency_s": lat[-1] if lat else None, "latency_med_s": sorted(lat)[len(lat) // 2] if lat else None,
             "final_latency_s": fin[-1] if fin else None,
-            "arrival": arrived, "sound": sound(device, received_to)}
+            "arrival": arrived, "sound": sound(device, received_to), "late": late_store.status(device)}
 
 
 def sound(device: str, end: dt.datetime | None) -> dict | None:
@@ -98,6 +111,13 @@ def status() -> dict:
     with audio (recorders; the import batches apart), and the pieces still queued over all devices. Its callers run it
     in a thread (threads.DB): its reads of the pieces held the event loop up to 0.8 s under load (10-24)."""
     ds = [{**device_status(d, st), "hw": db.device_status(d)} for d, st in list(T().devices.items())]  # a pipeline may start meanwhile
+    active = {d["device"] for d in ds}
+    for row in db.conn().execute("SELECT DISTINCT device FROM late_spans WHERE status != 'done' OR done_ms >= ?",
+                                 (round(dt.datetime.combine(dt.date.today(), dt.time()).timestamp() * 1000),)):
+        d = row[0]
+        if d not in active:
+            done = db.kv(f"finalized_to:{d}")
+            ds.append({**device_status(d, PipelineState(done_to=dt.datetime.fromisoformat(done) if done else None)), "hw": db.device_status(d)})
     top = max(ds, key=lambda d: d["audio_end"] or "", default={"device": None, "audio_end": None, "behind_s": None, "done_to": None,
                                                                  "last_speech": None, "refine": None, "conversation": None, "latency_s": None,
                                                                  "latency_med_s": None, "final_latency_s": None})

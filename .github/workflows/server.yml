@@ -1,13 +1,30 @@
 name: server
 on:
   pull_request:  # only on PRs: main gets what a green PR ran
-    paths: ['server/**', '.github/workflows/server.yml']
+    paths: ['server/**', 'README.md', 'web/src/pages/Connect.vue', 'web/src/lib/api.ts', '.github/scripts/test_pypi_readme.py', '.github/workflows/server.yml', '.github/workflows/pypi.yml']
 
 concurrency:  # a new push to a PR cancels its run still going
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  mcp-browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: pipx install uv
+      - run: npm install -g pnpm@12.8.1 agent-browser@0.33.2
+      - name: Use runner's preinstalled Chrome
+        run: |  # agent-browser supports a system browser via AGENT_BROWSER_EXECUTABLE_PATH; no APT or browser download
+          chrome="$(command -v google-chrome)"
+          "$chrome" --version
+          echo "AGENT_BROWSER_EXECUTABLE_PATH=$chrome" >> "$GITHUB_ENV"
+      - run: pnpm install --frozen-lockfile && pnpm exec vp build
+        working-directory: web
+      - run: MCP_BROWSER=1 uv run --locked --with pytest pytest -q test_mcp_link_security.py -k browser
+        working-directory: server
+
   server:
     runs-on: ubuntu-24.04
     timeout-minutes: 15  # ~4 min on a hosted runner; one slow run went past 10
@@ -17,6 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1, the job's only action: a runner downloads every action its job names, skipped or not
       - run: |  # the tests encode Opus and AAC pieces; the hosted mirror stalled twice for >10 min, so fail fast and retry
+          if command -v ffmpeg >/dev/null; then ffmpeg -version | head -1; exit 0; fi
           APT="sudo apt-get -q -o Acquire::http::Timeout=20 -o Acquire::Retries=3"
           $APT update && $APT install -yq --no-install-recommends ffmpeg
       - run: pipx install uv  # into /opt/pipx_bin, on the image's PATH
@@ -37,4 +55,6 @@ jobs:
       - run: pipx install uv
       - run: |  # --no-build: every dependency from a wheel, nothing compiled
           uv build
+          uvx twine check dist/*
+          uv run --no-project --with hatchling python ../.github/scripts/test_pypi_readme.py
           uv run --isolated --no-project --no-build --python ${{ matrix.python }} --with dist/alldayrec-*.whl alldayrec --help
