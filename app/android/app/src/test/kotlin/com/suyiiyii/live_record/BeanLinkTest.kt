@@ -658,4 +658,60 @@ class BeanLinkTest {
         }
     }
 
+
+    @Test fun restoredFastPowerAndLegacyKeepOriginalIdentityAcrossCleanupFailure() = restoredIdentity(false)
+    @Test fun cancellingRestoredFastPowerAndLegacyKeepsOriginalIdentityForNextFind() = restoredIdentity(true)
+
+    private fun restoredIdentity(cancel: Boolean) {
+        for (identity in listOf("restored-fast", "restored-power", "legacy")) {
+            // Like PendingIntent: cancel retires a token; reconstructing the same action/data gives a NEW object.
+            data class Token(val identity: String)
+            val original = Token(identity)
+            var factoryToken = original
+            val stopped = mutableListOf<Token>()
+            var failOldStop = true
+            var oldStopReturned = false
+            val owner = BeanScanOwner<Token>({ token ->
+                stopped += token
+                if (token === original) {
+                    if (failOldStop) throw IOException("old scan stop failed")
+                    oldStopReturned = true
+                }
+            }, { token -> if (token === factoryToken) factoryToken = Token(identity) })
+            var restored = false
+            var cancelDuringRestore = cancel
+            var starts = 0
+            lateinit var discovery: BeanDiscovery<String>
+            discovery = BeanDiscovery(name, { 10_000L }, { _, id ->
+                owner.clean()  // Same production rule: finish the owned identity before reconstructing anything.
+                if (!restored) {
+                    owner.own(factoryToken)
+                    if (cancelDuringRestore) throw InterruptedException("cancel during restore")
+                    owner.clean()
+                    restored = true
+                }
+                assertTrue("must explicitly stop the ORIGINAL before a new registration", oldStopReturned)
+                owner.own(Token("new registration"))
+                starts++
+                discovery.deliver(id, name, true, "found")
+                true
+            }, { _, _ -> owner.clean() })
+            discovery.again(BeanSync.Again("rotation", true))
+            if (cancel) {
+                val e = assertThrows(InterruptedException::class.java) { discovery.find(true) { true } }
+                assertTrue(e.suppressed.single() is BeanScanWait.CleanupFailure)
+            } else assertThrows(BeanScanWait.CleanupFailure::class.java) { discovery.find(true) { true } }
+            assertEquals(0, starts)
+            assertTrue(stopped.all { it === original })
+            assertNotSame(original, factoryToken)
+            assertThrows(IllegalStateException::class.java) { owner.own(factoryToken) }
+            val stopsBeforeRetry = stopped.size
+            failOldStop = false; cancelDuringRestore = false
+            assertEquals("found", discovery.find(true) { true })
+            assertSame(original, stopped[stopsBeforeRetry])
+            assertEquals(1, starts)
+            assertTrue(oldStopReturned)
+        }
+    }
+
 }

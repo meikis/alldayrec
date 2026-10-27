@@ -61,6 +61,18 @@ internal fun beanStopScan(stop: () -> Unit, cancel: () -> Unit, diagnostic: (Exc
     }
 }
 
+/** Keep the original platform identity through failures, for both restored and newly started scans. */
+internal class BeanScanOwner<T : Any>(private val stop: (T) -> Unit, private val cancel: (T) -> Unit,
+                                     private val diagnostic: (Exception) -> Unit = {}) {
+    private var owned: T? = null
+    fun own(registration: T) { check(owned == null); owned = registration }
+    fun clean() {
+        val registration = owned ?: return
+        beanStopScan({ stop(registration) }, { cancel(registration) }, diagnostic)
+        owned = null  // A cancelled PI must never be reconstructed in place of an original whose stop failed.
+    }
+}
+
 /** One system scan at a time; duplicate or late deliveries cannot start a second connection. */
 internal class BeanScanWait<T>(private val name: String, private val start: () -> Unit, private val stop: () -> Unit,
                                private val now: () -> Long = { System.nanoTime() / 1_000_000 }) {
@@ -322,16 +334,13 @@ class BeanLink(private val ctx: Context, private val prefs: SharedPreferences, c
     private fun available() = on && !Thread.currentThread().isInterrupted && adapter?.isEnabled == true &&
         prefs.getString("bleName", null) == name
     private var cleanedScans = false
-    private var scanRegistration: Pair<BluetoothLeScanner, PendingIntent>? = null
-
-    private fun stopScan(scanner: BluetoothLeScanner, intent: PendingIntent) =
-        beanStopScan({ scanner.stopScan(intent) }, { intent.cancel() }, { e ->
+    private val scanOwner = BeanScanOwner<Pair<BluetoothLeScanner, PendingIntent>>(
+        { (scanner, intent) -> scanner.stopScan(intent) }, { (_, intent) -> intent.cancel() }, { e ->
             Log.w("live-record", "bean scan cleanup: ${e.javaClass.simpleName}")
         })
 
     private fun stopOwnedScan() {
-        val (scanner, intent) = scanRegistration ?: return
-        try { stopScan(scanner, intent); scanRegistration = null }
+        try { scanOwner.clean() }
         catch (e: Exception) {
             cleanedScans = false
             throw e  // Retain the ORIGINAL PI object for any later explicit cleanup, even after cancel().
@@ -383,17 +392,19 @@ class BeanLink(private val ctx: Context, private val prefs: SharedPreferences, c
             if (!cleanedScans) {
                 for (oldMode in BeanDiscovery.Mode.entries) prefs.getString("beanScan:${oldMode.name}", null)?.let {
                     val old = scanIntent(oldMode, it)
-                    stopScan(scanner, old)
+                    scanOwner.own(scanner to old)
+                    stopOwnedScan()
                 }
                 val legacy = PendingIntent.getBroadcast(ctx, 0,
                     Intent(ctx, BeanScanReceiver::class.java).setAction("${ctx.packageName}.BEAN_SCAN"),
                     PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0))
-                stopScan(scanner, legacy)
+                scanOwner.own(scanner to legacy)
+                stopOwnedScan()
                 cleanedScans = true
             }
             check(prefs.edit().putString("beanScan:${mode.name}", id).commit()) { "cannot retain scan cleanup identity" }
             val intent = scanIntent(mode, id)
-            scanRegistration = scanner to intent
+            scanOwner.own(scanner to intent)
             val error = scanner.startScan(listOf(ScanFilter.Builder().setServiceUuid(ParcelUuid(Bean.SERVICE)).build()),
                 ScanSettings.Builder().setScanMode(if (mode == BeanDiscovery.Mode.FAST) ScanSettings.SCAN_MODE_LOW_LATENCY
                     else ScanSettings.SCAN_MODE_LOW_POWER).setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
