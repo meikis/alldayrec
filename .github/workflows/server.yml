@@ -15,7 +15,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - run: pipx install uv
       - run: npm install -g pnpm@12.8.1 agent-browser@0.33.2
-      - run: agent-browser install --with-deps
+      - name: Use runner's preinstalled Chrome
+        run: |  # agent-browser supports a system browser via AGENT_BROWSER_EXECUTABLE_PATH; no APT or browser download
+          chrome="$(command -v google-chrome)"
+          "$chrome" --version
+          echo "AGENT_BROWSER_EXECUTABLE_PATH=$chrome" >> "$GITHUB_ENV"
       - run: pnpm install --frozen-lockfile && pnpm exec vp build
         working-directory: web
       - run: MCP_BROWSER=1 uv run --locked --with pytest pytest -q test_mcp_link_security.py -k browser
