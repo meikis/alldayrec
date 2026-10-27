@@ -53,5 +53,5 @@ App 的四个底部标签 **时间线**、**实时**、**人物** 显示服务�
 | Token | 租户 token |
 | 扫码登录 | 扫网页 **连接手机** 页的二维码，自动填好地址和 Token 并保存 |
 | 设备名 | 只读，取自系统设置里的手机名称；蓝牙录音设备的音频按设备自己的名字上传 |
-| 本地保留录音 | 上传后在手机上留一份：iOS 在「文件」App › 我的 iPhone › alldayrec › recordings › 日期；安卓在 `Android/data/com.suyiiyii.live_record/files/recordings/日期/` |
+| 本地保留录音 | 上传后在手机上留一份：iOS 在「文件」App › 我的 iPhone › AllDayRec › recordings › 日期；安卓在 `Android/data/com.suyiiyii.live_record/files/recordings/日期/` |
 | 切片长度（服务端下发） | 只读，前台、后台（安卓还有熄屏）时每块音频的秒数，由服务器的 `SLICE_*` 变量决定 |
